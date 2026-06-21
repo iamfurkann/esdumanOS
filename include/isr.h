@@ -18,6 +18,11 @@ typedef struct {
     uint32_t eip, cs, eflags, useresp, ss; 
 } registers_t;
 
+typedef struct {
+    uint32_t locked;
+    int owner_pid;
+} mutex_t;
+
 void isr_handler(registers_t *regs);
 void schedule(registers_t *regs);
 void clean_registers(void);

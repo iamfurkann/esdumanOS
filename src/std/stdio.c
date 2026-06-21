@@ -1,7 +1,13 @@
 #include "stdio.h"
 #include "tty.h"
 
-/* YILDIZ (*) EKLENDİ! Artık kopyası değil, adresin kendisi ilerleyecek */
+extern void mutex_init(void *m);
+extern void mutex_lock(void *m);
+extern void mutex_unlock(void *m);
+
+uint32_t vga_mutex[2] = {0, -1};
+int vga_mutex_initialized = 0;
+
 static int  get_format(const char c, va_list *args) 
 {
     if (c == 'c') return (ft_kputchar(va_arg(*args, int)));
@@ -16,6 +22,13 @@ static int  get_format(const char c, va_list *args)
 }
 
 int printk(const char *format, ...) {
+    if (!vga_mutex_initialized) {
+        mutex_init(&vga_mutex);
+        vga_mutex_initialized = 1;
+    }
+
+    mutex_lock(&vga_mutex);
+
     int     i = 0;
     int     count = 0;
     va_list args;
@@ -34,5 +47,6 @@ int printk(const char *format, ...) {
         i++;
     }
     va_end(args);
+    mutex_unlock(&vga_mutex);
     return (count);
 }

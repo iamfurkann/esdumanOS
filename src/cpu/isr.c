@@ -58,6 +58,8 @@ void save_stack_before_panic(void) {
 
 void isr_handler(registers_t *regs) {
     if (regs->int_no < 32) {
+        extern int multitasking_enabled;
+        multitasking_enabled = 0;
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
 
         printk("\n==================================================\n");

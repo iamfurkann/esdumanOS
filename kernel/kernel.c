@@ -147,6 +147,9 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
     terminal_initialize();
     init_gdt();
     init_idt();
+
+    extern void init_timer(uint32_t freq);
+    init_timer(100);
     
     char time_buffer[20];
     get_time_string(time_buffer);

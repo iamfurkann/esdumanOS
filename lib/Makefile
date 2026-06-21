@@ -3,9 +3,7 @@ OBJS := $(SRCS:.c=.o)
 
 NAME = libc.a
 
-# Ana Makefile'dan gelen CFLAGS'in üzerine, 
-# üst dizindeki include'ları ve mevcut dizini (.) ekliyoruz.
-override CFLAGS += -I ../../include -I .
+override CFLAGS += -I ../include -I .
 
 all: $(NAME)
 

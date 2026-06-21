@@ -10,44 +10,44 @@ CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-stack-p
 export CFLAGS
 
 ASFLAGS = -f elf32
-LDFLAGS = -m elf_i386 -T linker/linker.ld
+LDFLAGS = -m elf_i386 -T arch/x86/linker.ld
 
-OBJS = boot/boot.o \
-        src/kernel/kernel.o \
-        src/kernel/signal.o \
-        src/drivers/tty.o \
-        src/drivers/keyboard.o \
-        src/drivers/ata.o \
-        src/drivers/rtc.o \
-        src/std/stdio.o \
-        src/std/utils.o \
-        src/std/utils2.o \
-        src/std/stack.o \
-        src/cpu/gdt.o  \
-        src/cpu/gdt_s.o \
-        src/cpu/idt.o \
-        src/cpu/idt_s.o \
-        src/cpu/isr.o \
-        src/cpu/timer.o \
-        src/mm/pmm.o \
-        src/mm/paging.o \
-        src/mm/paging_s.o \
-        src/mm/kheap.o \
-        src/tasking/tss.o \
-        src/tasking/user_mode.o \
-        src/tasking/process.o \
-        src/tasking/elf.o \
-        src/fs/vfs.o
+OBJS = arch/x86/boot/boot.o \
+        kernel/kernel.o \
+        kernel/signal.o \
+        kernel/process.o \
+        kernel/elf.o \
+        drivers/tty.o \
+        drivers/keyboard.o \
+        drivers/ata.o \
+        drivers/rtc.o \
+        lib/stdio.o \
+        lib/utils.o \
+        lib/utils2.o \
+        lib/stack.o \
+        arch/x86/cpu/gdt.o  \
+        arch/x86/cpu/gdt_s.o \
+        arch/x86/cpu/idt.o \
+        arch/x86/cpu/idt_s.o \
+        arch/x86/cpu/isr.o \
+        arch/x86/cpu/timer.o \
+        arch/x86/cpu/tss.o \
+        arch/x86/cpu/user_mode.o \
+        mm/pmm.o \
+        mm/paging.o \
+        mm/paging_s.o \
+        mm/kheap.o \
+        fs/vfs.o
 
 BIN = myos.bin
 ISO = myos.iso
-LIBC = src/libc/libc.a
+LIBC = lib/libc.a
 
 all: $(ISO)
 
 # libc.a'nın derlenme kuralı
 $(LIBC):
-	$(MAKE) -C src/libc
+	$(MAKE) -C lib
 
 %.o: %.asm
 	$(AS) $(ASFLAGS) $< -o $@
@@ -66,8 +66,8 @@ $(ISO): $(BIN) grub/grub.cfg
 	grub-mkrescue -o $(ISO) isodir
 
 
-hello.elf: src/user/hello.asm
-	$(AS) -f elf32 src/user/hello.asm -o hello.o
+hello.elf: apps/hello.asm
+	$(AS) -f elf32 apps/hello.asm -o hello.o
 	$(LD) -m elf_i386 hello.o -o hello.elf
 
 run: $(ISO) hello.elf
@@ -80,6 +80,6 @@ run: $(ISO) hello.elf
 	qemu-system-i386 -cdrom $(ISO) -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 
 clean:
-	$(MAKE) -C src/libc clean
+	$(MAKE) -C lib clean
 	rm -f hello.o hello.elf
 	rm -rf $(OBJS) $(BIN) $(ISO) isodir

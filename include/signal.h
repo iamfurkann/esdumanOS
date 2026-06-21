@@ -11,7 +11,7 @@ typedef void (*signal_handler_t)(void);
 typedef struct {
     signal_handler_t handler; /* Çalışacak fonksiyonun adresi */
     uint32_t delay_ticks;     /* Geri sayım sayacı */
-    int is_scheduled;         /* Aktif olarak zamanlandı mı? */
+    uint32_t is_scheduled;         /* Aktif olarak zamanlandı mı? */
 } signal_t;
 
 void init_signals(void);

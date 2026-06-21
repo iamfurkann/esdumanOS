@@ -28,6 +28,7 @@ OBJS = boot/boot.o \
         src/cpu/idt.o \
         src/cpu/idt_s.o \
         src/cpu/isr.o \
+        src/cpu/timer.o \
         src/mm/pmm.o \
         src/mm/paging.o \
         src/mm/paging_s.o \

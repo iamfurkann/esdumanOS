@@ -4,6 +4,18 @@
 #include "io.h"
 #include "signal.h"
 
+#define PIC1_COMMAND 0x20
+#define PIC_EOI		 0x20 //End of Interrupt
+#define IRQ0_TIMER	32
+#define IRQ1_KEYBOARD 33
+#define ISR_SYSCALL 128
+
+#define SYSCALL_EXIT 1
+#define SYSCALL_READ 3
+#define SYSCALL_WRITE 4
+#define SYSCALL_EXEC 5
+#define SYSCALL_YIELD 99
+
 extern void keyboard_interrupt_handler(void);
 extern void timer_interrupt_handler(void);
 
@@ -75,27 +87,27 @@ void isr_handler(registers_t *regs) {
         asm volatile("cli; hlt");
     }
 
-    else if (regs->int_no == 32) {
+    else if (regs->int_no == IRQ0_TIMER) {
         timer_interrupt_handler();
         signal_tick_handler();
 
         extern void schedule(registers_t *regs);
         schedule(regs);
 
-        outb(0x20, 0x20);
+        outb(PIC1_COMMAND, PIC_EOI);
     }
-    else if (regs->int_no == 33) {
+    else if (regs->int_no == IRQ1_KEYBOARD) {
         keyboard_interrupt_handler();
-        outb(0x20, 0x20);
+        outb(PIC1_COMMAND, PIC_EOI);
 
         extern void wakeup_all_tasks(void);
         wakeup_all_tasks();
     }
-    else if (regs->int_no == 128) {
+    else if (regs->int_no == ISR_SYSCALL) {
         extern char get_keyboard_char(void);
         extern void execute_command(char *cmd);
 
-        if (regs->eax == 1) {
+        if (regs->eax == SYSCALL_EXIT) {
             extern void exit_current_process(void);
             extern int current_task;
             
@@ -107,7 +119,7 @@ void isr_handler(registers_t *regs) {
             return;
         }
 
-        if (regs->eax == 3) {
+        if (regs->eax == SYSCALL_READ) {
             char c = get_keyboard_char();
             if (c == 0) {
                 regs->eip -= 2; 
@@ -118,16 +130,14 @@ void isr_handler(registers_t *regs) {
                 regs->eax = (uint32_t)c;
             }
         }
-        else if (regs->eax == 99) {
+        else if (regs->eax == SYSCALL_YIELD) {
             asm volatile("sti; hlt; cli");
         }
-        else if (regs->eax == 4) {
-            /* SYS_WRITE: Ekrana yazı yazma isteği */
+        else if (regs->eax == SYSCALL_WRITE) {
             char *str = (char *)regs->ebx;
             printk("%s", str);
         }
-        else if (regs->eax == 5) {
-            /* SYS_EXEC: Tamamlanan komutu Kernel'a gönderip çalıştır */
+        else if (regs->eax == SYSCALL_EXEC) {
             char *cmd = (char *)regs->ebx;
             execute_command(cmd);
         }

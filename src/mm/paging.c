@@ -19,7 +19,7 @@ void init_paging(void) {
         uint32_t *page_table = (uint32_t *)pmm_alloc_frame();
         for (int j = 0; j < 1024; j++) {
             // Adresleri 1'e 1 eşliyoruz (Virtual == Physical)
-            page_table[j] = ((i * 0x400000) + (j * 0x1000)) | 7;
+            page_table[j] = ((i * 0x400000) + (j * 0x1000)) | (PAGE_PRESENT | PAGE_RW | PAGE_USER);
         }
         page_directory[i] = ((uint32_t)page_table) | 7;
     }

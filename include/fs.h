@@ -7,14 +7,14 @@
 #define MAX_FILES_IN_DIR 8
 
 typedef struct {
-    char filename[MAX_FILENAME];
+    int8_t filename[MAX_FILENAME];
     uint32_t start_sector;
     uint32_t file_size;
     uint32_t is_used;
 } __attribute__((packed)) disk_file_entry_t;
 
 typedef struct {
-    char filename[MAX_FILENAME];
+    int8_t filename[MAX_FILENAME];
     uint32_t start_sector;
     uint32_t file_size;
     uint32_t current_offset;

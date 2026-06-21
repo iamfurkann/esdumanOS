@@ -19,8 +19,8 @@
 
 /*ATA Cihaz Kontrol Portu*/
 #define ATA_PORT_CONTROL 0x3F6
-#define ATA_CMD_WRITE_PIO   0x30  /* YENİ: Diske yazma komutu */
-#define ATA_CMD_CACHE_FLUSH 0xE7  /* YENİ: Diskin önbelleğini zorla yazdır */
+#define ATA_CMD_WRITE_PIO   0x30 
+#define ATA_CMD_CACHE_FLUSH 0xE7
 
 /* ATA Durum (Status) Bayrakları */
 #define ATA_SR_ERR          0x01    // Error

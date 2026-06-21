@@ -3,7 +3,7 @@
 
 #define MAX_TASKS 16
 
-typedef enum { TASK_EMPTY, TASK_RUNNING, TASK_DEAD } task_state_t;
+typedef enum { TASK_EMPTY, TASK_RUNNING, TASK_WAITING, TASK_DEAD } task_state_t;
 
 typedef struct {
     int pid;
@@ -16,11 +16,22 @@ int current_task = -1;
 int multitasking_enabled = 0;
 int next_pid = 0;
 
+int create_process(uint32_t eip, uint32_t esp);
+uint32_t idle_stack[256];
+
+void idle_task_process(void) {
+    while (1) {
+        asm volatile ("int $0x80" : : "a"(99));
+    }
+}
+
 void init_multitasking(void) {
     for (int i = 0; i < MAX_TASKS; i++) {
         tasks[i].state = TASK_EMPTY;
     }
     multitasking_enabled = 1;
+
+    create_process((uint32_t)idle_task_process, (uint32_t)&idle_stack[255]);
 }
 
 int create_process(uint32_t eip, uint32_t esp) {
@@ -32,22 +43,17 @@ int create_process(uint32_t eip, uint32_t esp) {
 
     tasks[i].pid = next_pid++;
     tasks[i].state = TASK_RUNNING;
-    
-    /* İçini tamamen sıfırla */
+
     uint8_t *ptr = (uint8_t *)&tasks[i].regs;
     for (uint32_t j = 0; j < sizeof(registers_t); j++) ptr[j] = 0;
 
-    /* Donanımsal Ring 3 Segment Standartları */
     tasks[i].regs.ds = 0x2B;
     tasks[i].regs.cs = 0x23;
     tasks[i].regs.ss = 0x2B;
     
     tasks[i].regs.eip = eip;         
     tasks[i].regs.useresp = esp;     
-    tasks[i].regs.eflags = 0x202;    /* Kesmeler açık olsun */
-
-    /* KESİNTİ NUMARALARI: Scheduler ilk devraldığında işlemci sapıtmasın diye 
-     * sahte bir IRQ0 (32) kesme verisi enjekte ediyoruz */
+    tasks[i].regs.eflags = 0x202;
     tasks[i].regs.int_no = 32;
     tasks[i].regs.err_code = 0;
 
@@ -61,36 +67,49 @@ void exit_current_process(void) {
     asm volatile("int $32"); 
 }
 
+void sleep_current_task(registers_t *regs) {
+    tasks[current_task].regs = *regs;
+    tasks[current_task].state = TASK_WAITING;
+    schedule(regs);
+}
+
+void wakeup_all_tasks(void) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_WAITING) {
+            tasks[i].state = TASK_RUNNING;
+        }
+    }
+}
+
 void schedule(registers_t *regs) {
     if (!multitasking_enabled || current_task == -1) return;
 
-    /* EĞER User Mode'dan (Ring 3) kesintiye uğradıysak, mevcut durumu kaydet.
-       Eğer kernel'dayken (ilk başlangıçtaki hlt anı) kesinti geldiyse,
-       kayıtçıları EZMEMEK için sadece Ring 3 kontrolü yapıyoruz! */
     if ((regs->cs & 0x3) == 3) {
         if (tasks[current_task].state == TASK_RUNNING) {
             tasks[current_task].regs = *regs;
+
         }
     }
 
     int next_task = current_task;
     int found = 0;
     
-    /* Sıradaki çalışan (RUNNING) görevi bul */
     for (int i = 0; i < MAX_TASKS; i++) {
         next_task = (next_task + 1) % MAX_TASKS;
-        if (tasks[next_task].state == TASK_RUNNING) {
+        if (next_task != 0 && tasks[next_task].state == TASK_RUNNING) {
             found = 1;
             break;
         }
     }
 
-    /* Eğer görev bulunduysa (Process 0 / Shell), kayıtçıları işlemciye yükle */
+    if (!found && tasks[0].state == TASK_RUNNING) {
+        next_task = 0;
+        found = 1;
+    }
+
     if (found) {
         current_task = next_task;
         *regs = tasks[current_task].regs;
-        
-        /* MİMARİ DOKUNUŞ: Görev değiştirirken Interrupt Enable (IF) bitini zorla AÇIK tut. */
         regs->eflags |= 0x200; 
     }
 }

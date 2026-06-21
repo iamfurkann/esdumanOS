@@ -54,8 +54,6 @@ void get_line(char *buffer, int max_size) {
 }
 
 void user_shell_process(void) {
-    /* DÜZELTME 1: Array ([]) yerine Pointer (*) kullanıyoruz. 
-     * Böylece GCC, SSE optimizasyonunu kullanıp stack'i patlatmayacak! */
     char cmd_buf[256];
     char *prompt = "> ";
 
@@ -222,10 +220,12 @@ char *banner =
     uint32_t u_stack_top = (((uint32_t)user_stack + sizeof(user_stack)) & 0xFFFFFFF0) - 4;
     uint32_t k_stack_top = (((uint32_t)kernel_stack_ring0 + sizeof(kernel_stack_ring0)) & 0xFFFFFFF0) - 4;
 
-    create_process((uint32_t)user_shell_process, u_stack_top);
+    int shell_pid = create_process((uint32_t)user_shell_process, u_stack_top);
     set_kernel_stack(k_stack_top);
+
+    extern int current_task;
+    current_task = shell_pid;
     
-    /* İşlemci Ring 3'e geçmeden hemen önce son mesaj! */
     terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     printk("Dropping to User Mode (Ring 3)...\n");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);

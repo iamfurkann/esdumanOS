@@ -87,6 +87,9 @@ void isr_handler(registers_t *regs) {
     else if (regs->int_no == 33) {
         keyboard_interrupt_handler();
         outb(0x20, 0x20);
+
+        extern void wakeup_all_tasks(void);
+        wakeup_all_tasks();
     }
     else if (regs->int_no == 128) {
         extern char get_keyboard_char(void);
@@ -100,14 +103,23 @@ void isr_handler(registers_t *regs) {
             printk("\n[KERNEL] PID %d calismasini tamamladi (Exit Code: %d).\n> ", current_task, regs->ebx);
             terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
-            /* Görevi öldür. Scheduler otomatik olarak arka planda bekleyen Shell'e dönecek! */
             exit_current_process();
             return;
         }
 
         if (regs->eax == 3) {
-            /* SYS_READ: Klavyeden harf isteği */
-            regs->eax = (uint32_t)get_keyboard_char();
+            char c = get_keyboard_char();
+            if (c == 0) {
+                regs->eip -= 2; 
+                
+                extern void sleep_current_task(registers_t *regs);
+                sleep_current_task(regs);
+            } else {
+                regs->eax = (uint32_t)c;
+            }
+        }
+        else if (regs->eax == 99) {
+            asm volatile("sti; hlt; cli");
         }
         else if (regs->eax == 4) {
             /* SYS_WRITE: Ekrana yazı yazma isteği */

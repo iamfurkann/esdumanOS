@@ -8,7 +8,7 @@
  */
 #define OS_VERSION_MAJOR    3
 #define OS_VERSION_MINOR    4
-#define OS_VERSION_PATCH    1
+#define OS_VERSION_PATCH    2
 
 /* Makro Sihirbazlığı (Derleme zamanında sayıları yazıya çevirir) */
 #define STRINGIFY_HELPER(x) #x

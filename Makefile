@@ -8,7 +8,7 @@ CORE_OBJS = kernel/kernel.o \
             kernel/elf.o \
             kernel/shell.o \
             kernel/security.o \
-            kernel/tests/selftest.o \
+            tests/kernel/selftest.o \
             src/resources/init_elf_data.o \
             fs/vfs.o \
             fs/crypto_fs.o \
@@ -128,8 +128,17 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 
 test:
 	@echo "--- Host Unit Tests Calistiriliyor ---"
-	gcc tests/test_hash.c -o tests/test_runner
-	./tests/test_runner
+	@gcc tests/host/test_hash.c -o tests/host/test_runner
+	@./tests/host/test_runner
+	@python3 -m unittest discover -s tests/host -p "test_*.py"
+
+test_kernel: $(BIN)
+	@echo "--- Kernel QEMU Self-Test Calistiriliyor ---"
+	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@$(QEMU) -kernel $(BIN) -append "kernel_pass=selftest" \
+        -drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -serial stdio -display none
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
 	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."
@@ -151,4 +160,5 @@ clean:
 	$(MAKE) -C lib clean
 	rm -f hello.o hello.elf apps/init.elf apps/init_encrypted.elf tools/encrypt_tool
 	rm -f src/resources/init_elf_data.c
-	rm -rf $(OBJS) $(BIN) $(ISO) isodir message.txt gizli.txtm
+	rm -f tests/host/test_runner
+	rm -rf $(OBJS) $(BIN) $(ISO) isodir message.txt gizli.txt

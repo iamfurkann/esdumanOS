@@ -1,4 +1,4 @@
-name: OS Build & Test
+name: esdumanOS CI Pipeline
 
 on:
   push:
@@ -9,18 +9,32 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-
+    
     steps:
-    - name: copy code
-      uses: actions/checkout@v3
+      - name: Kodlari Cek
+        uses: actions/checkout@v3
 
-    - name: res
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential gcc-multilib nasm qemu-system-x86 xorriso
+      - name: Bagimliliklari Kur (GCC, QEMU, Python)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib qemu-system-x86 python3 nasm mtools xorriso
 
-    - name: Host Unit Tests
-      run: make test
+      - name: 1. Host Araclarini Test Et (Python & C)
+        run: make test
 
-    - name: Build Test
-      run: make
+      - name: 2. Isletim Sistemini Derle (Build)
+        run: make
+
+      - name: 3. Kernel QEMU Self-Test
+        run: |
+          # QEMU isa-debug-exit fırlattığında hata kodu verebilir, bunu atlamak için "|| true" diyoruz
+          make test_kernel > test_output.log || true
+          cat test_output.log
+          
+          # Log dosyasında basari mesajini arıyoruz
+          if grep -q "[KFS SELF-TEST] TUM TESTLER TAMAMLANDI!" test_output.log; then
+            echo "✅ KERNEL TESTLERI BASARIYLA GECTI!"
+          else
+            echo "❌ KERNEL TESTLERI BASARISIZ OLDU VEYA COKTU!"
+            exit 1
+          fi

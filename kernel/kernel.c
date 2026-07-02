@@ -116,6 +116,20 @@ char *banner =
     printk("Boot islemi tamamlandi. Sifreli Minishell cozuluyor...\n");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
+    if (mboot_info->flags & 0x00000004) {
+        char *cmdline = (char *)mboot_info->cmdline;
+        int is_test_mode = 0;
+        for (int i = 0; cmdline[i] != '\0'; i++) {
+            if (cmdline[i] == 's' && cmdline[i+1] == 'e' && cmdline[i+2] == 'l' && cmdline[i+3] == 'f') {
+                is_test_mode = 1; break;
+            }
+        }
+        if (is_test_mode) {
+            run_kernel_selftests();
+            while(1) { asm volatile("cli; hlt"); }
+        }
+    }
+
     extern int foreground_task;
     asm volatile("sti");
     int shell_idx = load_and_exec_elf("init.elf"); 
@@ -124,7 +138,6 @@ char *banner =
     }
 
     extern void start_first_task(void);
-    run_kernel_selftests();
     start_first_task();
 
     while (1) {

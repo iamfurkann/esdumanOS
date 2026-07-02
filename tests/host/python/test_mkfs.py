@@ -2,7 +2,10 @@ import unittest
 import sys
 import os
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../tools')))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+tools_dir = os.path.abspath(os.path.join(current_dir, '../../../tools'))
+sys.path.insert(0, tools_dir)
+
 import mkfs
 
 class TestMkfs(unittest.TestCase):

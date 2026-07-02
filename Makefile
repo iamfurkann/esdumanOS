@@ -123,6 +123,7 @@ apps/init_encrypted.elf: apps/init.elf tools/encrypt_tool
 	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
 
 src/resources/init_elf_data.c: apps/init_encrypted.elf
+	@mkdir -p src/resources
 	xxd -i apps/init_encrypted.elf | \
 	sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
 
@@ -144,8 +145,9 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
 	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."
 	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
 	@echo "--- [2/4] C veri dosyasi uretiliyor..."
+	@mkdir -p src/resources
 	@xxd -i apps/init_encrypted.elf | \
-	    sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
+		sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
 	@echo "--- [3/4] Kernel yeniden derleniyor (sifreli ELF ile)..."
 	@$(MAKE) $(ISO)
 	@echo "--- [4/4] Disk imaji hazirlanip QEMU baslatiliyor..."

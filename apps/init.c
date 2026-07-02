@@ -367,7 +367,7 @@ void main(void) {
         printk("password: ");
         read_line(pass_buf, 1); 
 
-        if (ft_strcmp(user_buf, "root") == 0 && hash_djb2_salted(pass_buf) == 0x1E8CF78F) {
+        if (ft_strcmp(user_buf, "root") == 0 && hash_djb2_salted(pass_buf) == 0x19E28ECF) {
             current_uid = 0;
             ft_strcpy(current_username, "root");
             break;

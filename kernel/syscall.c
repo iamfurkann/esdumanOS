@@ -520,6 +520,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         case SYSCALL_MKDIR: // 26
             {
+                if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
                 extern int fs_mkdir(const char *name, uint8_t parent_id);
                 regs->eax = fs_mkdir((const char *)regs->ebx, (uint8_t)regs->ecx);
             }
@@ -535,6 +536,7 @@ void syscall_handler(arch_regs_t *regs) {
             
         case SYSCALL_GET_DIR_ID: // 29
             {
+                if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
                 extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
                 int idx = fs_get_entry_idx((const char *)regs->ebx, (uint8_t)regs->ecx);
                 

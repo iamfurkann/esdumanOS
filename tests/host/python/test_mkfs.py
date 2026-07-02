@@ -2,7 +2,6 @@ import unittest
 import sys
 import os
 
-# mkfs.py'nin bulundugu dizini okuyabilmesi icin path ekliyoruz
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../tools')))
 import mkfs
 
@@ -11,7 +10,6 @@ class TestMkfs(unittest.TestCase):
         if os.path.exists("disk.img"):
             os.remove("disk.img")
             
-        # mkfs icindeki write_disk fonksiyonunu cagir
         mkfs.write_disk()
         
         self.assertTrue(os.path.exists("disk.img"), "HATA: disk.img dosyasi olusturulamadi!")

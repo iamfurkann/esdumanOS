@@ -8,7 +8,6 @@ CORE_OBJS = kernel/kernel.o \
             kernel/elf.o \
             kernel/shell.o \
             kernel/security.o \
-            tests/kernel/selftest.o \
             src/resources/init_elf_data.o \
             fs/vfs.o \
             fs/crypto_fs.o \
@@ -20,6 +19,12 @@ CORE_OBJS = kernel/kernel.o \
             lib/utils2.o \
             lib/stack.o \
             crypto/aes.o \
+            tests/kernel/selftest.o \
+            tests/kernel/test_string.o \
+            tests/kernel/test_memory.o \
+            tests/kernel/test_pipe.o \
+            tests/kernel/test_vfs.o \
+            tests/kernel/test_security.o
 
 ifeq ($(ARCH), x86)
     # x86
@@ -129,24 +134,30 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 
 test:
 	@echo "--- Host Unit Tests Calistiriliyor ---"
-	@gcc tests/host/test_hash.c -o tests/host/test_runner
+	@gcc tests/host/c/test_hash.c -o tests/host/test_runner
 	@./tests/host/test_runner
-	@python3 -m unittest discover -s tests/host -p "test_*.py"
+	@python3 -m unittest discover -s tests/host/python/ -p "test_*.py"
 
-test_kernel: $(BIN)
+test_kernel: $(BIN) hello.elf
 	@echo "--- Kernel QEMU Self-Test Calistiriliyor ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
+	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
+	@dd if=message.txt of=disk.img conv=notrunc > /dev/null 2>&1
+	@python3 tools/inject.py disk.img hello.elf gizli.txt
 	@if $(QEMU) -kernel $(BIN) -append "kernel_pass=selftest" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none; then \
-		echo "❌ HATA: QEMU beklenmedik sekilde kapandi!"; exit 1; \
+		echo "HATA: QEMU beklenmedik sekilde kapandi!"; exit 1; \
 	else \
 		RET=$$?; \
 		if [ $$RET -eq 33 ]; then \
-			echo "\nKERNEL TESTLERI KUSURSUZ! (QEMU Exit Code: 33)\n"; exit 0; \
+			echo "KERNEL TESTLERI KUSURSUZ! (Tum Moduller Gecti)"; exit 0; \
+		elif [ $$RET -eq 35 ]; then \
+			echo "KERNEL TESTLERI BASARISIZ! (Bazi testler kaldi)"; exit 1; \
 		else \
-			echo "\nKERNEL TEST SIRASINDA COKTU! (Exit Code: $$RET)\n"; exit 1; \
+			echo "KERNEL PANIC/COKME YASANDI! (Exit Code: $$RET)"; exit 1; \
 		fi; \
 	fi
 

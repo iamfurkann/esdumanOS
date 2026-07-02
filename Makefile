@@ -136,10 +136,19 @@ test:
 test_kernel: $(BIN)
 	@echo "--- Kernel QEMU Self-Test Calistiriliyor ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@$(QEMU) -kernel $(BIN) -append "kernel_pass=selftest" \
-        -drive format=raw,file=disk.img,if=ide,index=0,media=disk \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -serial stdio -display none
+	@if $(QEMU) -kernel $(BIN) -append "kernel_pass=selftest" \
+		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-serial stdio -display none; then \
+		echo "❌ HATA: QEMU beklenmedik sekilde kapandi!"; exit 1; \
+	else \
+		RET=$$?; \
+		if [ $$RET -eq 33 ]; then \
+			echo "\nKERNEL TESTLERI KUSURSUZ! (QEMU Exit Code: 33)\n"; exit 0; \
+		else \
+			echo "\nKERNEL TEST SIRASINDA COKTU! (Exit Code: $$RET)\n"; exit 1; \
+		fi; \
+	fi
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
 	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."

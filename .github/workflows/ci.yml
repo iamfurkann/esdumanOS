@@ -9,7 +9,7 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Kodlari Cek
         uses: actions/checkout@v3
@@ -27,14 +27,4 @@ jobs:
 
       - name: 3. Kernel QEMU Self-Test
         run: |
-          # QEMU isa-debug-exit fırlattığında hata kodu verebilir, bunu atlamak için "|| true" diyoruz
-          make test_kernel > test_output.log || true
-          cat test_output.log
-          
-          # Log dosyasında basari mesajini arıyoruz
-          if grep -q "[KFS SELF-TEST] TUM TESTLER TAMAMLANDI!" test_output.log; then
-            echo "✅ KERNEL TESTLERI BASARIYLA GECTI!"
-          else
-            echo "❌ KERNEL TESTLERI BASARISIZ OLDU VEYA COKTU!"
-            exit 1
-          fi
+          make test_kernel

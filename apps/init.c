@@ -190,18 +190,17 @@ void execute_command(char **args, char *redirect_file) {
     }
     else if (ft_strcmp(args[0], "cat") == 0) {
         if (args[1]) {
-            sys_cat_file(args[1], current_dir_id); 
+            if (sys_get_dir_id(args[1], current_dir_id) != -1) {
+                printk("cat: "); printk(args[1]); printk(": Bu bir dizin (Is a directory)\n");
+            } else {
+                sys_cat_file(args[1], current_dir_id); 
+            }
         } else {
             char c;
             printk("[BILGI] Klavye okuma modu. Cikmak icin ESC'ye basin...\n");
-            
             while (syscall(3, 0, (int)&c, 1) > 0) {
-                if (c == 27 || c == 4) {
-                    printk("\n");
-                    break;
-                }
-                char str[2] = {c, '\0'}; 
-                printk(str); 
+                if (c == 27 || c == 4) { printk("\n"); break; }
+                char str[2] = {c, '\0'}; printk(str); 
             }
         }
         last_exit_status = 0;
@@ -226,6 +225,10 @@ void execute_command(char **args, char *redirect_file) {
             current_dir_id = 0; 
             ft_strcpy(current_path, "/"); 
         } 
+        else if (ft_strcmp(args[1], "..") == 0) {
+            current_dir_id = 0; 
+            ft_strcpy(current_path, "/"); 
+        }
         else {
             int new_id = sys_get_dir_id(args[1], current_dir_id);
             if (new_id != -1) { 
@@ -411,9 +414,6 @@ void main(void) {
     char cmd_buf[256];
     char *args[32];
 
-    int current_dir_id = 0; 
-    char current_path[64] = "/";
-
     while (1) {
         printk("\n");
         printk(current_username);
@@ -510,3 +510,4 @@ void main(void) {
 void _start(void) {
     main();
     sys_exit();
+}

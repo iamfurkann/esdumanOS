@@ -8,6 +8,7 @@ CORE_OBJS = kernel/kernel.o \
             kernel/elf.o \
             kernel/shell.o \
             kernel/security.o \
+            kernel/tests/selftest.o \
             src/resources/init_elf_data.o \
             fs/vfs.o \
             fs/crypto_fs.o \
@@ -18,7 +19,7 @@ CORE_OBJS = kernel/kernel.o \
             lib/utils.o \
             lib/utils2.o \
             lib/stack.o \
-            crypto/aes.o 
+            crypto/aes.o \
 
 ifeq ($(ARCH), x86)
     # x86
@@ -119,7 +120,7 @@ tools/encrypt_tool: tools/encrypt_tool.c
 	gcc tools/encrypt_tool.c -o tools/encrypt_tool -lcrypto
 
 apps/init_encrypted.elf: apps/init.elf tools/encrypt_tool
-	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2!mX7@kL4zR9^tN1&cV5*wHy
+	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
 
 src/resources/init_elf_data.c: apps/init_encrypted.elf
 	xxd -i apps/init_encrypted.elf | \
@@ -132,7 +133,7 @@ test:
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
 	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."
-	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2!mX7@kL4zR9^tN1&cV5*wHy
+	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
 	@echo "--- [2/4] C veri dosyasi uretiliyor..."
 	@xxd -i apps/init_encrypted.elf | \
 	    sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c

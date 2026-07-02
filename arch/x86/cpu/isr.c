@@ -3,21 +3,26 @@
 #include "tty.h"
 #include "io.h"
 #include "signal.h"
+#include "fs.h"
+#include "process.h"
+#include "syscall.h"
+#include "registers.h"
+#include "security.h"
+
+extern security_level_t current_sec_level;
+extern void set_security_level(security_level_t level);
 
 #define PIC1_COMMAND 0x20
-#define PIC_EOI		 0x20 //End of Interrupt
-#define IRQ0_TIMER	32
+#define PIC2_COMMAND 0xA0
+#define PIC_EOI      0x20
+
+#define IRQ0_TIMER  32
 #define IRQ1_KEYBOARD 33
 #define ISR_SYSCALL 128
 
-#define SYSCALL_EXIT 1
-#define SYSCALL_READ 3
-#define SYSCALL_WRITE 4
-#define SYSCALL_EXEC 5
-#define SYSCALL_YIELD 99
-
 extern void keyboard_interrupt_handler(void);
 extern void timer_interrupt_handler(void);
+extern void syscall_handler(arch_regs_t *regs);
 
 const char *exception_messages[] = {
     "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
@@ -56,9 +61,35 @@ void save_stack_before_panic(void) {
         saved_panic_stack[i] = stack_ptr[i];
 }
 
-void isr_handler(registers_t *regs) {
+void page_fault_handler(arch_regs_t *regs) {
+    uint32_t faulting_address;
+    asm volatile("mov %%cr2, %0" : "=r" (faulting_address));
+
+    int is_user = regs->err_code & 0x4;
+
+    if (is_user) {
+        printk("\n[SEGFAULT] Ihlal (PID: %d)! Yetkisiz bellek erisimi: 0x%x\n", 
+               tasks[current_task].pid, faulting_address);
+        
+        tasks[current_task].state = TASK_DEAD; 
+        schedule(regs);
+    } else {
+        terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
+        printk("\n[KERNEL PANIC] Cekirdek Page Fault yaratti: 0x%x\n", faulting_address);
+        printk("Hata Kodu: %d\n", regs->err_code);
+        asm volatile("cli; hlt");
+    }
+}
+
+/*INTERRUPT DISPATCHER*/
+void isr_handler(arch_regs_t *regs) {
+    
+    /* EXCEPTIONS (0-31)*/
     if (regs->int_no < 32) {
-        extern int multitasking_enabled;
+        if (regs->int_no == 14) {
+            page_fault_handler(regs);
+            return;
+        }
         multitasking_enabled = 0;
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
 
@@ -68,12 +99,6 @@ void isr_handler(registers_t *regs) {
         
         printk("Hata Turu : %s (Interrupt: %d)\n", exception_messages[regs->int_no], regs->int_no);
         printk("Hata Kodu : 0x%x\n\n", regs->err_code);
-        
-        if (regs->int_no == 14) {
-            uint32_t cr2;
-            asm volatile("mov %%cr2, %0" : "=r"(cr2));
-            printk("--> CR2 (Coken Bellek Adresi): 0x%x\n\n", cr2);
-        }
 
         printk("--- CPU REGISTERS ---\n");
         printk("EAX: 0x%x   EBX: 0x%x   ECX: 0x%x\n", regs->eax, regs->ebx, regs->ecx);
@@ -88,60 +113,25 @@ void isr_handler(registers_t *regs) {
         clean_registers();
         asm volatile("cli; hlt");
     }
+    else if (regs->int_no >= 32 && regs->int_no <= 47) {
+        if (regs->int_no == IRQ0_TIMER) {
+            timer_interrupt_handler();
+            signal_tick_handler();
+            schedule(regs);
+        }
+        else if (regs->int_no == IRQ1_KEYBOARD) {
+            keyboard_interrupt_handler();
+        }
 
-    else if (regs->int_no == IRQ0_TIMER) {
-        timer_interrupt_handler();
-        signal_tick_handler();
-
-        extern void schedule(registers_t *regs);
-        schedule(regs);
-
-        outb(PIC1_COMMAND, PIC_EOI);
-    }
-    else if (regs->int_no == IRQ1_KEYBOARD) {
-        keyboard_interrupt_handler();
-        outb(PIC1_COMMAND, PIC_EOI);
-
-        extern void wakeup_all_tasks(void);
-        wakeup_all_tasks();
+        if (regs->int_no >= 40) {
+            outb(PIC2_COMMAND, PIC_EOI); // Slave PIC
+        }
+        outb(PIC1_COMMAND, PIC_EOI);     // Master PIC
     }
     else if (regs->int_no == ISR_SYSCALL) {
-        extern char get_keyboard_char(void);
-        extern void execute_command(char *cmd);
-
-        if (regs->eax == SYSCALL_EXIT) {
-            extern void exit_current_process(void);
-            extern int current_task;
-            
-            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-            printk("\n[KERNEL] PID %d calismasini tamamladi (Exit Code: %d).\n> ", current_task, regs->ebx);
-            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-
-            exit_current_process();
-            return;
-        }
-
-        if (regs->eax == SYSCALL_READ) {
-            char c = get_keyboard_char();
-            if (c == 0) {
-                regs->eip -= 2; 
-                
-                extern void sleep_current_task(registers_t *regs);
-                sleep_current_task(regs);
-            } else {
-                regs->eax = (uint32_t)c;
-            }
-        }
-        else if (regs->eax == SYSCALL_YIELD) {
-            asm volatile("sti; hlt; cli");
-        }
-        else if (regs->eax == SYSCALL_WRITE) {
-            char *str = (char *)regs->ebx;
-            printk("%s", str);
-        }
-        else if (regs->eax == SYSCALL_EXEC) {
-            char *cmd = (char *)regs->ebx;
-            execute_command(cmd);
-        }
+        syscall_handler(regs);
+    }
+    else {
+        printk("Bilinmeyen Interrupt: %d\n", regs->int_no);
     }
 }

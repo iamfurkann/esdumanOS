@@ -18,5 +18,6 @@ void init_signals(void);
 void register_signal(int sig_num, signal_handler_t handler);
 void schedule_signal(int sig_num, uint32_t delay_ticks);
 void signal_tick_handler(void);
+void alarm_demo_callback(void);
 
 #endif

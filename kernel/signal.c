@@ -1,5 +1,5 @@
 #include "signal.h"
-#include "stdio.h" // printk için
+#include "stdio.h"
 
 static signal_t signal_table[MAX_SIGNALS];
 
@@ -38,4 +38,10 @@ void signal_tick_handler(void) {
             }
         }
     }
+}
+
+void alarm_demo_callback(void) {
+    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    printk("\n[SINYAL] 3 Saniyelik Alarm Tetiklendi! Arka planda calistim!\n");
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 }

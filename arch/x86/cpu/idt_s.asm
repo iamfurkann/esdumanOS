@@ -14,8 +14,8 @@ load_idt:
   global isr%1
   isr%1:
     cli
-    push dword 0    ; byte yerine dword kullandık!
-    push dword %1   ; byte yerine dword kullandık!
+    push dword 0
+    push dword %1
     jmp isr_common_stub
 %endmacro
 
@@ -23,7 +23,7 @@ load_idt:
   global isr%1
   isr%1:
     cli
-    push dword %1   ; byte yerine dword kullandık!
+    push dword %1
     jmp isr_common_stub
 %endmacro
 
@@ -59,33 +59,49 @@ ISR_NOERRCODE 28
 ISR_NOERRCODE 29
 ISR_NOERRCODE 30
 ISR_NOERRCODE 31
-ISR_NOERRCODE 32 ; PIT
-ISR_NOERRCODE 33 ; KLAVYE
-ISR_NOERRCODE 128 ;syscall
+
+;(IRQs)
+ISR_NOERRCODE 32 ; IRQ0: PIT (Timer)
+ISR_NOERRCODE 33 ; IRQ1: Klavye
+ISR_NOERRCODE 34 ; IRQ2: Cascade
+ISR_NOERRCODE 35 ; IRQ3: COM2
+ISR_NOERRCODE 36 ; IRQ4: COM1
+ISR_NOERRCODE 37 ; IRQ5: LPT2
+ISR_NOERRCODE 38 ; IRQ6: Floppy Disk
+ISR_NOERRCODE 39 ; IRQ7: LPT1
+ISR_NOERRCODE 40 ; IRQ8: CMOS RTC
+ISR_NOERRCODE 41 ; IRQ9: Boş
+ISR_NOERRCODE 42 ; IRQ10: Boş
+ISR_NOERRCODE 43 ; IRQ11: Boş
+ISR_NOERRCODE 44 ; IRQ12: Fare (PS/2)
+ISR_NOERRCODE 45 ; IRQ13: FPU
+ISR_NOERRCODE 46 ; IRQ14: Primary ATA Hard Disk
+ISR_NOERRCODE 47 ; IRQ15: Secondary ATA Hard Disk
+
+ISR_NOERRCODE 128 ; Syscall (0x80)
 
 extern isr_handler
 isr_common_stub:
-    pusha               
-    mov ax, ds          
-    push eax            
-    
+    pusha
+    mov ax, ds
+    push eax
+
     mov ax, 0x10        
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
     
-    push esp            ; 1. ADIM: registers_t adresini C'ye gönder!
-    call isr_handler    
-    add esp, 4          ; 2. ADIM: İŞ BİTTİ, ADRESİ SİL! (Bunu unutursan sistem Reboot atar!)
+    push esp
+    call isr_handler
+    add esp, 4
     
-    pop eax             ; 3. ADIM: Segmentleri Güvenle Geri Al
-    mov ds, ax          
-    mov es, ax          
-    mov fs, ax          
-    mov gs, ax          
-    
-    popa                
-    add esp, 8          
-    sti
+    pop eax
+    mov ds, ax
+    mov es, ax       
+    mov fs, ax
+    mov gs, ax
+
+    popa          
+    add esp, 8
     iret

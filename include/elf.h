@@ -33,4 +33,6 @@ typedef struct {
     uint32_t p_align;
 } __attribute__((packed)) elf32_phdr_t;
 
+int load_and_exec_elf(const char *filename);
+
 #endif

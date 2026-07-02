@@ -1,8 +1,13 @@
 #ifndef LIBFT_H
 # define LIBFT_H
 
-# include "stddef.h"
+# include "types.h"
 # include "kheap.h"
+
+#ifndef NULL
+# define NULL ((void *)0)
+#endif
+
 typedef struct s_list
 {
 	void			*content;

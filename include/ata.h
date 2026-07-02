@@ -27,6 +27,9 @@
 #define ATA_SR_DRQ          0x08    // Data Request Ready
 #define ATA_SR_BSY          0x80    // Busy
 
+
+#define ATA_CMD_IDENTIFY 0xEC
+
 void ata_read_sector(uint32_t lba, uint8_t *buffer);
 void ata_write_sector(uint32_t lba, uint8_t *buffer);
 #endif

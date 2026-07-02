@@ -5,10 +5,12 @@ NAME = libc.a
 
 override CFLAGS += -I ../include -I .
 
+AR ?= ar
+
 all: $(NAME)
 
 $(NAME): $(OBJS)
-	ar rcs $(NAME) $(OBJS)
+	$(AR) rcs $(NAME) $(OBJS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $< -o $@

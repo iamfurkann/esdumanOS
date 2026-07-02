@@ -95,12 +95,13 @@ void get_time_string(char *buf) {
 
 static uint8_t last_second = 0xFF;
 
-void timer_interrupt_handler(void) {
+void rtc_timer_callback(void) {
     uint8_t current_second = get_rtc_second();
     if (current_second != last_second) {
         last_second = current_second;
         char time_buf[20];
         get_time_string(time_buf);
-        draw_status_bar(OS_VERSION_STR, time_buf);
+        extern void draw_status_bar(const char*, const char*);
+        draw_status_bar("esdumanOS", time_buf);
     }
 }

@@ -1,25 +1,25 @@
 global switch_to_user_mode
-
 switch_to_user_mode:
     cli
-    mov eax, [esp+4]
-    mov ecx, [esp+8]
+    mov ebx, [esp+4]    ; EBX = eip (Hedef programin baslangic adresi)
+    mov ecx, [esp+8]    ; ECX = esp (Hedef programin yigin adresi)
 
-    mov dx, 0x2B
-    mov ds, dx
-    mov es, dx
-    mov fs, dx
-    mov gs, dx
+    ; Ring 3 Data Segment
+    mov ax, 0x2B
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
 
-    push 0x2B
-    push ecx
+    push dword 0x2B     ; 5. SS (Ring 3 Data Segment)
+    push ecx            ; 4. ESP (Ring 3 Yigin isareti)
+    pushfd              ; 3. EFLAGS
 
-    pushfd
-    pop edx
-    or edx, 0x200
-    push edx
-
-    push 0x23
+    pop eax
+    or eax, 0x200
     push eax
+
+    push dword 0x23
+    push ebx
 
     iret

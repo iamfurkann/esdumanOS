@@ -1,43 +1,84 @@
-CC = gcc
-AS = nasm
-LD = ld
+ARCH ?= x86
 
-# EXPORT ekliyoruz ki src/libc/Makefile bu derleyiciyi ve flag'leri alabilsin!
-export CC AS LD
+CORE_OBJS = kernel/kernel.o \
+            kernel/signal.o \
+            kernel/process.o \
+            kernel/syscall.o \
+            kernel/pipe.o \
+            kernel/elf.o \
+            kernel/shell.o \
+            kernel/security.o \
+            src/resources/init_elf_data.o \
+            fs/vfs.o \
+            fs/crypto_fs.o \
+            mm/pmm.o \
+            mm/paging.o \
+            mm/kheap.o \
+            lib/stdio.o \
+            lib/utils.o \
+            lib/utils2.o \
+            lib/stack.o \
+            crypto/aes.o 
 
-# Include kısmına libc klasörünü de ekledik ki libft.h her yerden bulunsun
-CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-stack-protector -Wall -Wextra -I include -I src/libc -c
-export CFLAGS
+ifeq ($(ARCH), x86)
+    # x86
+    CC = gcc
+    AS = nasm
+    LD = ld
+    AR = ar
 
-ASFLAGS = -f elf32
-LDFLAGS = -m elf_i386 -T arch/x86/linker.ld
+    CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-stack-protector -Wall -Wextra -I include -I src/libc -c -DARCH_X86
+    ASFLAGS = -f elf32
+    LDFLAGS = -m elf_i386 -T arch/x86/linker.ld -z noexecstack
 
-OBJS = arch/x86/boot/boot.o \
-        kernel/kernel.o \
-        kernel/signal.o \
-        kernel/process.o \
-        kernel/elf.o \
-        drivers/tty.o \
-        drivers/keyboard.o \
-        drivers/ata.o \
-        drivers/rtc.o \
-        lib/stdio.o \
-        lib/utils.o \
-        lib/utils2.o \
-        lib/stack.o \
-        arch/x86/cpu/gdt.o  \
-        arch/x86/cpu/gdt_s.o \
-        arch/x86/cpu/idt.o \
-        arch/x86/cpu/idt_s.o \
-        arch/x86/cpu/isr.o \
-        arch/x86/cpu/timer.o \
-        arch/x86/cpu/tss.o \
-        arch/x86/cpu/user_mode.o \
-        mm/pmm.o \
-        mm/paging.o \
-        mm/paging_s.o \
-        mm/kheap.o \
-        fs/vfs.o
+    USER_CFLAGS = -m32 -nostdlib -ffreestanding -fno-pie -no-pie -e main -I include
+    USER_LDFLAGS = -m elf_i386
+
+    QEMU = qemu-system-i386
+    QEMU_FLAGS = -cdrom $(ISO) -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+    
+    ARCH_OBJS = arch/x86/boot/boot.o \
+                arch/x86/cpu/gdt.o  \
+                arch/x86/cpu/gdt_s.o \
+                arch/x86/cpu/idt.o \
+                arch/x86/cpu/idt_s.o \
+                arch/x86/cpu/isr.o \
+                arch/x86/cpu/timer.o \
+                arch/x86/cpu/tss.o \
+                arch/x86/cpu/user_mode.o \
+                mm/paging_s.o \
+                drivers/tty.o \
+                drivers/keyboard.o \
+                drivers/ata.o \
+                drivers/rtc.o
+
+else ifeq ($(ARCH), riscv64)
+    # RISC-V (64-bit)
+    CC = riscv64-unknown-elf-gcc
+    AS = riscv64-unknown-elf-as
+    LD = riscv64-unknown-elf-ld
+    AR = riscv64-unknown-elf-ar
+
+    CFLAGS = -march=rv64imac -mabi=lp64 -mcmodel=medany -nostdlib -nodefaultlibs -fno-builtin -Wall -Wextra -I include -I src/libc -c -DARCH_RISCV64
+    ASFLAGS = -march=rv64imac -mabi=lp64
+    LDFLAGS = -T arch/riscv/linker.ld
+
+    USER_CFLAGS = -march=rv64imac -mabi=lp64 -nostdlib -ffreestanding -fno-pie -no-pie -e main -I include
+    USER_LDFLAGS = -m elf64lriscv
+
+    QEMU = qemu-system-riscv64
+    QEMU_FLAGS = -machine virt -bios default -kernel myos.bin -drive format=raw,file=disk.img,if=none,id=d0 -device virtio-blk-device,drive=d0 -display curses
+
+    ARCH_OBJS = arch/riscv/boot/boot.o \
+                arch/riscv/cpu/trap.o \
+                arch/riscv/drivers/uart.o
+else
+    $(error "Desteklenmeyen Mimari: $(ARCH). Lutfen x86 veya riscv64 secin.")
+endif
+
+export CC AS LD CFLAGS
+
+OBJS = $(CORE_OBJS) $(ARCH_OBJS)
 
 BIN = myos.bin
 ISO = myos.iso
@@ -45,7 +86,6 @@ LIBC = lib/libc.a
 
 all: $(ISO)
 
-# libc.a'nın derlenme kuralı
 $(LIBC):
 	$(MAKE) -C lib
 
@@ -55,7 +95,6 @@ $(LIBC):
 %.o: %.c
 	$(CC) $(CFLAGS) $< -o $@
 
-# İki ayrı (BIN) kuralını sildik, sadece bu doğru olanı bıraktık
 $(BIN): $(LIBC) $(OBJS)
 	$(LD) $(LDFLAGS) $(OBJS) $(LIBC) -o $(BIN)
 
@@ -65,21 +104,50 @@ $(ISO): $(BIN) grub/grub.cfg
 	cp grub/grub.cfg isodir/boot/grub/grub.cfg
 	grub-mkrescue -o $(ISO) isodir
 
+start:
+	$(QEMU) $(QEMU_FLAGS)
 
 hello.elf: apps/hello.asm
-	$(AS) -f elf32 apps/hello.asm -o hello.o
-	$(LD) -m elf_i386 hello.o -o hello.elf
+	$(AS) $(ASFLAGS) apps/hello.asm -o hello.o
+	$(LD) $(USER_LDFLAGS) hello.o -o hello.elf
 
-run: $(ISO) hello.elf
-	@echo "Gelismis Sanal Hard Disk (disk.img) olusturuluyor..."
-	@dd if=/dev/zero of=disk.img bs=512 count=100 > /dev/null 2>&1
+apps/init.elf: apps/init.c
+	gcc -m32 -nostdlib -ffreestanding -fno-pie -no-pie \
+	-e _start -I include apps/init.c -o apps/init.elf
+
+tools/encrypt_tool: tools/encrypt_tool.c
+	gcc tools/encrypt_tool.c -o tools/encrypt_tool -lcrypto
+
+apps/init_encrypted.elf: apps/init.elf tools/encrypt_tool
+	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2!mX7@kL4zR9^tN1&cV5*wHy
+
+src/resources/init_elf_data.c: apps/init_encrypted.elf
+	xxd -i apps/init_encrypted.elf | \
+	sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
+
+test:
+	@echo "--- Host Unit Tests Calistiriliyor ---"
+	gcc tests/test_hash.c -o tests/test_runner
+	./tests/test_runner
+
+run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
+	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."
+	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2!mX7@kL4zR9^tN1&cV5*wHy
+	@echo "--- [2/4] C veri dosyasi uretiliyor..."
+	@xxd -i apps/init_encrypted.elf | \
+	    sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
+	@echo "--- [3/4] Kernel yeniden derleniyor (sifreli ELF ile)..."
+	@$(MAKE) $(ISO)
+	@echo "--- [4/4] Disk imaji hazirlanip QEMU baslatiliyor..."
+	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img conv=notrunc > /dev/null 2>&1
 	@python3 tools/inject.py disk.img hello.elf gizli.txt
-	qemu-system-i386 -cdrom $(ISO) -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+	$(QEMU) $(QEMU_FLAGS)
 
 clean:
 	$(MAKE) -C lib clean
-	rm -f hello.o hello.elf
-	rm -rf $(OBJS) $(BIN) $(ISO) isodir
+	rm -f hello.o hello.elf apps/init.elf apps/init_encrypted.elf tools/encrypt_tool
+	rm -f src/resources/init_elf_data.c
+	rm -rf $(OBJS) $(BIN) $(ISO) isodir message.txt gizli.txtm

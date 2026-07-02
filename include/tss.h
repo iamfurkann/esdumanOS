@@ -4,7 +4,7 @@
 #include "types.h"
 
 typedef struct tss_entry_struct {
-    uint32_t prev_tss;   // Önceki TSS (Kullanilmayacak)
+    uint32_t prev_tss;
     uint32_t esp0;       // Ring 0'a gecerken kullanilacak Stack Pointer
     uint32_t ss0;        // Ring 0'a gecerken kullanilacak Stack Segment
     uint32_t esp1;       
@@ -21,7 +21,6 @@ typedef struct tss_entry_struct {
     uint16_t iomap_base;
 } __attribute__((packed)) tss_entry_t;
 
-// Fonksiyon prototipleri
 void tss_install(int32_t num, uint16_t ss0, uint32_t esp0);
 void set_kernel_stack(uint32_t stack);
 

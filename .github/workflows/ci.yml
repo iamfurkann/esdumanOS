@@ -1,0 +1,26 @@
+name: OS Build & Test
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: copy code
+      uses: actions/checkout@v3
+
+    - name: res
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gcc-multilib nasm qemu-system-x86 xorriso
+
+    - name: Host Unit Tests
+      run: make test
+
+    - name: Build Test
+      run: make

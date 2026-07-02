@@ -26,14 +26,17 @@
 #include "paging.h"
 #include "kheap.h"
 #include "io.h"
-#include "multiboot.h"
 #include "rtc.h"
 #include "signal.h"
 #include "ata.h"
+#include "fs.h"
+#include "elf.h"
+#include "process.h"
+#include "errno.h"
+#include "isr.h"
+#include "security.h"
 
-void kernel_init(multiboot_info_t* mboot_info);
-void kernel_welcome(void);
-void spawn_user_process(void (*func)());
-extern void switch_to_user_mode(void *user_function, void *user_stack);
-
+extern void switch_to_user_mode(uint32_t eip, uint32_t esp);
+extern unsigned char init_elf[];
+extern unsigned int init_elf_len;
 #endif

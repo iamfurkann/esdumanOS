@@ -34,5 +34,9 @@ void run_memory_tests(void);
 void run_pipe_tests(void);
 void run_vfs_tests(void);
 void run_security_tests(void);
+void run_stress_tests(void);
+void run_adversarial_tests(void);
+void run_integration_tests(void);
+void run_regression_tests(void);
 
-#endif
+#endif // KTEST_H

@@ -29,17 +29,18 @@ void run_vfs_tests(void) {
     ft_strcpy(u_content, "Merhaba Test");
 
     int mkdir_res = sys_mkdir(u_dir, 0);
-    KTEST_ASSERT(mkdir_res != -1, "sys_mkdir basariyla yeni klasor olusturdu");
+    // Zayıf != -1 yerine, kesinlikle başarılı kod (0) veya pozitif FD bekleniyor
+    KTEST_ASSERT(mkdir_res >= 0, "[STRICT] sys_mkdir basariyla yeni klasor olusturdu (res >= 0)");
 
     int dir_id = sys_get_dir_id(u_dir, 0);
-    KTEST_ASSERT(dir_id != -1, "sys_get_dir_id olusturulan klasoru bulabiliyor");
+    KTEST_ASSERT(dir_id >= 0, "[STRICT] sys_get_dir_id olusturulan klasorun gecerli ID'sini dondu (id >= 0)");
 
     int fake_dir = sys_get_dir_id(u_fake, 0);
-    KTEST_ASSERT(fake_dir == -1, "sys_get_dir_id olmayan klasorde guvenli sekilde -1 donuyor");
+    KTEST_ASSERT(fake_dir == -1, "[STRICT] sys_get_dir_id olmayan klasorde kesinlikle -1 donuyor");
 
     int file_res = sys_create_file(u_file, u_content, 0);
-    KTEST_ASSERT(file_res != -1, "sys_create_file basariyla sanal dosya yazdi");
+    KTEST_ASSERT(file_res >= 0, "[STRICT] sys_create_file basariyla sanal dosya yazdi (res >= 0)");
 
     int del_res = sys_delete_file(u_file, 0);
-    KTEST_ASSERT(del_res != -1, "sys_delete_file dosyayi diskten/VFS'ten basariyla sildi");
+    KTEST_ASSERT(del_res >= 0, "[STRICT] sys_delete_file dosyayi basariyla sildi (res >= 0)");
 }

@@ -5,6 +5,8 @@
 #include "process.h"
 #include "paging.h"
 #include "pipe.h"
+#include "crypto.h"
+#include "security.h"
 
 extern void map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
 extern uint32_t pmm_alloc_frame(void);
@@ -14,6 +16,9 @@ extern int check_free_task_slot(void);
 extern void *kmalloc(uint32_t size);
 extern void kfree(void *ptr);
 
+extern uint8_t kernel_master_key[32]; // [YENİ]: Şifre çözme anahtarı
+extern security_level_t current_sec_level;
+
 int load_and_exec_elf(const char *filename) {
     if (!check_free_task_slot()) {
         printk("[ELF LOADER] HATA: Maksimum gorev limitine (16) ulasildi. '%s' yuklenemedi!\n", filename);
@@ -21,7 +26,7 @@ int load_and_exec_elf(const char *filename) {
     }
 
     vfs_file_t file;
-    if (fs_open(filename,0, &file) != 0) {
+    if (fs_open(filename, 0, &file) != 0) {
         printk("Hata: '%s' disk uzerinde bulunamadi!\n", filename);
         return -1;
     }
@@ -37,8 +42,9 @@ int load_and_exec_elf(const char *filename) {
         kfree(file_buffer);
         return -1;
     }
-    elf32_ehdr_t *ehdr = (elf32_ehdr_t *)file_buffer;
 
+    elf32_ehdr_t *ehdr = (elf32_ehdr_t *)file_buffer;
+    // SADECE MAGIC NUMBER KONTROLÜ (Şifre çözme kodlarını sildik)
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' || 
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
         printk("Hata: %s gecerli bir ELF dosyasi degil!\n", filename);
@@ -54,13 +60,26 @@ int load_and_exec_elf(const char *filename) {
         return -1;
     }
 
-    asm volatile("cli" ::: "memory");
-    uint32_t original_cr3;
+    uint32_t eflags;
+    asm volatile("pushfl; popl %0; cli" : "=r"(eflags)); 
     
+    uint32_t original_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(original_cr3) :: "memory");
     asm volatile("mov %0, %%cr3" :: "r"(new_pd) : "memory");
+
     for (int i = 0; i < ehdr->e_phnum; i++) {
-        elf32_phdr_t *phdr = (elf32_phdr_t *)(file_buffer + ehdr->e_phoff + (i * ehdr->e_phentsize));
+        uint32_t chunk_size = i * ehdr->e_phentsize;
+        uint32_t offset = ehdr->e_phoff + chunk_size;
+        if (offset < ehdr->e_phoff || offset >= (uint32_t)read_bytes || (uint32_t)read_bytes - offset < sizeof(elf32_phdr_t)) {
+            printk("[ELF LOADER] KRITIK HATA: Bozuk veya zararli ELF basligi (Phdr) tespit edildi! Islem durduruldu.\n");
+            
+            asm volatile("mov %0, %%cr3" :: "r"(original_cr3) : "memory");
+            if (eflags & 0x200) asm volatile("sti" ::: "memory");
+            kfree(file_buffer);
+            return -1;
+        }
+
+        elf32_phdr_t *phdr = (elf32_phdr_t *)(file_buffer + offset);
 
         if (phdr->p_type == 1) { // PT_LOAD
             uint32_t start_page = phdr->p_vaddr & 0xFFFFF000;
@@ -105,7 +124,9 @@ int load_and_exec_elf(const char *filename) {
     map_page(guard_page_addr, 0, 0); // 0 = Present Biti Kapalı
 
     asm volatile("mov %0, %%cr3" :: "r"(original_cr3) : "memory");
-    asm volatile("sti" ::: "memory");
+    if (eflags & 0x200) {
+        asm volatile("sti" ::: "memory");
+    }
     
     uint32_t entry_point = ehdr->e_entry;
     kfree(file_buffer);

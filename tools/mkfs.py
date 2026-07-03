@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 SECTOR_SIZE = 512
-DISK_SIZE = 100 * SECTOR_SIZE
+# [DÜZELTME]: Eski 100 sektörlük ölü kod, Kernel'in gerçek 2MB (4096) disk boyutuna güncellendi!
+TOTAL_SECTORS = 4096 
+DISK_SIZE = TOTAL_SECTORS * SECTOR_SIZE
 
 def write_disk():
     disk = bytearray(DISK_SIZE)

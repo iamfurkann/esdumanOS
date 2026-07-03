@@ -18,13 +18,18 @@ CORE_OBJS = kernel/kernel.o \
             lib/utils.o \
             lib/utils2.o \
             lib/stack.o \
-            crypto/aes.o \
-            tests/kernel/selftest.o \
+            crypto/aes.o
+
+TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_string.o \
             tests/kernel/test_memory.o \
             tests/kernel/test_pipe.o \
             tests/kernel/test_vfs.o \
-            tests/kernel/test_security.o
+            tests/kernel/test_security.o \
+            tests/kernel/test_stress.o \
+            tests/kernel/test_adversarial.o \
+            tests/kernel/test_integration.o \
+            tests/kernel/test_regression.o
 
 ifeq ($(ARCH), x86)
     # x86
@@ -87,6 +92,7 @@ export CC AS LD CFLAGS
 OBJS = $(CORE_OBJS) $(ARCH_OBJS)
 
 BIN = myos.bin
+TEST_BIN = myos_test.bin
 ISO = myos.iso
 LIBC = lib/libc.a
 
@@ -103,6 +109,9 @@ $(LIBC):
 
 $(BIN): $(LIBC) $(OBJS)
 	$(LD) $(LDFLAGS) $(OBJS) $(LIBC) -o $(BIN)
+
+$(TEST_BIN): $(LIBC) $(OBJS) $(TEST_OBJS)
+	$(LD) $(LDFLAGS) $(OBJS) $(TEST_OBJS) $(LIBC) -o $(TEST_BIN)
 
 $(ISO): $(BIN) grub/grub.cfg
 	mkdir -p isodir/boot/grub
@@ -134,18 +143,26 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 
 test:
 	@echo "--- Host Unit Tests Calistiriliyor ---"
-	@gcc tests/host/c/test_hash.c -o tests/host/test_runner
-	@./tests/host/test_runner
-	@python3 -m unittest discover -s tests/host/python/ -p "test_*.py"
+	
+	@# 1. Kripto (AES) C Host Testini Derle ve Calistir (-DARCH_X86 arch.h hatasini cozer)
+	@gcc -Wall -Wextra -I./include -I./crypto -DARCH_X86 tests/host/c/test_crypto.c crypto/aes.c -o tests/host/test_crypto
+	@./tests/host/test_crypto
+	
+	@# 2. Hash C Host Testini Derle ve Calistir
+	@gcc -Wall -Wextra -I./include -DARCH_X86 tests/host/c/test_hash.c -o tests/host/test_hash
+	@./tests/host/test_hash
+	
+	@# 3. Python (Dosya Sistemi/Arac) Testlerini Calistir
+	@python3 -m unittest discover -s tests/host/python -p "test_*.py"
 
-test_kernel: $(BIN) hello.elf
+test_kernel: $(TEST_BIN) hello.elf
 	@echo "--- Kernel QEMU Self-Test Calistiriliyor ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img conv=notrunc > /dev/null 2>&1
 	@python3 tools/inject.py disk.img hello.elf gizli.txt
-	@if $(QEMU) -kernel $(BIN) -append "kernel_pass=selftest" \
+	@if $(QEMU) -kernel $(TEST_BIN) -append "kernel_pass=selftest" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none; then \
@@ -160,6 +177,15 @@ test_kernel: $(BIN) hello.elf
 			echo "KERNEL PANIC/COKME YASANDI! (Exit Code: $$RET)"; exit 1; \
 		fi; \
 	fi
+
+fuzz:
+	@echo "--- Fuzzing Baslatiliyor ---"
+	@echo "NOT: Eger 'clang' bulunamadi hatasi alirsaniz: sudo apt install clang"
+	@# Clang ile fuzzer ve bellek hata yakalayicisi (ASan) acik sekilde derliyoruz
+	@clang -g -O1 -fsanitize=fuzzer,address -I./include -DARCH_X86 tests/host/c/fuzz_parser.c -o tests/host/fuzz_parser
+	@echo "Fuzzer derlendi! Maksimum 10 saniye boyunca saldiri yapilacak..."
+	@# Testi çalıştır (max_total_time=10 saniye boyunca aralıksız saldıracak)
+	@./tests/host/fuzz_parser -max_total_time=10
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
 	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."
@@ -182,5 +208,5 @@ clean:
 	$(MAKE) -C lib clean
 	rm -f hello.o hello.elf apps/init.elf apps/init_encrypted.elf tools/encrypt_tool
 	rm -f src/resources/init_elf_data.c
-	rm -f tests/host/test_runner
-	rm -rf $(OBJS) $(BIN) $(ISO) isodir message.txt gizli.txt
+	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/fuzz_parser
+	rm -rf $(OBJS) $(TEST_OBJS) $(BIN) $(TEST_BIN) $(ISO) isodir message.txt gizli.txt

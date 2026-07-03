@@ -33,11 +33,13 @@ void run_all_selftests(void) {
     run_string_tests();
     run_memory_tests();
     run_pipe_tests();
-    
-    // [YENİ EKLENEN MODÜLLER]
     run_vfs_tests();
     run_security_tests();
-
+    run_stress_tests();
+    run_adversarial_tests();
+    run_integration_tests();
+    run_regression_tests();
+    
     printk("\n======================================================\n");
     
     char pass_str[16]; ktest_itoa(tests_passed, pass_str);

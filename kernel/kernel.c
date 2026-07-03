@@ -6,7 +6,7 @@ extern uint32_t __bss_end;
 extern void init_timer(uint32_t freq);
 extern void init_fs(void);
 extern void init_security(multiboot_info_t *mboot_info);
-extern void run_all_selftests(void);
+extern void run_all_selftests(void) __attribute__((weak));
 extern uint8_t kernel_master_key[32];
 uint32_t kernel_stack_ring0[1024];
 
@@ -125,7 +125,13 @@ char *banner =
             }
         }
         if (is_test_mode) {
-            run_all_selftests();
+            if (run_all_selftests) {
+                run_all_selftests();
+            } else {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("\n[DIKKAT] TEST MODU: Test modulleri bu Kernel'e dahil edilmedi (Production Build).\n");
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            }
             while(1) { asm volatile("cli; hlt"); }
         }
     }

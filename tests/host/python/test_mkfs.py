@@ -15,10 +15,14 @@ class TestMkfs(unittest.TestCase):
             
         mkfs.write_disk()
         
+        # 1. Kontrol: disk.img dosyasi basariyla olustu mu?
         self.assertTrue(os.path.exists("disk.img"), "HATA: disk.img dosyasi olusturulamadi!")
         
+        # 2. Kontrol: Dosya boyutu Kernel standardı olan 4096 sektor * 512 byte = 2097152 byte mi?
         boyut = os.path.getsize("disk.img")
-        self.assertEqual(boyut, 51200, f"HATA: Beklenen boyut 51200 byte, ancak {boyut} byte bulundu!")
-
+        
+        # [DÜZELTME]: 51200 baytlık (50KB) eski assert, 2MB'lık yeni standarda yükseltildi.
+        self.assertEqual(boyut, 2097152, f"HATA: Beklenen boyut 2MB (2097152 byte), ancak {boyut} byte bulundu!")
+        
 if __name__ == '__main__':
     unittest.main()

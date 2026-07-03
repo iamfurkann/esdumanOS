@@ -14,17 +14,19 @@ jobs:
       - name: Kodlari Cek
         uses: actions/checkout@v3
 
-      - name: Bagimliliklari Kur (GCC, QEMU, Python)
+      - name: Bagimliliklari Kur (GCC, Clang, QEMU, Python)
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib qemu-system-x86 python3 nasm mtools xorriso
+          sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm mtools xorriso
 
-      - name: 1. Host Araclarini Test Et (Python & C)
+      - name: 1. Host Araclarini Test Et
         run: make test
 
-      - name: 2. Isletim Sistemini Derle (Build)
+      - name: 2. Fuzzing & Guvenlik Testleri
+        run: make fuzz
+
+      - name: 3. Isletim Sistemini Derle
         run: make
 
-      - name: 3. Kernel QEMU Self-Test
-        run: |
-          make test_kernel
+      - name: 4. Kernel QEMU Entegrasyon ve Regresyon Testleri
+        run: make test_kernel

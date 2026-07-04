@@ -20,7 +20,7 @@ extern int current_task;
 extern disk_file_entry_t dir_table[];
 extern process_t tasks[];
 
-static int is_valid_user_ptr(uint32_t addr) {
+int is_valid_user_ptr(uint32_t addr) {
     if (addr >= 0x400000 && addr < 0xC0000000) {
         return 1;
     }

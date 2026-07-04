@@ -39,6 +39,7 @@ void run_all_selftests(void) {
     run_adversarial_tests();
     run_integration_tests();
     run_regression_tests();
+    run_concurrency_tests();
     
     printk("\n======================================================\n");
     

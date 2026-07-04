@@ -35,14 +35,25 @@ uint32_t ata_identify(void) {
     uint8_t status = inb(ATA_PORT_STATUS);
     if (status == 0) return 4096;
 
-    while (inb(ATA_PORT_STATUS) & ATA_SR_BSY);
+    uint32_t timeout = 100000;
+    while ((inb(ATA_PORT_STATUS) & ATA_SR_BSY) && --timeout);
+    if (timeout == 0) {
+        printk("[ATA_DRV] UYARI: Identify asamasinda BSY Timeout! (4096 donuluyor)\n");
+        return 4096;
+    }
 
     if (inb(ATA_PORT_LBA_MID) != 0 || inb(ATA_PORT_LBA_HIGH) != 0) return 4096;
 
+    timeout = 100000;
     while (1) {
         status = inb(ATA_PORT_STATUS);
         if (status & ATA_SR_ERR) return 4096;
         if (status & ATA_SR_DRQ) break;
+        
+        if (--timeout == 0) {
+            printk("[ATA_DRV] UYARI: Identify DRQ/ERR Timeout! Donanim yanit vermiyor.\n");
+            return 4096;
+        }
     }
 
     uint16_t buffer[256];

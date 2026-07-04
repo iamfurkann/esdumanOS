@@ -38,5 +38,6 @@ void run_stress_tests(void);
 void run_adversarial_tests(void);
 void run_integration_tests(void);
 void run_regression_tests(void);
+void run_concurrency_tests(void);
 
 #endif // KTEST_H

@@ -29,7 +29,8 @@ TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_stress.o \
             tests/kernel/test_adversarial.o \
             tests/kernel/test_integration.o \
-            tests/kernel/test_regression.o
+            tests/kernel/test_regression.o \
+			tests/kernel/test_concurrency.o
 
 ifeq ($(ARCH), x86)
     # x86
@@ -179,13 +180,11 @@ test_kernel: $(TEST_BIN) hello.elf
 	fi
 
 fuzz:
-	@echo "--- Fuzzing Baslatiliyor ---"
-	@echo "NOT: Eger 'clang' bulunamadi hatasi alirsaniz: sudo apt install clang"
-	@# Clang ile fuzzer ve bellek hata yakalayicisi (ASan) acik sekilde derliyoruz
+	@echo "--- Fuzzing (libFuzzer) Baslatiliyor ---"
+	@mkdir -p tests/host/corpus
 	@clang -g -O1 -fsanitize=fuzzer,address -I./include -DARCH_X86 tests/host/c/fuzz_parser.c -o tests/host/fuzz_parser
-	@echo "Fuzzer derlendi! Maksimum 10 saniye boyunca saldiri yapilacak..."
-	@# Testi çalıştır (max_total_time=10 saniye boyunca aralıksız saldıracak)
-	@./tests/host/fuzz_parser -max_total_time=10
+	@echo "Bilinen 'Crash' (Zero-Day) dosyalari (Corpus) test ediliyor, ardindan yeni saldirilar uretilecek..."
+	@./tests/host/fuzz_parser tests/host/corpus -max_total_time=10
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
 	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."

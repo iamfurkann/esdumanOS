@@ -64,11 +64,13 @@ void run_integration_tests(void) {
     KTEST_ASSERT(cr_elf >= 0, "[STRICT] PROC-INT: Test icin gecerli minimal ELF diske yazildi");
 
     // Şimdi kendi oluşturduğumuz, şifre formatı ve boyutu kusursuz olan bu ELF'i çalıştıralım!
-    int pid = load_and_exec_elf(elf_name);
-    KTEST_ASSERT(pid > 0, "[STRICT] PROC-INT: load_and_exec_elf diskten okuyup gecerli bir PID dondu");
+    // [MİMARİ YAMASI]: load_and_exec_elf gerçek bir PID değil, Task Tablosundaki (tasks[]) 
+    // index (slot) numarasını döner. Karışıklığı önlemek için ismini 'array_index' yaptık.
+    int array_index = load_and_exec_elf(elf_name);
+    KTEST_ASSERT(array_index > 0, "[STRICT] PROC-INT: load_and_exec_elf diskten okuyup gecerli bir Array Index dondu");
 
-    if (pid > 0) {
-        KTEST_ASSERT(tasks[pid].uid == 0, "[STRICT] PROC-INT: Yeni surece dogru UID (Root) atandi");
-        KTEST_ASSERT(tasks[pid].fd_table[0].type != 0, "[STRICT] PROC-INT: Surece standart I/O FD'leri tahsis edildi");
+    if (array_index > 0) {
+        KTEST_ASSERT(tasks[array_index].uid == 0, "[STRICT] PROC-INT: Yeni surece dogru UID (Root) atandi");
+        KTEST_ASSERT(tasks[array_index].fd_table[0].type != 0, "[STRICT] PROC-INT: Surece standart I/O FD'leri tahsis edildi");
     }
 }

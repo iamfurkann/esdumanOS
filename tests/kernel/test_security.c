@@ -1,7 +1,12 @@
 #include "ktest.h"
 #include "syscall.h" 
+#include "process.h" // process_t ve tasks[] dizisine erismek icin
 
 extern void ft_strcpy(char *dest, const char *src);
+
+// Test bitince UID'yi temizleyebilmek icin Kernel degiskenlerini ice aktariyoruz
+extern process_t tasks[];
+extern int current_task;
 
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
@@ -16,6 +21,12 @@ static inline int sys_setuid(int uid, const char *password) {
 void run_security_tests(void) {
     printk("\n--- Guvenlik ve Yetkilendirme Testleri ---\n");
     serial_print("\n--- Guvenlik ve Yetkilendirme Testleri ---\n");
+    
+    // [TEST İZOLASYONU]: Test baslamadan onceki orijinal UID'yi kaydet
+    int original_uid = 0;
+    if (current_task >= 0) {
+        original_uid = tasks[current_task].uid;
+    }
     
     // Syscall güvenliğini aşmak için adresleri Kullanıcı Alanına (User Space) yerleştiriyoruz
     char *u_pass_wrong = (char *)0x500400;
@@ -40,4 +51,13 @@ void run_security_tests(void) {
     // 4. DOĞRU PAROLA TESTİ: Kesinlikle 0 dönmeli!
     int root_res_correct = sys_setuid(0, u_pass_correct);
     KTEST_ASSERT(root_res_correct == 0, "[STRICT] sys_setuid DOGRU sifreyle kesinlikle 0 donuyor");
+
+    // =========================================================================
+    // TEMİZLİK (Teardown)
+    // =========================================================================
+    // Ne olursa olsun (syscall başarsız olsa bile) Idle Task'ı yetkisiz bırakmamak 
+    // için manuel olarak eski haline zorluyoruz!
+    if (current_task >= 0) {
+        tasks[current_task].uid = original_uid; 
+    }
 }

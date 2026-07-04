@@ -66,4 +66,18 @@ void run_regression_tests(void) {
     // hizalaması bozuluyordu.
     // =========================================================
     KTEST_ASSERT(sizeof(void *) == 4, "[STRICT] REG-04: Mimari ABI pointer boyutu (4 byte / 32-bit) korundu");
+
+    // =========================================================================
+    // BUG-05: ATA Identify Sonsuz Dongu Kilitlenmesi (Hardware Livelock)
+    // =========================================================================
+    // Eski Kod: Eger donanim (Gercek Disk) bozulur ve DRQ/ERR bayraklarini hic 
+    // kaldirmazsa, ata_identify() 'while(1)' icinde sonsuza kadar kilitleniyordu.
+    // Yeni Kod: Timeout mekanizmasi sayesinde donanim bozula bile fonksiyon
+    // guvenli bir sekilde asili kalmadan (hang olmadan) geri donmek zorundadir.
+    extern uint32_t ata_identify(void);
+    uint32_t identified_sectors = ata_identify();
+    
+    // Eger buraya ulasabildiysek, fonksiyon bizi sonsuz dongude hapsetmedi demektir!
+    KTEST_ASSERT(identified_sectors >= 4096, 
+        "[STRICT] REG-05: ATA Identify donanim kilitlenmesine karsi Timeout korumali");
 }

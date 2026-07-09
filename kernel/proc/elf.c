@@ -7,6 +7,7 @@
 #include "pipe.h"
 #include "crypto.h"
 #include "security.h"
+#include "errno.h"
 
 extern void map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
 extern uint32_t pmm_alloc_frame(void);
@@ -19,14 +20,14 @@ extern void kfree(void *ptr);
 extern uint8_t kernel_master_key[32]; // [YENİ]: Şifre çözme anahtarı
 extern security_level_t current_sec_level;
 
-int load_and_exec_elf(const char *filename) {
+int load_and_exec_elf(const char *filename, uint8_t parent_id) {
     if (!check_free_task_slot()) {
         printk("[ELF LOADER] HATA: Maksimum gorev limitine (16) ulasildi. '%s' yuklenemedi!\n", filename);
         return -1;
     }
 
     vfs_file_t file;
-    if (fs_open(filename, 0, &file) != 0) {
+    if (fs_open(filename, parent_id, &file) != E_OK) {
         printk("Hata: '%s' disk uzerinde bulunamadi!\n", filename);
         return -1;
     }
@@ -44,15 +45,12 @@ int load_and_exec_elf(const char *filename) {
     }
 
     elf32_ehdr_t *ehdr = (elf32_ehdr_t *)file_buffer;
-    // SADECE MAGIC NUMBER KONTROLÜ (Şifre çözme kodlarını sildik)
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' || 
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
         printk("Hata: %s gecerli bir ELF dosyasi degil!\n", filename);
         kfree(file_buffer);
         return -1;
     }
-
-    printk("[ELF LOADER] '%s' isleniyor... Giris Adresi: 0x%x\n", filename, ehdr->e_entry);
 
     uint32_t new_pd = clone_page_directory();
     if (!new_pd) {
@@ -161,8 +159,6 @@ int load_and_exec_elf(const char *filename) {
                 tasks[array_index].fd_table[1].type = 1; // stdout
                 tasks[array_index].fd_table[2].type = 1; // stderr
             }
-            
-            printk("[ELF LOADER] PID: %d (Slot: %d) FD tablosu miras alindi.\n", new_pid, array_index);
             return array_index;
         }
     }

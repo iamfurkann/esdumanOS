@@ -23,6 +23,7 @@ typedef struct {
     uint8_t  file_type;              // 1 Byte (FT_REGULAR veya FT_DIR)
     uint8_t  entry_id;               // 1 Byte (0 - 31 arası eşsiz ID)
     uint8_t  parent_id;              // 1 Byte (Üst dizinin entry_id'si, Kök dizin için 0)
+    uint32_t owner_uid;
 } disk_file_entry_t;
 
 typedef struct {

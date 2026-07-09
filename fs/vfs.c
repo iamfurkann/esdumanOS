@@ -5,6 +5,7 @@
 #include "errno.h"
 #include "security.h"
 #include "crypto.h"
+#include "process.h"
 
 extern uint8_t kernel_master_key[32];
 
@@ -167,13 +168,22 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
 }
 
 int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
+    extern int current_task;
+    extern process_t tasks[];
+    uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+    
+    if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
+        printk("[VFS GUVENLIK] Erisim Engellendi: Sadece ROOT 'passwd' dosyasini degistirebilir!\n");
+        return E_ACCESS;
+    }
+
     vfs_file_t temp_file;
     if (fs_open(name, parent_id, &temp_file) == E_OK) {
         return E_EXISTS;
     }
 
     int free_idx = -1;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 1; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 0) {
             free_idx = i;
             break;
@@ -219,7 +229,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
         bytes_written += chunk_size;
     }
 
-ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
+    ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
     ft_strcpy(dir_table[free_idx].filename, name);
     dir_table[free_idx].start_sector = new_sector;
     dir_table[free_idx].file_size = size;
@@ -227,6 +237,11 @@ ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
     dir_table[free_idx].file_type = 0;
     dir_table[free_idx].entry_id = free_idx; 
     dir_table[free_idx].parent_id = parent_id; 
+
+    extern int current_task;
+    extern process_t tasks[];
+    uint32_t current_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+    dir_table[free_idx].owner_uid = current_uid;
 
     save_directory_to_disk();
     return E_OK;
@@ -269,6 +284,15 @@ int fs_delete(const char *name, uint8_t parent_id) {
         return E_ACCESS;
     }
 
+    extern int current_task;
+    extern process_t tasks[];
+    uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+    
+    if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
+        printk("[VFS GUVENLIK] Erisim Engellendi: Sadece ROOT 'passwd' dosyasini silebilir!\n");
+        return E_ACCESS;
+    }
+
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1 && 
             dir_table[i].parent_id == parent_id && 
@@ -294,6 +318,15 @@ int fs_delete(const char *name, uint8_t parent_id) {
 int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
         printk("[VFS HATA] Sistem Immutable (Salt-Okunur) modda. Dosya adi degistirilemez!\n");
+        return E_ACCESS;
+    }
+
+    extern int current_task;
+    extern process_t tasks[];
+    uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+    
+    if ((ft_strcmp(old_name, "passwd") == 0 || ft_strcmp(new_name, "passwd") == 0) && c_uid != 0) {
+        printk("[VFS GUVENLIK] Erisim Engellendi: Sadece ROOT 'passwd' dosyasini adlandirabilir!\n");
         return E_ACCESS;
     }
 
@@ -334,7 +367,7 @@ int fs_mkdir(const char *name, uint8_t parent_id) {
     if (fs_get_entry_idx(name, parent_id) != -1) return E_EXISTS;
 
     int free_idx = -1;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 1; i < MAX_FILES_IN_DIR; i++) { 
         if (dir_table[i].is_used == 0) {
             free_idx = i;
             break;
@@ -350,6 +383,11 @@ int fs_mkdir(const char *name, uint8_t parent_id) {
     dir_table[free_idx].entry_id = free_idx;
     dir_table[free_idx].parent_id = parent_id;
     dir_table[free_idx].is_used = 1;
+
+    extern int current_task;
+    extern process_t tasks[];
+    uint32_t current_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+    dir_table[free_idx].owner_uid = current_uid;
 
     save_directory_to_disk();
     return E_OK;

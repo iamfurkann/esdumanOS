@@ -34,6 +34,8 @@ void run_all_selftests(void) {
     run_memory_tests();
     run_pipe_tests();
     run_vfs_tests();
+    run_devfs_tests();
+    run_passwd_tests();
     run_security_tests();
     run_stress_tests();
     run_adversarial_tests();

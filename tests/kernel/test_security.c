@@ -34,7 +34,7 @@ void run_security_tests(void) {
     char *u_empty = (char *)0x500600;
     
     ft_strcpy(u_pass_wrong, "yanlis_sifre_123");
-    ft_strcpy(u_pass_correct, "root"); // Sistemdeki geçerli root parolası
+    ft_strcpy(u_pass_correct, "1234"); // Sistemdeki geçerli root parolası
     ft_strcpy(u_empty, "");
 
     // 1. ROOT YETKİSİNİ BIRAK: UID'yi geçici olarak 1000'e (Normal Kullanıcı) çek
@@ -52,11 +52,6 @@ void run_security_tests(void) {
     int root_res_correct = sys_setuid(0, u_pass_correct);
     KTEST_ASSERT(root_res_correct == 0, "[STRICT] sys_setuid DOGRU sifreyle kesinlikle 0 donuyor");
 
-    // =========================================================================
-    // TEMİZLİK (Teardown)
-    // =========================================================================
-    // Ne olursa olsun (syscall başarsız olsa bile) Idle Task'ı yetkisiz bırakmamak 
-    // için manuel olarak eski haline zorluyoruz!
     if (current_task >= 0) {
         tasks[current_task].uid = original_uid; 
     }

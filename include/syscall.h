@@ -19,7 +19,7 @@
 #define SYSCALL_CAT_FILE        11
 #define SYSCALL_RM_FILE         22
 #define SYSCALL_MV_FILE         23
-// [YENİ]: Dizin (Klasör) İşlemleri
+
 #define SYSCALL_MKDIR           26  
 #define SYSCALL_LS_DIR          28  
 #define SYSCALL_GET_DIR_ID      29  
@@ -50,4 +50,8 @@
 #define SYSCALL_PIPE            36
 #define SYSCALL_DUP2            37
 #define SYSCALL_CLOSE           38
+#define SYSCALL_DMESG           39
+#define SYSCALL_OPEN            40
+#define SYSCALL_AUTH            41
+#define SYSCALL_GET_ARGS        42
 #endif // SYSCALL_H

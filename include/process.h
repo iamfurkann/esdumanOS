@@ -30,6 +30,7 @@ typedef struct {
 #define FD_TYPE_CONSOLE 1 // Ekran / Klavye
 #define FD_TYPE_FILE    2 // VFS Dosyası
 #define FD_TYPE_PIPE    3 // Boru Hattı
+#define FD_TYPE_DEVICE  4 
 
 typedef struct {
     uint8_t type;       // Dosya türü
@@ -62,6 +63,8 @@ typedef struct {
     uint8_t kstack[4096] __attribute__((aligned(16)));
     mutex_t *held_mutex;
     file_descriptor_t fd_table[MAX_FD_PER_TASK];
+
+    char cmd_args[128];
 } process_t;
 
 extern process_t tasks[MAX_TASKS];

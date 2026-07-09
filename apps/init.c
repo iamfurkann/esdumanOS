@@ -90,6 +90,8 @@ int sys_get_dir_id(const char *name, int parent_id) { return syscall(29, (int)na
 int pipe(int pipefd[2]) { return syscall(SYSCALL_PIPE, (int)pipefd, 0, 0); }
 int dup2(int oldfd, int newfd) { return syscall(SYSCALL_DUP2, oldfd, newfd, 0); }
 int sys_close(int fd) { return syscall(SYSCALL_CLOSE, fd, 0, 0); }
+void sys_dmesg(void) { syscall(SYSCALL_DMESG, 0, 0, 0); }
+int sys_open(const char *name, int parent_id) { return syscall(SYSCALL_OPEN, (int)name, parent_id, 0); }
 /* --- 4. ORTAM DEĞİŞKENLERİ (ENV) --- */
 char env_keys[20][32];
 char env_vals[20][64];
@@ -166,44 +168,125 @@ void show_help(void) {
     printk("  export     : Yeni degisken tanimlar (Orn: export DEG DEGER)\n");
 }
 
+// Linuxtaki 'cat' programinin yuksek performansli (Buffered I/O) implementasyonu
+int builtin_cat(char **args, int current_dir_id) {
+    int flag_n = 0, flag_b = 0, flag_E = 0, flag_s = 0, flag_T = 0;
+    int file_args_start = 1;
+    
+    // 1. FLAG AYRIŞTIRMA
+    for (int i = 1; args[i] != 0; i++) {
+        if (args[i][0] == '-' && args[i][1] != '\0') {
+            for (int j = 1; args[i][j] != '\0'; j++) {
+                char c = args[i][j];
+                if (c == 'n') flag_n = 1;
+                else if (c == 'b') flag_b = 1; 
+                else if (c == 'E') flag_E = 1;
+                else if (c == 's') flag_s = 1;
+                else if (c == 'T') flag_T = 1;
+                else if (c == 'A') { flag_E = 1; flag_T = 1; }
+                else {
+                    printk("cat: Gecersiz secenek -- '"); 
+                    char err[2] = {c, '\0'}; printk(err); printk("'\n");
+                    return 1;
+                }
+            }
+            file_args_start++;
+        } else break; 
+    }
+
+    if (args[file_args_start] == 0) {
+        printk("cat: Lutfen okunacak bir dosya belirtin.\n");
+        return 1;
+    }
+
+    // 2. DOSYA OKUMA VE BİÇİMLENDİRME (Buffered I/O)
+    for (int i = file_args_start; args[i] != 0; i++) {
+        int fd = sys_open(args[i], current_dir_id); 
+        if (fd < 0) { 
+            printk("cat: "); printk(args[i]); printk(": Boyle bir dosya yok.\n"); 
+            continue; 
+        }
+        
+        char buf[256];          
+        char out_buf[256];      
+        int out_idx = 0;        
+        int bytes_read;
+        int line_num = 1;
+        int is_new_line = 1;
+        int consecutive_empty_lines = 0;
+
+        // [DÜZELTME]: printk artik sadece tek arguman (out_buf) aliyor. "%s" kaldirildi!
+        #define FLUSH_OUT() do { \
+            if (out_idx > 0) { \
+                out_buf[out_idx] = '\0'; \
+                printk(out_buf); \
+                out_idx = 0; \
+            } \
+        } while(0)
+
+        // VFS'ten okuma dongusu
+        while ((bytes_read = syscall(3 /* SYSCALL_READ */, fd, (int)buf, 256)) > 0) {
+            for (int k = 0; k < bytes_read; k++) {
+                char c = buf[k];
+                if (c == '\r' || c == '\b' || c == '\0') continue; 
+
+                int is_empty_line = (c == '\n');
+                
+                if (flag_s && is_empty_line && is_new_line) {
+                    consecutive_empty_lines++;
+                    if (consecutive_empty_lines > 1) continue; 
+                } else if (!is_empty_line) {
+                    consecutive_empty_lines = 0;
+                }
+
+                if (out_idx > 240) { FLUSH_OUT(); }
+
+                // [DÜZELTME]: Numaralandirma satirinda "%s" kullanimi kaldirildi, ayri ayri basiliyor.
+                if (is_new_line) {
+                    if (flag_b) {
+                        if (!is_empty_line) {
+                            FLUSH_OUT(); 
+                            char num_str[16]; ft_itoa(line_num++, num_str);
+                            printk("    "); printk(num_str); printk("  ");
+                        }
+                    } else if (flag_n) {
+                        FLUSH_OUT();
+                        char num_str[16]; ft_itoa(line_num++, num_str);
+                        printk("    "); printk(num_str); printk("  ");
+                    }
+                    is_new_line = 0;
+                }
+
+                if (c == '\n') {
+                    if (flag_E) out_buf[out_idx++] = '$'; 
+                    out_buf[out_idx++] = '\n';
+                    is_new_line = 1;
+                } 
+                else if (c == '\t' && flag_T) {
+                    out_buf[out_idx++] = '^'; 
+                    out_buf[out_idx++] = 'I';
+                } 
+                else {
+                    out_buf[out_idx++] = c;
+                }
+            }
+            FLUSH_OUT(); 
+        }
+        FLUSH_OUT(); 
+        
+        #undef FLUSH_OUT 
+
+        sys_close(fd); 
+    }
+    return 0;
+}
+
+
 void execute_command(char **args, char *redirect_file) {
     if (!args[0]) return;
 
-    if (ft_strcmp(args[0], "echo") == 0) {
-        char output_buffer[512]; output_buffer[0] = '\0';
-        int i = 1, newline = 1;
-        if (args[1] && ft_strcmp(args[1], "-n") == 0) { newline = 0; i++; }
-        while (args[i]) {
-            ft_strcpy(&output_buffer[ft_strlen(output_buffer)], args[i]);
-            if (args[i+1]) ft_strcpy(&output_buffer[ft_strlen(output_buffer)], " ");
-            i++;
-        }
-        if (newline) ft_strcpy(&output_buffer[ft_strlen(output_buffer)], "\n");
-
-        if (redirect_file) {
-            sys_create_file(redirect_file, output_buffer, current_dir_id);
-            printk("[OK] Echo ciktisi diske yazildi!\n");
-        } else {
-            printk(output_buffer);
-        }
-        last_exit_status = 0;
-    }
-    else if (ft_strcmp(args[0], "cat") == 0) {
-        if (args[1]) {
-            if (sys_get_dir_id(args[1], current_dir_id) != -1) {
-                printk("cat: "); printk(args[1]); printk(": Bu bir dizin (Is a directory)\n");
-            } else {
-                sys_cat_file(args[1], current_dir_id); 
-            }
-        } else {
-            char c;
-            printk("[BILGI] Klavye okuma modu. Cikmak icin ESC'ye basin...\n");
-            while (syscall(3, 0, (int)&c, 1) > 0) {
-                if (c == 27 || c == 4) { printk("\n"); break; }
-                char str[2] = {c, '\0'}; printk(str); 
-            }
-        }
-        last_exit_status = 0;
+    if (ft_strcmp(args[0], "cat") == 0) {
+        last_exit_status = builtin_cat(args, current_dir_id);
     }
     else if (ft_strcmp(args[0], "pwd") == 0) { printk(current_path); printk("\n"); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "env") == 0) {
@@ -215,31 +298,33 @@ void execute_command(char **args, char *redirect_file) {
         else { printk("Hata. Ornek: export DIL TR\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "help") == 0) { show_help(); last_exit_status = 0; }
-    else if (ft_strcmp(args[0], "clear") == 0) { syscall(10, 0, 0, 0); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "ls") == 0) { sys_ls_dir(current_dir_id); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "mkdir") == 0) {
         if (args[1]) sys_mkdir(args[1], current_dir_id); else printk("Kullanim: mkdir <dizin>\n");
     }
     else if (ft_strcmp(args[0], "cd") == 0) {
-        if (!args[1] || ft_strcmp(args[1], "/") == 0) { 
-            current_dir_id = 0; 
-            ft_strcpy(current_path, "/"); 
+        char *target = args[1];
+        if (!target) target = "~";
+
+        int new_id = sys_get_dir_id(target, current_dir_id);
+        if (new_id != -1) { 
+            current_dir_id = new_id;
+            
+            if (target[0] == '/') {
+                ft_strcpy(current_path, target);
+            } else if (ft_strcmp(target, "~") == 0) {
+                ft_strcpy(current_path, get_env("HOME"));
+            } else if (ft_strcmp(target, "..") == 0) {
+                int len = ft_strlen(current_path);
+                while(len > 1 && current_path[len-1] != '/') len--;
+                if (len > 1) current_path[len-1] = '\0';
+                else current_path[1] = '\0'; // root
+            } else if (ft_strcmp(target, ".") != 0) {
+                if (ft_strcmp(current_path, "/") != 0) ft_strcpy(&current_path[ft_strlen(current_path)], "/");
+                ft_strcpy(&current_path[ft_strlen(current_path)], target);
+            }
         } 
-        else if (ft_strcmp(args[1], "..") == 0) {
-            current_dir_id = 0; 
-            ft_strcpy(current_path, "/"); 
-        }
-        else {
-            int new_id = sys_get_dir_id(args[1], current_dir_id);
-            if (new_id != -1) { 
-                current_dir_id = new_id; 
-                if (ft_strcmp(current_path, "/") != 0) {
-                    ft_strcpy(&current_path[ft_strlen(current_path)], "/");
-                }
-                ft_strcpy(&current_path[ft_strlen(current_path)], args[1]); 
-            } 
-            else { printk("cd: Boyle bir dizin yok\n"); }
-        }
+        else { printk("cd: Boyle bir dizin yok: "); printk(target); printk("\n"); }
     }
     else if (ft_strcmp(args[0], "write") == 0) {
         if (args[1] && args[2]) {
@@ -317,7 +402,7 @@ void execute_command(char **args, char *redirect_file) {
     else if (ft_strcmp(args[0], "panic") == 0) { syscall(19, 0, 0, 0); }
     else if (ft_strcmp(args[0], "reboot") == 0) { syscall(20, 0, 0, 0); }
     else if (ft_strcmp(args[0], "halt") == 0) { syscall(21, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "exec") == 0) { if (args[1]) syscall(5, (int)args[1], 0, 0); }
+    else if (ft_strcmp(args[0], "exec") == 0) { if (args[1]) syscall(5, (int)args[1], current_dir_id, 0); }
     else if (ft_strcmp(args[0], "exit") == 0) { printk("exit\n"); syscall(1, 0, 0, 0); while(1); }
     else if (ft_strcmp(args[0], "cat_raw") == 0) {
         if (args[1]) sys_cat_raw_file(args[1], current_dir_id); else printk("Kullanim: cat_raw <dosya>\n");
@@ -334,9 +419,42 @@ void execute_command(char **args, char *redirect_file) {
             printk("\n[SISTEM] Yetkiler ROOT olarak yukseltildi!\n");
         }
     }
+    else if (ft_strcmp(args[0], "dmesg") == 0) {
+        sys_dmesg();
+    }
     else {
-        printk("minishell: command not found: "); printk(args[0]); printk("\n");
-        last_exit_status = 127;
+        if (ft_strlen(args[0]) > 58) {
+            printk("minishell: komut adi cok uzun (max 58 karakter)\n");
+            last_exit_status = 127;
+            return;
+        }
+
+        char bin_path[64] = "/bin/";
+        ft_strcpy(&bin_path[5], args[0]);
+
+        char full_cmd[128];
+        int idx = 0;
+        for (int i = 0; args[i] != 0; i++) {
+            int j = 0;
+            while (args[i][j]) { 
+                if (idx < 126) full_cmd[idx++] = args[i][j++]; 
+                else break;
+            }
+            if (args[i+1] != 0 && idx < 126) full_cmd[idx++] = ' ';
+        }
+        full_cmd[idx] = '\0';
+
+        int fd = sys_open(bin_path, current_dir_id);
+        if (fd >= 0) {
+            sys_close(fd); 
+            int res = syscall(5, (int)bin_path, current_dir_id, (int)full_cmd); 
+            if (res == -1) last_exit_status = 126; 
+            else last_exit_status = 0; 
+        } 
+        else {
+            printk("minishell: command not found: "); printk(args[0]); printk("\n");
+            last_exit_status = 127;
+        }
     }
 }
 
@@ -360,52 +478,44 @@ void main(void) {
     int failed_attempts = 0;
     int penalty_seconds = 1;
 
-    while (1) {
+    int login_success = 0;
+    while (!login_success) {
         printk("login: ");
         read_line(user_buf, 0); 
 
         printk("password: ");
-        read_line(pass_buf, 1); 
+        read_line(pass_buf, 1);
 
-        if (ft_strcmp(user_buf, "root") == 0 && hash_djb2_salted(pass_buf) == 0x19E28ECF) {
-            current_uid = 0;
-            ft_strcpy(current_username, "root");
-            break;
-        } 
-        else if (ft_strcmp(user_buf, "esduman") == 0 && hash_djb2_salted(pass_buf) == 0x7DD17035) {
-            current_uid = 1000;
-            ft_strcpy(current_username, "esduman");
-            break;
-        } 
-        else {
-            failed_attempts++;
-            
-            printk("\n[HATA] Yanlis kullanici adi veya sifre!\n");
-            if (failed_attempts >= 3) {
-                printk("[GUVENLIK] Cok fazla hatali deneme! ");
-                
-                char sec_str[16];
-                ft_itoa(penalty_seconds, sec_str);
-                printk(sec_str);
-                printk(" saniye bekleniyor...\n");
+        int uid = syscall(SYSCALL_AUTH, (int)user_buf, (int)pass_buf, 0);
 
-                for (volatile int sec = 0; sec < penalty_seconds; sec++) {
-                    for (volatile int delay = 0; delay < 50000000; delay++) {
-                        asm volatile("nop"); // İşlemciyi oyalıyoruz
-                    }
-                }
-
-                penalty_seconds *= 2; 
-            }
-            printk("\n");
+        if (uid >= 0) {
+            current_uid = uid;
+            ft_strcpy(current_username, user_buf);
+            login_success = 1;
+        } else {
+            printk("\n[HATA] Gecersiz kullanici adi veya sifre!\n\n");
         }
     }
     if (current_uid == 0) {
         sys_setuid(0, pass_buf); 
+        current_dir_id = sys_get_dir_id("root", 0);
+        ft_strcpy(current_path, "/root");
+        set_env("HOME", "/root");
     } else {
         sys_setuid(current_uid, ""); 
+        int home_id = sys_get_dir_id("home", 0);
+        current_dir_id = sys_get_dir_id(current_username, home_id);
+        
+        ft_strcpy(current_path, "/home/");
+        ft_strcpy(&current_path[ft_strlen(current_path)], current_username);
+        set_env("HOME", current_path);
     }
     
+    if (current_dir_id == -1) {
+        current_dir_id = 0;
+        ft_strcpy(current_path, "/");
+    }
+
     set_env("USER", current_username);
 
     printk("\n[esdumanOS] Basariyla giris yapildi. Yetki (UID): ");
@@ -470,12 +580,22 @@ void main(void) {
             }
         }
 
-        /* ENV VARIABLE EXPANSION */
+        /* ENV VARIABLE VE TILDE (~) EXPANSION */
         for (int i = 0; args[i] != 0; i++) {
             if (args[i][0] == '$') {
                 if (args[i][1] == '?') {
                     static char status_str[16]; ft_itoa(last_exit_status, status_str); args[i] = status_str;
                 } else args[i] = get_env(&args[i][1]);
+            }
+            else if (args[i][0] == '~') {
+                static char expanded_path[128];
+                char *home = get_env("HOME");
+                ft_strcpy(expanded_path, home);
+                
+                if (args[i][1] == '/') {
+                    ft_strcpy(&expanded_path[ft_strlen(expanded_path)], &args[i][1]);
+                }
+                args[i] = expanded_path;
             }
         }
 

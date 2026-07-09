@@ -35,8 +35,12 @@
 #include "errno.h"
 #include "isr.h"
 #include "security.h"
+#include "devfs.h"
 
 extern void switch_to_user_mode(uint32_t eip, uint32_t esp);
 extern unsigned char init_elf[];
 extern unsigned int init_elf_len;
-#endif
+
+void klog_write_char(char c);
+void dump_klog(void);
+#endif //KERNEL_H

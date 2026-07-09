@@ -10,15 +10,163 @@
 #include "security.h"
 #include "process.h"
 #include "pipe.h"
+#include "devfs.h"
 
 extern security_level_t current_sec_level; 
 extern void set_security_level(security_level_t level);
 extern char get_keyboard_char(void);
 extern void exit_current_process(arch_regs_t *regs);
-extern int load_and_exec_elf(const char *);
+extern int load_and_exec_elf(const char *, uint8_t);
 extern int current_task;
 extern disk_file_entry_t dir_table[];
 extern process_t tasks[];
+extern void dump_klog(void);
+
+void print_hexdump(uint32_t addr, int lenght) {
+  uint8_t *ptr = (uint8_t *)addr;
+  const char hex_chars[] = "0123456789ABCDEF";
+
+  for (int i = 0; i < lenght; i += 16) {
+    printk("0x%x: ", (uint32_t)(ptr + i));
+    for (int j = 0; j < 16; j++) {
+      if (i + j < lenght) {
+        uint8_t byte = ptr[i + j];
+        printk("%c%c ", hex_chars[byte >> 4], hex_chars[byte & 0x0F]);
+      } else {
+        printk("  ");
+      }
+      if (j == 7) printk(" ");
+    }
+    printk(" |");
+    for (int j = 0; j < 16; j++) {
+      if (i + j < lenght) {
+        uint8_t byte = ptr[i + j];
+        if (byte >= 32 && byte <= 126) printk("%c", byte);
+        else printk(".");
+      }
+    }
+    printk("|\n");
+  }
+}
+
+static int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
+    if (!path || !path[0]) return -1;
+    
+    int current_id = start_dir_id;
+    int i = 0;
+    
+    if (path[0] == '/') {
+        current_id = 0; 
+        i++;
+    }
+    
+    char token[64];
+    int t_idx = 0;
+    
+    while (1) {
+        if (path[i] == '/' || path[i] == '\0') {
+            token[t_idx] = '\0';
+            
+            if (path[i] == '\0') {
+                int j = 0;
+                while (token[j]) { basename[j] = token[j]; j++; }
+                basename[j] = '\0';
+                return current_id;
+            }
+            
+            if (t_idx > 0) {
+                if (token[0] == '.' && token[1] == '\0') {
+                } 
+                else if (token[0] == '.' && token[1] == '.' && token[2] == '\0') {
+                    extern disk_file_entry_t dir_table[];
+                    if (current_id != 0) {
+                        for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
+                            if (dir_table[k].entry_id == current_id && dir_table[k].file_type == 1 && dir_table[k].is_used == 1) {
+                                current_id = dir_table[k].parent_id;
+                                break;
+                            }
+                        }
+                    }
+                }
+                else {
+                    extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
+                    int idx = fs_get_entry_idx(token, current_id);
+                    if (idx == -1) return -1; // Klasör yok!
+                    
+                    extern disk_file_entry_t dir_table[];
+                    if (dir_table[idx].file_type != 1) return -1;
+                    
+                    current_id = dir_table[idx].entry_id;
+                }
+            }
+            t_idx = 0;
+        } else {
+            if (t_idx < 63) token[t_idx++] = path[i];
+        }
+        i++;
+    }
+    return -1;
+}
+
+static int check_vfs_access(int entry_id, int needs_write) {
+    extern int current_task;
+    extern process_t tasks[];
+    extern disk_file_entry_t dir_table[];
+
+    if (current_task < 0) return 1; 
+    uint32_t my_uid = tasks[current_task].uid;
+    if (my_uid == 0) return 1;
+
+    int curr = entry_id;
+    int is_in_tmp = 0;
+
+    while (curr != 0) {
+        int found = 0;
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].entry_id == curr && dir_table[i].is_used) {
+                char *name = dir_table[i].filename;
+                
+                if (dir_table[i].parent_id == 0 && name[0] == 't' && name[1] == 'm' && name[2] == 'p' && name[3] == '\0') {
+                    is_in_tmp = 1;
+                }
+                
+                if (dir_table[i].owner_uid == 0 && name[0]=='r' && name[1]=='o' && name[2]=='o' && name[3]=='t' && name[4]=='\0') {
+                    return 0;
+                }
+                
+                curr = dir_table[i].parent_id;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+    if (is_in_tmp) return 1;
+
+    if (!needs_write) {
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].entry_id == entry_id && dir_table[i].is_used) {
+                char *name = dir_table[i].filename;
+                if (dir_table[i].owner_uid == 0 && name[0]=='s' && name[1]=='h' && name[2]=='a' && 
+                    name[3]=='d' && name[4]=='o' && name[5]=='w' && name[6]=='\0') {
+                    return 0;
+                }
+                break;
+            }
+        }
+    }
+
+    if (needs_write) {
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].entry_id == entry_id && dir_table[i].is_used) {
+                if (dir_table[i].owner_uid != my_uid) return 0;
+                break;
+            }
+        }
+    }
+    
+    return 1;
+}
 
 int is_valid_user_ptr(uint32_t addr) {
     if (addr >= 0x400000 && addr < 0xC0000000) {
@@ -27,7 +175,7 @@ int is_valid_user_ptr(uint32_t addr) {
     return 0;
 }
 
-static uint32_t hash_djb2_salted(const char *str) {
+uint32_t hash_djb2_salted(const char *str) {
     uint32_t hash = 5381;
     while (*str) {
         hash = ((hash << 5) + hash) + *str++;
@@ -41,30 +189,64 @@ void syscall_handler(arch_regs_t *regs) {
     uint32_t syscall_num = regs->eax;
 
     switch (syscall_num) {
-
-        /* ── 1. GÖREV VE SÜREÇ YÖNETİMİ ──────────────────────────── */
         case SYSCALL_EXIT: {
             extern int current_task;
-            printk("\n[KERNEL] PID %d sonlandi.\n", current_task);
             exit_current_process(regs); 
             break;
         }
-        case SYSCALL_EXEC: {
+        case SYSCALL_EXEC: { // 5
             if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
-            
-            if (tasks[current_task].uid != 0) { 
+            char *target_path = (char *)regs->ebx;
+            uint8_t calling_dir_id = (uint8_t)regs->ecx;
+
+            char temp_args[128];
+            temp_args[0] = '\0';
+            char *args_str = (char *)regs->edx; 
+            if (args_str && is_valid_user_ptr((uint32_t)args_str)) {
+                int i = 0;
+                while (args_str[i] && i < 127) {
+                    temp_args[i] = args_str[i];
+                    i++;
+                }
+                temp_args[i] = '\0';
+            }
+
+            char basename[64];
+            int parent_id = vfs_resolve_path(target_path, calling_dir_id, basename);
+            if (parent_id == -1 || basename[0] == '\0') { regs->eax = -1; break; }
+
+            extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
+            extern disk_file_entry_t dir_table[];
+            int bin_idx = fs_get_entry_idx("bin", 0);
+            int bin_id = (bin_idx != -1) ? dir_table[bin_idx].entry_id : -1;
+
+            if (parent_id != bin_id && tasks[current_task].uid != 0) { 
                 regs->eax = -1; 
-                printk("ERISIM ENGELLENDI: Bu komut icin ROOT (sudo) yetkisi gereklidir.\n"); 
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("exec: Erisim Engellendi! (/bin disindaki programlar icin ROOT yetkisi gerekir)\n"); 
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
                 break; 
             }
-            else { 
-                extern int foreground_task;
-                extern void sleep_current_task(arch_regs_t *, int);
-                int child_idx = load_and_exec_elf((char *)regs->ebx); 
-                if (child_idx >= 0) {
-                    foreground_task = child_idx;
-                    sleep_current_task(regs, 5);
+
+            extern int foreground_task;
+            extern void sleep_current_task(arch_regs_t *, int);
+            extern int load_and_exec_elf(const char *name, uint8_t parent_id);
+
+            int child_idx = load_and_exec_elf(basename, parent_id); 
+            
+            if (child_idx >= 0) {
+                foreground_task = child_idx;
+                int i = 0;
+                while (temp_args[i]) {
+                    tasks[child_idx].cmd_args[i] = temp_args[i];
+                    i++;
                 }
+                tasks[child_idx].cmd_args[i] = '\0';
+
+                sleep_current_task(regs, 5);
+                regs->eax = 0;
+            } else {
+                regs->eax = -1;
             }
             break;
         }
@@ -99,7 +281,18 @@ void syscall_handler(arch_regs_t *regs) {
                     printk("ERISIM ENGELLENDI: Gecersiz parola adresi!\n");
                     break;
                 }
-                if (hash_djb2_salted(provided_password) == 0x19E28ECF) { 
+
+                int p_len = 0;
+                while (provided_password[p_len]) p_len++;
+                while (p_len > 0 && (provided_password[p_len - 1] == '\n' || provided_password[p_len - 1] == '\r')) {
+                    provided_password[p_len - 1] = '\0';
+                    p_len--;
+                }
+                
+                extern int verify_user_password(const char *username, const char *password);
+                int auth_uid = verify_user_password("root", provided_password);
+
+                if (auth_uid == 0) { 
                     tasks[current_task].uid = 0;
                     regs->eax = 0;
                     printk("[SUDO] Parola dogrulandi. PID %d ROOT yetkisine yukseltildi!\n", current_task);
@@ -127,7 +320,13 @@ void syscall_handler(arch_regs_t *regs) {
                 char c = get_keyboard_char();
                 if (c == 0) { regs->eip -= 2; asm volatile("int $0x80" :: "a"(99)); } 
                 else { buf[0] = c; regs->eax = 1; }
-            } 
+            }
+            else if (desc->type == FD_TYPE_FILE) {
+                vfs_file_t *f = (vfs_file_t *)desc->ptr;
+                extern int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t count);
+                int bytes = fs_read(f, (uint8_t *)buf, size);
+                regs->eax = bytes;
+            }
             else if (desc->type == FD_TYPE_PIPE) {
                 extern int pipe_read(pipe_t *p, uint8_t *buf, int size);
                 int ret = pipe_read((pipe_t *)desc->ptr, (uint8_t *)buf, size);
@@ -141,6 +340,13 @@ void syscall_handler(arch_regs_t *regs) {
                 } else {
                     regs->eax = ret;
                 }
+            }
+            else if (desc->type == FD_TYPE_DEVICE) {
+                extern device_node_t dev_table[];
+                int d_idx = desc->ptr;
+                if (dev_table[d_idx].read) {
+                    regs->eax = dev_table[d_idx].read((uint8_t *)buf, size);
+                } else { regs->eax = -1; }
             }
             else { regs->eax = -1; }
             break;
@@ -172,6 +378,13 @@ void syscall_handler(arch_regs_t *regs) {
                 } else {
                     regs->eax = ret;
                 }
+            }
+            else if (desc->type == FD_TYPE_DEVICE) {
+                extern device_node_t dev_table[];
+                int d_idx = desc->ptr;
+                if (dev_table[d_idx].write) {
+                    regs->eax = dev_table[d_idx].write((const uint8_t *)buf, size);
+                } else { regs->eax = -1; }
             }
             else { regs->eax = -1; }
             break;
@@ -255,6 +468,10 @@ void syscall_handler(arch_regs_t *regs) {
                     destroy_pipe(p); 
                 }
             }
+            if (desc->type == FD_TYPE_FILE && desc->ptr != 0) { // DOSYA KAPATMA
+                extern void kfree(void *);
+                kfree((void *)desc->ptr); // VFS kopyasini RAM'den sil
+            }
             // FD'yi tertemiz sıfırla!
             desc->type = FD_TYPE_NONE;
             desc->ptr = 0;
@@ -280,6 +497,13 @@ void syscall_handler(arch_regs_t *regs) {
             char *filename = (char *)regs->ebx;
             char *content = (char *)regs->ecx;
             uint8_t parent_id = (uint8_t)regs->edx;
+
+            if (!check_vfs_access(parent_id, 1)) { // 1 = WRITE
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("Erisim Engellendi: Buraya yazma yetkiniz yok!\n");
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                regs->eax = -1; break;
+            }
 
             extern int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
             regs->eax = fs_create_file(filename, (uint8_t *)content, ft_strlen(content), parent_id);
@@ -349,7 +573,16 @@ void syscall_handler(arch_regs_t *regs) {
 
         case SYSCALL_RM_FILE: { // 22
             if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
-            uint8_t parent_id = (uint8_t)regs->ecx; // [YENİ]
+            uint8_t parent_id = (uint8_t)regs->ecx; 
+
+            if (!check_vfs_access(parent_id, 1)) {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("rm: Erisim Engellendi (Permission Denied). Bu dosyayi silemezsiniz!\n");
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                regs->eax = -1; 
+                break;
+            }
+
             extern int fs_delete(const char *, uint8_t);
             regs->eax = fs_delete((char *)regs->ebx, parent_id);
             break;
@@ -359,9 +592,81 @@ void syscall_handler(arch_regs_t *regs) {
             if (!is_valid_user_ptr(regs->ebx) || !is_valid_user_ptr(regs->ecx)) { 
                 regs->eax = -1; break; 
             }
-            uint8_t parent_id = (uint8_t)regs->edx; // [YENİ]
+            uint8_t parent_id = (uint8_t)regs->edx; 
+
+            if (!check_vfs_access(parent_id, 1)) {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("mv: Erisim Engellendi (Permission Denied). Dosya adi degistirilemez!\n");
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                regs->eax = -1; 
+                break;
+            }
+
             extern int fs_rename(const char *, const char *, uint8_t);
             regs->eax = fs_rename((char *)regs->ebx, (char *)regs->ecx, parent_id);
+            break;
+        }
+
+        case SYSCALL_OPEN: {
+            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            char basename[64];
+            int parent_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
+            
+            if (parent_id == -1 || basename[0] == '\0') { regs->eax = -1; break; }
+
+            extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
+            extern disk_file_entry_t dir_table[];
+            int dev_idx_vfs = fs_get_entry_idx("dev", 0);
+            int dev_id = (dev_idx_vfs != -1) ? dir_table[dev_idx_vfs].entry_id : -1;
+
+            if (parent_id == dev_id) {
+                extern int get_device_idx(const char *name);
+                int d_idx = get_device_idx(basename);
+                
+                if (d_idx != -1) {
+                    int fd = -1;
+                    for (int i = 3; i < MAX_FD_PER_TASK; i++) {
+                        if (tasks[current_task].fd_table[i].type == FD_TYPE_NONE) { fd = i; break; }
+                    }
+                    if (fd != -1) {
+                        tasks[current_task].fd_table[fd].type = FD_TYPE_DEVICE;
+                        tasks[current_task].fd_table[fd].ptr = d_idx;
+                        tasks[current_task].fd_table[fd].mode = 0;
+                        regs->eax = fd;
+                    } else { regs->eax = -1; }
+                } else { regs->eax = -1; }
+                break;
+            }
+
+            if (!check_vfs_access(parent_id, 0)) {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("cat: Erisim Engellendi (Permission Denied)\n");
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                regs->eax = -1; break;
+            }
+
+            int fd = -1;
+            for (int i = 3; i < MAX_FD_PER_TASK; i++) {
+                if (tasks[current_task].fd_table[i].type == 0) { fd = i; break; }
+            }
+            if (fd == -1) { regs->eax = -1; break; }
+
+            extern void *kmalloc(uint32_t);
+            vfs_file_t *new_file = (vfs_file_t *)kmalloc(sizeof(vfs_file_t));
+            extern int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file);
+            
+            // Hedef dosya 'basename' içinde, bulunduğu dizin 'parent_id' içinde!
+            if (fs_open(basename, parent_id, new_file) == 0) { 
+                new_file->current_offset = 0;
+                tasks[current_task].fd_table[fd].type = FD_TYPE_FILE;
+                tasks[current_task].fd_table[fd].ptr = (uint32_t)new_file;
+                tasks[current_task].fd_table[fd].mode = 0;
+                regs->eax = fd;
+            } else {
+                extern void kfree(void *);
+                kfree(new_file);
+                regs->eax = -1;
+            }
             break;
         }
 
@@ -409,7 +714,6 @@ void syscall_handler(arch_regs_t *regs) {
             break;
         }
         case SYSCALL_HEXDUMP: {
-            // [KONTROL]: Dökümü alınacak hedef adres (Hexdump pointer'ı) güvenli mi?
             if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
             if (tasks[current_task].uid != 0) { 
                 regs->eax = -1; 
@@ -521,40 +825,119 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_MKDIR: // 26
             {
                 if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+                uint8_t parent_id = (uint8_t)regs->ecx;
+                
+                if (!check_vfs_access(parent_id, 1)) { // 1 = WRITE İZNİ
+                    terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                    printk("Erisim Engellendi: Buraya klasor acma yetkiniz yok!\n");
+                    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                    regs->eax = -1; break;
+                }
+                
                 extern int fs_mkdir(const char *name, uint8_t parent_id);
-                regs->eax = fs_mkdir((const char *)regs->ebx, (uint8_t)regs->ecx);
+                regs->eax = fs_mkdir((const char *)regs->ebx, parent_id);
             }
             break;
             
         case SYSCALL_LS_DIR: // 28
             {
+                if (!check_vfs_access((uint8_t)regs->ebx, 0)) {
+                    terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                    printk("ls: Erisim Engellendi (Permission Denied)\n");
+                    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                    regs->eax = -1; break;
+                }
                 extern void fs_list_dir(uint8_t parent_id);
                 fs_list_dir((uint8_t)regs->ebx);
                 regs->eax = 0;
             }
             break;
             
-        case SYSCALL_GET_DIR_ID: // 29
-            {
-                if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+        case SYSCALL_GET_DIR_ID: { // 29
+            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            
+            char basename[64];
+            int parent_dir_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
+            if (parent_dir_id == -1) { regs->eax = -1; break; }
+
+            if (basename[0] == '\0' || (basename[0] == '.' && basename[1] == '\0')) {
+                regs->eax = parent_dir_id; 
+            }
+            else if (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0') {
+                int final_id = 0; 
+                extern disk_file_entry_t dir_table[];
+                for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
+                    if (dir_table[k].entry_id == parent_dir_id && dir_table[k].file_type == 1 && dir_table[k].is_used == 1) {
+                        final_id = dir_table[k].parent_id;
+                        break;
+                    }
+                }
+                regs->eax = final_id;
+            }
+            else {
                 extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-                int idx = fs_get_entry_idx((const char *)regs->ebx, (uint8_t)regs->ecx);
-                
+                int idx = fs_get_entry_idx(basename, parent_dir_id);
                 if (idx != -1) {
                     extern disk_file_entry_t dir_table[];
-                    if (dir_table[idx].file_type == 1) { 
-                        regs->eax = dir_table[idx].entry_id;
-                    } else {
-                        regs->eax = -1;
-                    }
+                    if (dir_table[idx].file_type == 1) regs->eax = dir_table[idx].entry_id;
+                    else regs->eax = -1;
                 } else {
                     regs->eax = -1;
                 }
             }
+            if (regs->eax != (uint32_t)-1 && !check_vfs_access(regs->eax, 0)) {
+                regs->eax = -1;
+            }
             break;
-
+        }
+        
+        /*LOGS*/
+        case SYSCALL_DMESG:
+            if (current_task >= 0 && tasks[current_task].uid == 0) {
+                dump_klog();
+                regs->eax = 0;
+            } else {
+                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                printk("dmesg: Erisim reddedildi. Bu islem ROOT yetkisi (UID 0) gerektirir!\n");
+                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                regs->eax = -1;
+            }
+            break;
         default: {
             printk("Bilinmeyen Syscall Numarasi: %d\n", syscall_num);
+            break;
+        }
+
+        case SYSCALL_AUTH: { // SYSCALL_AUTH
+            if (!is_valid_user_ptr(regs->ebx) || !is_valid_user_ptr(regs->ecx)) { 
+                regs->eax = -1; break; 
+            }
+            char *user = (char *)regs->ebx;
+            char *pass = (char *)regs->ecx;
+
+            int p_len = 0;
+            while (pass[p_len]) p_len++;
+            while (p_len > 0 && (pass[p_len - 1] == '\n' || pass[p_len - 1] == '\r' || pass[p_len - 1] == ' ')) {
+                pass[p_len - 1] = '\0';
+                p_len--;
+            }
+
+            extern int verify_user_password(const char *username, const char *password);
+            regs->eax = verify_user_password(user, pass); // Başarılıysa UID döner, başarısızsa -1
+            break;
+        }
+
+        case SYSCALL_GET_ARGS: {
+            char *buf = (char *)regs->ebx;
+            if (!is_valid_user_ptr((uint32_t)buf)) { regs->eax = -1; break; }
+            
+            int i = 0;
+            while (tasks[current_task].cmd_args[i]) {
+                buf[i] = tasks[current_task].cmd_args[i];
+                i++;
+            }
+            buf[i] = '\0';
+            regs->eax = i;
             break;
         }
     }

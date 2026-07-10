@@ -8,58 +8,60 @@
 #include "process.h"
 
 extern uint8_t kernel_master_key[32];
+extern uint32_t ata_identify(void);
 
 disk_file_entry_t dir_table[MAX_FILES_IN_DIR];
-static uint8_t sector_bitmap[512];
-
-static void save_bitmap_to_disk(void) {
-    ata_write_sector(FS_BITMAP_SECTOR, sector_bitmap);
-}
-
-extern uint32_t ata_identify(void);
 uint32_t fs_max_sectors = 4096;
+uint32_t file_allocation_table[4096];
+
 int fs_get_entry_idx(const char *name, uint8_t parent_id);
-static void set_sector_used(uint32_t sector) {
-    if (sector >= fs_max_sectors) return;
-    sector_bitmap[sector / 8] |= (1 << (sector % 8));
+
+/* --- FAT (FILE ALLOCATION TABLE) YÖNETİMİ --- */
+
+static void save_fat_to_disk(void) {
+    uint8_t *fat_ptr = (uint8_t *)file_allocation_table;
+    uint32_t total_bytes = fs_max_sectors * sizeof(uint32_t);
+    uint32_t sectors_needed = (total_bytes + 511) / 512;
+    
+    for (uint32_t i = 0; i < sectors_needed; i++) {
+        ata_write_sector(FS_FAT_START_SECTOR + i, fat_ptr + (i * 512));
+    }
 }
 
-static void clear_sector(uint32_t sector) {
-    if (sector >= fs_max_sectors) return;
-    sector_bitmap[sector / 8] &= ~(1 << (sector % 8));
-}
+static uint32_t allocate_fat_chain(uint32_t count) {
+    if (count == 0) return FAT_EOF;
 
-static int is_sector_free(uint32_t sector) {
-    if (sector >= fs_max_sectors) return 0;
-    return !(sector_bitmap[sector / 8] & (1 << (sector % 8)));
-}
+    uint32_t start_sector = FAT_EOF;
+    uint32_t current_sector = FAT_EOF;
+    uint32_t allocated = 0;
 
-static uint32_t allocate_free_sectors(uint32_t count) {
-    uint32_t contiguous = 0;
-    uint32_t start_sector = 0;
-    uint32_t total_free = 0; 
-
-    for (uint32_t i = FS_DATA_START_SECTOR; i < fs_max_sectors; i++) {
-        if (is_sector_free(i)) {
-            total_free++; 
-            
-            if (contiguous == 0) start_sector = i;
-            contiguous++;
-            
-            if (contiguous == count) {
-                for (uint32_t j = 0; j < count; j++) {
-                    set_sector_used(start_sector + j);
-                }
-                save_bitmap_to_disk();
-                return start_sector;
+    for (uint32_t i = FS_DATA_START_SECTOR; i < fs_max_sectors && allocated < count; i++) {
+        if (file_allocation_table[i] == FAT_FREE) {
+            if (start_sector == FAT_EOF) {
+                start_sector = i;
+            } else {
+                file_allocation_table[current_sector] = i;
             }
-        } else {
-            contiguous = 0; 
+            
+            current_sector = i;
+            file_allocation_table[current_sector] = FAT_EOF; 
+            allocated++;
         }
     }
-    
-    if (total_free >= count) return 0xFFFFFFFE; 
-    return 0; 
+
+    if (allocated < count) {
+        // Yeterli alan bulunamadıysa işlemi geri al (Rollback)
+        uint32_t rollback_sector = start_sector;
+        while (rollback_sector != FAT_EOF) {
+            uint32_t next = file_allocation_table[rollback_sector];
+            file_allocation_table[rollback_sector] = FAT_FREE;
+            rollback_sector = next;
+        }
+        return FAT_FREE;
+    }
+
+    save_fat_to_disk();
+    return start_sector;
 }
 
 static void save_directory_to_disk(void) {
@@ -82,6 +84,8 @@ static void save_directory_to_disk(void) {
         ata_write_sector(FS_DIR_START_SECTOR + i, sec_buf);
     }
 }
+
+/* --- DOSYA SİSTEMİ BAŞLATMA --- */
 
 void init_fs(void) {
     fs_max_sectors = ata_identify();
@@ -106,13 +110,24 @@ void init_fs(void) {
             dir_ptr[(i * 512) + j] = sec_buf[j];
         }
     }
-    
-    ata_read_sector(FS_BITMAP_SECTOR, sector_bitmap);
-    for (uint32_t i = 0; i < FS_DATA_START_SECTOR; i++) {
-        set_sector_used(i);
+
+    uint8_t *fat_ptr = (uint8_t *)file_allocation_table;
+    uint32_t fat_total_bytes = fs_max_sectors * sizeof(uint32_t);
+    uint32_t fat_sectors_needed = (fat_total_bytes + 511) / 512;
+
+    for (uint32_t i = 0; i < fat_sectors_needed; i++) {
+        ata_read_sector(FS_FAT_START_SECTOR + i, fat_ptr + (i * 512));
     }
-    save_bitmap_to_disk();
+
+    for (uint32_t i = 0; i < FS_DATA_START_SECTOR; i++) {
+        if (file_allocation_table[i] == FAT_FREE) {
+            file_allocation_table[i] = FAT_EOF;
+        }
+    }
+    save_fat_to_disk();
 }
+
+/* --- VFS API (OKUMA / YAZMA / SİLME) --- */
 
 void fs_list_files(void) {
     printk("Dosya Listesi:\n");
@@ -136,11 +151,17 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
         size = file->file_size - file->current_offset;
 
     uint32_t bytes_read = 0;
+    uint32_t current_sector = file->start_sector;
+    uint32_t sectors_to_skip = file->current_offset / 512;
+    
+    for (uint32_t i = 0; i < sectors_to_skip; i++) {
+        if (current_sector == FAT_EOF) return 0;
+        current_sector = file_allocation_table[current_sector];
+    }
 
-    while (bytes_read < size) {
-        uint32_t current_sector = file->start_sector + (file->current_offset / 512);
-        uint32_t offset_in_sector = file->current_offset % 512;
+    uint32_t offset_in_sector = file->current_offset % 512;
 
+    while (bytes_read < size && current_sector != FAT_EOF) {
         uint8_t sector_buf[512];
         ata_read_sector(current_sector, sector_buf);
 
@@ -155,6 +176,8 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
 
         file->current_offset += bytes_to_copy;
         bytes_read += bytes_to_copy;
+        current_sector = file_allocation_table[current_sector];
+        offset_in_sector = 0;
     }
     return bytes_read;
 }
@@ -163,7 +186,6 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
         return fs_read_encrypted(file, buffer, size, kernel_master_key);
     }
-
     return fs_read_raw(file, buffer, size);
 }
 
@@ -199,20 +221,19 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
 
     uint32_t sectors_needed = (size == 0) ? 1 : ((size + 511) / 512);
 
-    uint32_t new_sector = allocate_free_sectors(sectors_needed);
-    if (new_sector == 0xFFFFFFFE) {
-        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        printk("[VFS HATA] Disk parcalanmasi (Fragmentation) nedeniyle ardisik sektor bulunamadi!\n");
-        printk("[VFS BILGI] FAT zincirleme yapisi gerekli.\n");
-        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        return E_NOMEM;
-    } else if (new_sector == 0) {
-        printk("HATA: Disk tamamen dolu!\n");
+    uint32_t new_sector = allocate_fat_chain(sectors_needed);
+    
+    if (new_sector == FAT_FREE) {
+        printk("HATA: Disk tamamen dolu veya yeterli parcali alan yok!\n");
         return E_NOMEM;
     }
 
     uint32_t bytes_written = 0;
+    uint32_t current_sec_to_write = new_sector;
+
     for (uint32_t s = 0; s < sectors_needed; s++) {
+        if (current_sec_to_write == FAT_EOF) break;
+
         uint8_t sector_buf[512];
         ft_memset(sector_buf, 0, 512);
 
@@ -225,8 +246,10 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
             sector_buf[i] = content[bytes_written + i];
         }
 
-        ata_write_sector(new_sector + s, sector_buf);
+        ata_write_sector(current_sec_to_write, sector_buf);
         bytes_written += chunk_size;
+        
+        current_sec_to_write = file_allocation_table[current_sec_to_write];
     }
 
     ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
@@ -238,15 +261,12 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
     dir_table[free_idx].entry_id = free_idx; 
     dir_table[free_idx].parent_id = parent_id; 
 
-    extern int current_task;
-    extern process_t tasks[];
     uint32_t current_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
     dir_table[free_idx].owner_uid = current_uid;
 
     save_directory_to_disk();
     return E_OK;
 }
-
 
 int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
@@ -297,14 +317,13 @@ int fs_delete(const char *name, uint8_t parent_id) {
         if (dir_table[i].is_used == 1 && 
             dir_table[i].parent_id == parent_id && 
             ft_strcmp(dir_table[i].filename, name) == 0) {
-            
-            uint32_t sectors_used = (dir_table[i].file_size + 511) / 512;
-            if (sectors_used == 0) sectors_used = 1;
-            
-            for (uint32_t s = 0; s < sectors_used; s++) {
-                clear_sector(dir_table[i].start_sector + s);
+            uint32_t sec_to_free = dir_table[i].start_sector;
+            while (sec_to_free != FAT_EOF && sec_to_free != FAT_FREE) {
+                uint32_t next_sec = file_allocation_table[sec_to_free];
+                file_allocation_table[sec_to_free] = FAT_FREE;
+                sec_to_free = next_sec;
             }
-            save_bitmap_to_disk();
+            save_fat_to_disk();
             dir_table[i].is_used = 0; 
             ft_memset(dir_table[i].filename, 0, MAX_FILENAME);
             save_directory_to_disk();
@@ -314,7 +333,6 @@ int fs_delete(const char *name, uint8_t parent_id) {
     return E_NOENT;
 }
 
-// 3. YENİDEN ADLANDIRMA (MV) FONKSİYONU
 int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
         printk("[VFS HATA] Sistem Immutable (Salt-Okunur) modda. Dosya adi degistirilemez!\n");
@@ -337,7 +355,6 @@ int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
     }
 
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
-        // [DÜZELTME]: Filtre eklendi
         if (dir_table[i].is_used == 1 && 
             dir_table[i].parent_id == parent_id && 
             ft_strcmp(dir_table[i].filename, old_name) == 0) {

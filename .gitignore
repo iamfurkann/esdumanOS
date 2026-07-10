@@ -1,15 +1,59 @@
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
 
+# Editor
+.vscode/
+.VSCodeCounter/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build outputs
 *.o
 *.d
-.vscode
-
-*.bin
+*.a
+*.so
 *.elf
-
-*.iso
+*.bin
 *.img
+*.iso
+*.map
+*.sym
+*.lst
+
+# Debug
+*.log
+core
+vgcore.*
+
+# Coverage
+*.gcda
+*.gcno
+*.gcov
+
+# Generated directories
+build/
+out/
+dist/
 isodir/
 
-*.swp
-*~
+# QEMU
+*.qcow2
+*.vmdk
+
+# Temporary files
+tmp/
+temp/
+
+# Environment
+.env
+.env.*
+
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile

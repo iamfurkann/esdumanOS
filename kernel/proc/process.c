@@ -134,29 +134,8 @@ void exit_current_process(arch_regs_t *regs) {
     if (tasks[current_task].held_mutex != 0) {
         mutex_unlock(tasks[current_task].held_mutex);
     }
-
-    uint32_t *pd = (uint32_t *)tasks[current_task].page_directory;
     
-    for (int pd_idx = 1; pd_idx < 1024; pd_idx++) {
-        if (pd[pd_idx] & 1) {
-            uint32_t *pt = (uint32_t *)(pd[pd_idx] & 0xFFFFF000);
-            for (int pt_idx = 0; pt_idx < 1024; pt_idx++) {
-                if (pt[pt_idx] & 1) {
-                    uint32_t phys_addr = pt[pt_idx] & 0xFFFFF000;
-                    if (phys_addr >= 0x400000) { 
-                        extern void pmm_free_frame(uint32_t);
-                        pmm_free_frame(phys_addr);
-                    }
-                }
-            }
-            extern void pmm_free_frame(uint32_t);
-            pmm_free_frame((uint32_t)pt);
-        }
-    }
-    extern void pmm_free_frame(uint32_t);
-    pmm_free_frame((uint32_t)pd);
     int parent_pid = tasks[current_task].parent_pid;
-    
     tasks[current_task].state = TASK_DEAD;
 
     int parent_idx = -1;
@@ -174,7 +153,6 @@ void exit_current_process(arch_regs_t *regs) {
     } else {
         foreground_task = 0; 
     }
-
     schedule(regs);
 }
 

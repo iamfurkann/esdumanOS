@@ -1,30 +1,38 @@
 ARCH ?= x86
 
-CORE_OBJS = kernel/kernel.o \
-            kernel/signal.o \
-            kernel/process.o \
-            kernel/syscall.o \
-            kernel/pipe.o \
-            kernel/elf.o \
-            kernel/shell.o \
-            kernel/security.o \
+CORE_OBJS = kernel/core/kernel.o \
+			kernel/core/klog.o \
+            kernel/proc/signal.o \
+            kernel/proc/process.o \
+			kernel/proc/pipe.o \
+            kernel/proc/elf.o \
+            kernel/syscall/syscall.o \
+            kernel/security/security.o \
+			kernel/security/passwd.o \
             src/resources/init_elf_data.o \
+            src/resources/hello_elf_data.o \
+            src/resources/clear_elf_data.o \
+            src/resources/echo_elf_data.o \
             fs/vfs.o \
             fs/crypto_fs.o \
+			fs/devfs.o \
             mm/pmm.o \
             mm/paging.o \
             mm/kheap.o \
             lib/stdio.o \
-            lib/utils.o \
-            lib/utils2.o \
             lib/stack.o \
-            crypto/aes.o
+			lib/utils.o \
+			lib/utils2.o \
+            crypto/aes.o \
+			crypto/sha256.o
 
 TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_string.o \
             tests/kernel/test_memory.o \
             tests/kernel/test_pipe.o \
             tests/kernel/test_vfs.o \
+			tests/kernel/test_devfs.o \
+			tests/kernel/test_passwd.o \
             tests/kernel/test_security.o \
             tests/kernel/test_stress.o \
             tests/kernel/test_adversarial.o \
@@ -123,13 +131,18 @@ $(ISO): $(BIN) grub/grub.cfg
 start:
 	$(QEMU) $(QEMU_FLAGS)
 
-hello.elf: apps/hello.asm
-	$(AS) $(ASFLAGS) apps/hello.asm -o hello.o
-	$(LD) $(USER_LDFLAGS) hello.o -o hello.elf
+hello.elf: apps/bin/hello.c
+	$(CC) $(USER_CFLAGS) apps/bin/hello.c -o hello.elf
 
 apps/init.elf: apps/init.c
 	gcc -m32 -nostdlib -ffreestanding -fno-pie -no-pie \
 	-e _start -I include apps/init.c -o apps/init.elf
+
+apps/bin/clear.elf: apps/bin/clear.c
+	$(CC) $(USER_CFLAGS) apps/bin/clear.c -o apps/bin/clear.elf
+
+apps/bin/echo.elf: apps/bin/echo.c
+	$(CC) $(USER_CFLAGS) apps/bin/echo.c -o apps/bin/echo.elf
 
 tools/encrypt_tool: tools/encrypt_tool.c
 	gcc tools/encrypt_tool.c -o tools/encrypt_tool -lcrypto
@@ -142,18 +155,37 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 	xxd -i apps/init_encrypted.elf | \
 	sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
 
+src/resources/hello_elf_data.c: hello.elf
+	@mkdir -p src/resources
+	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@xxd -i apps/hello_encrypted.elf | \
+	sed 's/apps_hello_encrypted_elf/hello_elf/g' > src/resources/hello_elf_data.c
+
+src/resources/clear_elf_data.c: apps/bin/clear.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@xxd -i apps/bin/clear_encrypted.elf | \
+	sed 's/apps_bin_clear_encrypted_elf/clear_elf/g' > src/resources/clear_elf_data.c
+
+src/resources/echo_elf_data.c: apps/bin/echo.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@xxd -i apps/bin/echo_encrypted.elf | \
+	sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
+
 test:
 	@echo "--- Host Unit Tests Calistiriliyor ---"
 	
-	@# 1. Kripto (AES) C Host Testini Derle ve Calistir (-DARCH_X86 arch.h hatasini cozer)
 	@gcc -Wall -Wextra -I./include -I./crypto -DARCH_X86 tests/host/c/test_crypto.c crypto/aes.c -o tests/host/test_crypto
 	@./tests/host/test_crypto
 	
-	@# 2. Hash C Host Testini Derle ve Calistir
 	@gcc -Wall -Wextra -I./include -DARCH_X86 tests/host/c/test_hash.c -o tests/host/test_hash
 	@./tests/host/test_hash
-	
-	@# 3. Python (Dosya Sistemi/Arac) Testlerini Calistir
+
+	@mkdir -p tests/host/bin
+	@gcc tests/host/c/test_elf_sast.c -o tests/host/bin/test_elf_sast
+	@./tests/host/bin/test_elf_sast
+
 	@python3 -m unittest discover -s tests/host/python -p "test_*.py"
 
 test_kernel: $(TEST_BIN) hello.elf
@@ -162,7 +194,6 @@ test_kernel: $(TEST_BIN) hello.elf
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img conv=notrunc > /dev/null 2>&1
-	@python3 tools/inject.py disk.img hello.elf gizli.txt
 	@if $(QEMU) -kernel $(TEST_BIN) -append "kernel_pass=selftest" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -186,26 +217,29 @@ fuzz:
 	@echo "Bilinen 'Crash' (Zero-Day) dosyalari (Corpus) test ediliyor, ardindan yeni saldirilar uretilecek..."
 	@./tests/host/fuzz_parser tests/host/corpus -max_total_time=10
 
-run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf
-	@echo "--- [1/4] init.elf sifreli pakete donusturuluyor..."
+run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf
+	@echo "--- [1/4] ELF dosyalari sifreli pakete donusturuluyor..."
 	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
-	@echo "--- [2/4] C veri dosyasi uretiliyor..."
+	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	
+	@echo "--- [2/4] C veri dosyalari uretiliyor..."
 	@mkdir -p src/resources
-	@xxd -i apps/init_encrypted.elf | \
-		sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
+	@xxd -i apps/init_encrypted.elf | sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
+	@xxd -i apps/hello_encrypted.elf | sed 's/apps_hello_encrypted_elf/hello_elf/g' > src/resources/hello_elf_data.c
+	@xxd -i apps/bin/clear_encrypted.elf | sed 's/apps_bin_clear_encrypted_elf/clear_elf/g' > src/resources/clear_elf_data.c
+	@xxd -i apps/bin/echo_encrypted.elf | sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
+	
 	@echo "--- [3/4] Kernel yeniden derleniyor (sifreli ELF ile)..."
 	@$(MAKE) $(ISO)
 	@echo "--- [4/4] Disk imaji hazirlanip QEMU baslatiliyor..."
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
-	@dd if=message.txt of=disk.img conv=notrunc > /dev/null 2>&1
-	@python3 tools/inject.py disk.img hello.elf gizli.txt
 	$(QEMU) $(QEMU_FLAGS)
 
 clean:
 	$(MAKE) -C lib clean
-	rm -f hello.o hello.elf apps/init.elf apps/init_encrypted.elf tools/encrypt_tool
-	rm -f src/resources/init_elf_data.c
+	rm -f apps/bin/hello.o apps/bin/hello.elf hello.elf apps/init.o apps/init.elf apps/init_encrypted.elf tools/encrypt_tool apps/hello_encrypted.elf
+	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf src/resources/clear_elf_data.c src/resources/echo_elf_data.c
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/fuzz_parser
 	rm -rf $(OBJS) $(TEST_OBJS) $(BIN) $(TEST_BIN) $(ISO) isodir message.txt gizli.txt

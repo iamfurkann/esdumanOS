@@ -39,5 +39,6 @@ void run_adversarial_tests(void);
 void run_integration_tests(void);
 void run_regression_tests(void);
 void run_concurrency_tests(void);
-
+void run_devfs_tests(void);
+void run_passwd_tests(void);
 #endif // KTEST_H

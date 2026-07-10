@@ -26,7 +26,6 @@ static inline int sys_get_dir_id(const char *name, int parent_id) {
     return ktest_syscall(29, (int)name, parent_id, 0); 
 }
 
-
 void test_vfs_boundary_and_depth(void) {
     printk("\n--- VFS Sinir ve Derinlik (OOB) Testleri ---\n");
     serial_print("\n--- VFS Sinir ve Derinlik (OOB) Testleri ---\n");
@@ -42,7 +41,7 @@ void test_vfs_boundary_and_depth(void) {
         if (res != 0) break; 
 
         int new_id = fs_get_entry_idx(dir_name, current_parent);
-        if (new_id == -1 || new_id >= 1024) break;
+        if (new_id == -1 || new_id >= 32) break;
 
         current_parent = new_id;
         depth_reached++;
@@ -53,7 +52,7 @@ void test_vfs_boundary_and_depth(void) {
     int is_corrupted = 0;
 
     while (backtrack_id != 0) {
-        if (backtrack_id < 0 || backtrack_id >= 1024) {
+        if (backtrack_id < 0 || backtrack_id >= 32) {
             is_corrupted = 1; break;
         }
         int next_parent = dir_table[backtrack_id].parent_id;
@@ -67,16 +66,16 @@ void test_vfs_boundary_and_depth(void) {
         }
     }
 
-    KTEST_ASSERT(is_corrupted == 0, "[STRICT] Derin dizinlerde 'cd ..' belleği ihlal etmiyor");
+    KTEST_ASSERT(is_corrupted == 0, "[STRICT] Derin dizinlerde 'cd ..' bellegi ihlal etmiyor");
     KTEST_ASSERT(backtrack_id == 0, "[STRICT] 'cd ..' zinciri basariyla Root (0) noktasina ulasti");
 
-    int oob_res1 = fs_mkdir("oob_test1", 1024);
-    int oob_res2 = fs_mkdir("oob_test2", 2045);
+    // DÜZELTME: uint8_t sınırlarına uygun (0-255) ama MAX_FILES (32) sınırını aşan testler
+    int oob_res1 = fs_mkdir("oob_test1", 35);
+    int oob_res2 = fs_mkdir("oob_test2", 255);
     
-    KTEST_ASSERT(oob_res1 != 0, "[SECURITY] VFS sinir-disi (1024) talepleri reddediyor");
-    KTEST_ASSERT(oob_res2 != 0, "[SECURITY] VFS sinir-disi (2045) talepleri reddediyor");
+    KTEST_ASSERT(oob_res1 != 0, "[SECURITY] VFS sinir-disi (35) talepleri reddediyor");
+    KTEST_ASSERT(oob_res2 != 0, "[SECURITY] VFS sinir-disi (255) talepleri reddediyor");
 }
-
 
 // ANA VFS TEST FONKSİYONU
 void run_vfs_tests(void) {

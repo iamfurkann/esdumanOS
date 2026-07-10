@@ -3,14 +3,17 @@
 
 #include "types.h"
 
+#define FAT_EOF 0xFFFFFFFF
+#define FAT_FREE 0x00000000
+
 #define MAX_FILENAME 24
 #define MAX_FILES_IN_DIR 32
 
 // Disk Düzeni (Layout) Sabitleri
 #define FS_DIR_START_SECTOR 1
 #define FS_DIR_SECTOR_COUNT 4
-#define FS_BITMAP_SECTOR 5
-#define FS_DATA_START_SECTOR 6
+#define FS_FAT_START_SECTOR 5
+#define FS_DATA_START_SECTOR 37
 
 #define FT_REGULAR 0  // Normal dosya
 #define FT_DIR     1  // Dizin (Klasör)

@@ -61,6 +61,7 @@ static int vfs_resolve_path(const char *path, int start_dir_id, char *basename) 
     }
     
     char token[64];
+    for (int k = 0; k < 64; k++) { token[k] = '\0'; basename[k] = '\0'; }
     int t_idx = 0;
     
     while (1) {
@@ -69,7 +70,7 @@ static int vfs_resolve_path(const char *path, int start_dir_id, char *basename) 
             
             if (path[i] == '\0') {
                 int j = 0;
-                while (token[j]) { basename[j] = token[j]; j++; }
+                while (token[j] && j < 63) { basename[j] = token[j]; j++; }
                 basename[j] = '\0';
                 return current_id;
             }
@@ -192,14 +193,15 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_EXIT: {
             extern int current_task;
             exit_current_process(regs); 
-            break;
+            return;
         }
         case SYSCALL_EXEC: { // 5
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if ( !is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
             char *target_path = (char *)regs->ebx;
             uint8_t calling_dir_id = (uint8_t)regs->ecx;
 
             char temp_args[128];
+            for (int k = 0; k < 128; k++) temp_args[k] = '\0';
             temp_args[0] = '\0';
             char *args_str = (char *)regs->edx; 
             if (args_str && is_valid_user_ptr((uint32_t)args_str)) {
@@ -245,6 +247,7 @@ void syscall_handler(arch_regs_t *regs) {
 
                 sleep_current_task(regs, 5);
                 regs->eax = 0;
+                return;
             } else {
                 regs->eax = -1;
             }
@@ -258,7 +261,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_YIELD: {
             extern void schedule(arch_regs_t *regs);
             schedule(regs);
-            break;
+            return;
         }
 
         case SYSCALL_SETUID: {
@@ -337,6 +340,7 @@ void syscall_handler(arch_regs_t *regs) {
                     regs->eip -= 2; // Syscall'u başa sar
                     extern void schedule(arch_regs_t *regs);
                     schedule(regs);
+                    return;
                 } else {
                     regs->eax = ret;
                 }
@@ -375,6 +379,7 @@ void syscall_handler(arch_regs_t *regs) {
                     regs->eip -= 2; 
                     extern void schedule(arch_regs_t *regs);
                     schedule(regs);
+                    return;
                 } else {
                     regs->eax = ret;
                 }
@@ -610,6 +615,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_OPEN: {
             if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
             char basename[64];
+            for (int k = 0; k < 64; k++) basename[k] = '\0';
             int parent_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
             
             if (parent_id == -1 || basename[0] == '\0') { regs->eax = -1; break; }
@@ -932,7 +938,7 @@ void syscall_handler(arch_regs_t *regs) {
             if (!is_valid_user_ptr((uint32_t)buf)) { regs->eax = -1; break; }
             
             int i = 0;
-            while (tasks[current_task].cmd_args[i]) {
+            while (tasks[current_task].cmd_args[i] && i < 127) {
                 buf[i] = tasks[current_task].cmd_args[i];
                 i++;
             }

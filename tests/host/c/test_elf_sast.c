@@ -6,27 +6,24 @@
 #define RED "\033[0;31m"
 #define RESET "\033[0m"
 
-// Dosyanın içinde belirli bir metin (syscall kuralı) geçiyor mu diye bakar.
 int check_pattern(const char *filename, const char *pattern) {
     FILE *f = fopen(filename, "r");
-    if (!f) return -1; // Dosya bulunamadı
+    if (!f) return -1;
 
     char line[512];
     while (fgets(line, sizeof(line), f)) {
-        // Yorum satırlarındaki (//) aldatmacaları atla
         char *comment = strstr(line, "//");
         char *match = strstr(line, pattern);
         
         if (match != NULL) {
-            // Eğer eşleşme varsa ama yorum satırından sonraysa sayma
             if (comment != NULL && comment < match) continue;
             
             fclose(f);
-            return 1; // Başarılı, kurala uyuyor
+            return 1;
         }
     }
     fclose(f);
-    return 0; // Başarısız, kuralı ihlal etti
+    return 0;
 }
 
 void run_static_test(const char *filename, const char *pattern, const char *desc, int *fail_count) {

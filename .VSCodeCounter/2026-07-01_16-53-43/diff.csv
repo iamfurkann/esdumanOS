@@ -1,0 +1,17 @@
+"filename", "language", "C", "C++", "comment", "blank", "total"
+"/Users/esadfurkanduman/kernel__/apps/init.c", "C", 79, 0, 23, 9, 111
+"/Users/esadfurkanduman/kernel__/drivers/ata.c", "C", 39, 0, 13, 10, 62
+"/Users/esadfurkanduman/kernel__/fs/crypto_fs.c", "C", 88, 0, 29, 15, 132
+"/Users/esadfurkanduman/kernel__/fs/vfs.c", "C", 76, 0, 3, 12, 91
+"/Users/esadfurkanduman/kernel__/include/ata.h", "C++", 0, 1, 0, 2, 3
+"/Users/esadfurkanduman/kernel__/include/fs.h", "C++", 0, 3, 0, 1, 4
+"/Users/esadfurkanduman/kernel__/include/syscall.h", "C++", 0, 3, 4, 0, 7
+"/Users/esadfurkanduman/kernel__/kernel/elf.c", "C", 13, 0, 13, 5, 31
+"/Users/esadfurkanduman/kernel__/kernel/kernel.c", "C", 0, 0, -1, 0, -1
+"/Users/esadfurkanduman/kernel__/kernel/process.c", "C", 19, 0, 12, 5, 36
+"/Users/esadfurkanduman/kernel__/kernel/security.c", "C", 7, 0, 8, 3, 18
+"/Users/esadfurkanduman/kernel__/kernel/syscall.c", "C", 49, 0, 10, 12, 71
+"/Users/esadfurkanduman/kernel__/lib/stdio.c", "C", -2, 0, 10, 0, 8
+"/Users/esadfurkanduman/kernel__/tools/encrypt_tool.c", "C", 14, 0, 7, 4, 25
+"/Users/esadfurkanduman/kernel__/tools/hash.c", "C", 10, 0, 0, 0, 10
+"Total", "-", 392, 7, 131, 78, 608

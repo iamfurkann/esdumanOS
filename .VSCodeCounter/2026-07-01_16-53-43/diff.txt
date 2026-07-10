@@ -1,0 +1,47 @@
+Date : 2026-07-01 16:53:43
+Directory : /Users/esadfurkanduman/kernel__
+Total : 15 files,  399 codes, 131 comments, 78 blanks, all 608 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| C        |         12 |        392 |        127 |         75 |        594 |
+| C++      |          3 |          7 |          4 |          3 |         14 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                 | files      | code       | comment    | blank      | total      |
++------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                    |         15 |        399 |        131 |         78 |        608 |
+| apps                                                 |          1 |         79 |         23 |          9 |        111 |
+| drivers                                              |          1 |         39 |         13 |         10 |         62 |
+| fs                                                   |          2 |        164 |         32 |         27 |        223 |
+| include                                              |          3 |          7 |          4 |          3 |         14 |
+| kernel                                               |          5 |         88 |         42 |         25 |        155 |
+| lib                                                  |          1 |         -2 |         10 |          0 |          8 |
+| tools                                                |          2 |         24 |          7 |          4 |         35 |
++------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                             | language | code       | comment    | blank      | total      |
++------------------------------------------------------+----------+------------+------------+------------+------------+
+| /Users/esadfurkanduman/kernel__/apps/init.c          | C        |         79 |         23 |          9 |        111 |
+| /Users/esadfurkanduman/kernel__/drivers/ata.c        | C        |         39 |         13 |         10 |         62 |
+| /Users/esadfurkanduman/kernel__/fs/crypto_fs.c       | C        |         88 |         29 |         15 |        132 |
+| /Users/esadfurkanduman/kernel__/fs/vfs.c             | C        |         76 |          3 |         12 |         91 |
+| /Users/esadfurkanduman/kernel__/include/ata.h        | C++      |          1 |          0 |          2 |          3 |
+| /Users/esadfurkanduman/kernel__/include/fs.h         | C++      |          3 |          0 |          1 |          4 |
+| /Users/esadfurkanduman/kernel__/include/syscall.h    | C++      |          3 |          4 |          0 |          7 |
+| /Users/esadfurkanduman/kernel__/kernel/elf.c         | C        |         13 |         13 |          5 |         31 |
+| /Users/esadfurkanduman/kernel__/kernel/kernel.c      | C        |          0 |         -1 |          0 |         -1 |
+| /Users/esadfurkanduman/kernel__/kernel/process.c     | C        |         19 |         12 |          5 |         36 |
+| /Users/esadfurkanduman/kernel__/kernel/security.c    | C        |          7 |          8 |          3 |         18 |
+| /Users/esadfurkanduman/kernel__/kernel/syscall.c     | C        |         49 |         10 |         12 |         71 |
+| /Users/esadfurkanduman/kernel__/lib/stdio.c          | C        |         -2 |         10 |          0 |          8 |
+| /Users/esadfurkanduman/kernel__/tools/encrypt_tool.c | C        |         14 |          7 |          4 |         25 |
+| /Users/esadfurkanduman/kernel__/tools/hash.c         | C        |         10 |          0 |          0 |         10 |
+| Total                                                |          |        399 |        131 |         78 |        608 |
++------------------------------------------------------+----------+------------+------------+------------+------------+

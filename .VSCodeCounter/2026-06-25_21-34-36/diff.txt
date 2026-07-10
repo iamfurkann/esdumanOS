@@ -1,0 +1,55 @@
+Date : 2026-06-25 21:34:36
+Directory : /Users/esadfurkanduman/kernel__
+Total : 19 files,  1644 codes, -101 comments, 63 blanks, all 1606 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| C++      |          4 |      1,398 |         -4 |         12 |      1,406 |
+| C        |         12 |        233 |       -102 |         51 |        182 |
+| Assembly |          3 |         13 |          5 |          0 |         18 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                       | files      | code       | comment    | blank      | total      |
++------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                          |         19 |      1,644 |       -101 |         63 |      1,606 |
+| apps                                                       |          1 |          4 |         -2 |          0 |          2 |
+| arch                                                       |          5 |         40 |          6 |          9 |         55 |
+| arch/x86                                                   |          5 |         40 |          6 |          9 |         55 |
+| arch/x86/boot                                              |          1 |          0 |          0 |         -1 |         -1 |
+| arch/x86/cpu                                               |          4 |         40 |          6 |         10 |         56 |
+| drivers                                                    |          2 |         14 |          0 |          6 |         20 |
+| fs                                                         |          1 |         65 |          0 |         16 |         81 |
+| include                                                    |          4 |      1,398 |         -4 |         12 |      1,406 |
+| kernel                                                     |          4 |         90 |        -94 |         16 |         12 |
+| mm                                                         |          2 |         33 |         -7 |          4 |         30 |
++------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++------------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                                   | language | code       | comment    | blank      | total      |
++------------------------------------------------------------+----------+------------+------------+------------+------------+
+| /Users/esadfurkanduman/kernel__/apps/init.c                | C        |          4 |         -2 |          0 |          2 |
+| /Users/esadfurkanduman/kernel__/arch/x86/boot/boot.asm     | Assembly |          0 |          0 |         -1 |         -1 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/idt.c         | C        |         11 |          2 |          6 |         19 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/idt_s.asm     | Assembly |         13 |          1 |          2 |         16 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/isr.c         | C        |         16 |         -1 |          3 |         18 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/user_mode.asm | Assembly |          0 |          4 |         -1 |          3 |
+| /Users/esadfurkanduman/kernel__/drivers/ata.c              | C        |         12 |          0 |          6 |         18 |
+| /Users/esadfurkanduman/kernel__/drivers/keyboard.c         | C        |          2 |          0 |          0 |          2 |
+| /Users/esadfurkanduman/kernel__/fs/vfs.c                   | C        |         65 |          0 |         16 |         81 |
+| /Users/esadfurkanduman/kernel__/include/fs.h               | C++      |          7 |          1 |          1 |          9 |
+| /Users/esadfurkanduman/kernel__/include/init_elf.h         | C++      |      1,348 |          0 |          1 |      1,349 |
+| /Users/esadfurkanduman/kernel__/include/isr.h              | C++      |          0 |         -5 |         -2 |         -7 |
+| /Users/esadfurkanduman/kernel__/include/process.h          | C++      |         43 |          0 |         12 |         55 |
+| /Users/esadfurkanduman/kernel__/kernel/elf.c               | C        |         12 |        -13 |         -1 |         -2 |
+| /Users/esadfurkanduman/kernel__/kernel/kernel.c            | C        |        -24 |        -81 |         -5 |       -110 |
+| /Users/esadfurkanduman/kernel__/kernel/process.c           | C        |         71 |          0 |         15 |         86 |
+| /Users/esadfurkanduman/kernel__/kernel/syscall.c           | C        |         31 |          0 |          7 |         38 |
+| /Users/esadfurkanduman/kernel__/mm/paging.c                | C        |         14 |          1 |          1 |         16 |
+| /Users/esadfurkanduman/kernel__/mm/pmm.c                   | C        |         19 |         -8 |          3 |         14 |
+| Total                                                      |          |      1,644 |       -101 |         63 |      1,606 |
++------------------------------------------------------------+----------+------------+------------+------------+------------+

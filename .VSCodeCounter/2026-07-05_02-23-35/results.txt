@@ -1,0 +1,194 @@
+Date : 2026-07-05 02:23:35
+Directory : /Users/esadfurkanduman/kernel__
+Total : 137 files,  8205 codes, 863 comments, 1486 blanks, all 10554 lines
+
+Languages
++------------+------------+------------+------------+------------+------------+
+| language   | files      | code       | comment    | blank      | total      |
++------------+------------+------------+------------+------------+------------+
+| C          |         92 |      7,003 |        793 |      1,177 |      8,973 |
+| C++        |         34 |        768 |         59 |        203 |      1,030 |
+| Makefile   |          2 |        192 |          2 |         44 |        238 |
+| Assembly   |          5 |        174 |          4 |         33 |        211 |
+| Python     |          3 |         65 |          5 |         29 |         99 |
+| Properties |          1 |          3 |          0 |          0 |          3 |
++------------+------------+------------+------------+------------+------------+
+
+Directories
++-----------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                            | files      | code       | comment    | blank      | total      |
++-----------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                               |        137 |      8,205 |        863 |      1,486 |     10,554 |
+| . (Files)                                                       |          1 |        180 |          2 |         37 |        219 |
+| apps                                                            |          2 |        601 |         15 |         91 |        707 |
+| apps (Files)                                                    |          1 |        588 |         11 |         86 |        685 |
+| apps/bin                                                        |          1 |         13 |          4 |          5 |         22 |
+| arch                                                            |          9 |        417 |          9 |         93 |        519 |
+| arch/x86                                                        |          9 |        417 |          9 |         93 |        519 |
+| arch/x86/boot                                                   |          1 |         27 |          1 |          7 |         35 |
+| arch/x86/cpu                                                    |          8 |        390 |          8 |         86 |        484 |
+| crypto                                                          |          1 |        360 |        131 |         81 |        572 |
+| drivers                                                         |          4 |        457 |          7 |        103 |        567 |
+| fs                                                              |          3 |        487 |          5 |        100 |        592 |
+| grub                                                            |          1 |          3 |          0 |          0 |          3 |
+| include                                                         |         33 |        733 |         58 |        196 |        987 |
+| kernel                                                          |          9 |      1,635 |         14 |        287 |      1,936 |
+| kernel/core                                                     |          2 |        237 |          1 |         57 |        295 |
+| kernel/proc                                                     |          4 |        572 |          1 |        123 |        696 |
+| kernel/security                                                 |          2 |         89 |          0 |         16 |        105 |
+| kernel/syscall                                                  |          1 |        737 |         12 |         91 |        840 |
+| lib                                                             |         49 |      1,007 |        462 |        239 |      1,708 |
+| mm                                                              |          4 |        303 |          1 |         70 |        374 |
+| src                                                             |          1 |      1,384 |          0 |          1 |      1,385 |
+| src/resources                                                   |          1 |      1,384 |          0 |          1 |      1,385 |
+| tests                                                           |         16 |        509 |        156 |        150 |        815 |
+| tests/host                                                      |          4 |        135 |         42 |         37 |        214 |
+| tests/host/c                                                    |          3 |        118 |         39 |         29 |        186 |
+| tests/host/python                                               |          1 |         17 |          3 |          8 |         28 |
+| tests/kernel                                                    |         12 |        374 |        114 |        113 |        601 |
+| tools                                                           |          4 |        129 |          3 |         38 |        170 |
++-----------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++-----------------------------------------------------------------+------------+------------+------------+------------+------------+
+| filename                                                        | language   | code       | comment    | blank      | total      |
++-----------------------------------------------------------------+------------+------------+------------+------------+------------+
+| /Users/esadfurkanduman/kernel__/Makefile                        | Makefile   |        180 |          2 |         37 |        219 |
+| /Users/esadfurkanduman/kernel__/apps/bin/hello.c                | C          |         13 |          4 |          5 |         22 |
+| /Users/esadfurkanduman/kernel__/apps/init.c                     | C          |        588 |         11 |         86 |        685 |
+| /Users/esadfurkanduman/kernel__/arch/x86/boot/boot.asm          | Assembly   |         27 |          1 |          7 |         35 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/gdt.c              | C          |         30 |          0 |          8 |         38 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/gdt_s.asm          | Assembly   |         18 |          1 |          6 |         25 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/idt.c              | C          |         79 |          3 |         20 |        102 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/idt_s.asm          | Assembly   |         93 |          1 |         13 |        107 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/isr.c              | C          |        113 |          2 |         22 |        137 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/timer.c            | C          |         20 |          0 |          5 |         25 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/tss.c              | C          |         18 |          0 |          7 |         25 |
+| /Users/esadfurkanduman/kernel__/arch/x86/cpu/user_mode.asm      | Assembly   |         19 |          1 |          5 |         25 |
+| /Users/esadfurkanduman/kernel__/crypto/aes.c                    | C          |        360 |        131 |         81 |        572 |
+| /Users/esadfurkanduman/kernel__/drivers/ata.c                   | C          |        104 |          0 |         30 |        134 |
+| /Users/esadfurkanduman/kernel__/drivers/keyboard.c              | C          |        104 |          5 |         17 |        126 |
+| /Users/esadfurkanduman/kernel__/drivers/rtc.c                   | C          |         87 |          0 |         20 |        107 |
+| /Users/esadfurkanduman/kernel__/drivers/tty.c                   | C          |        162 |          2 |         36 |        200 |
+| /Users/esadfurkanduman/kernel__/fs/crypto_fs.c                  | C          |        143 |          1 |         30 |        174 |
+| /Users/esadfurkanduman/kernel__/fs/devfs.c                      | C          |         23 |          2 |          5 |         30 |
+| /Users/esadfurkanduman/kernel__/fs/vfs.c                        | C          |        321 |          2 |         65 |        388 |
+| /Users/esadfurkanduman/kernel__/grub/grub.cfg                   | Properties |          3 |          0 |          0 |          3 |
+| /Users/esadfurkanduman/kernel__/include/aes.h                   | C++        |         48 |         20 |         22 |         90 |
+| /Users/esadfurkanduman/kernel__/include/arch.h                  | C++        |         17 |          2 |          7 |         26 |
+| /Users/esadfurkanduman/kernel__/include/ata.h                   | C++        |         23 |          4 |          8 |         35 |
+| /Users/esadfurkanduman/kernel__/include/crypto.h                | C++        |         19 |          3 |          7 |         29 |
+| /Users/esadfurkanduman/kernel__/include/devfs.h                 | C++        |         13 |          0 |          5 |         18 |
+| /Users/esadfurkanduman/kernel__/include/elf.h                   | C++        |         32 |          0 |          6 |         38 |
+| /Users/esadfurkanduman/kernel__/include/errno.h                 | C++        |         11 |          4 |          3 |         18 |
+| /Users/esadfurkanduman/kernel__/include/fs.h                    | C++        |         40 |          1 |          9 |         50 |
+| /Users/esadfurkanduman/kernel__/include/gdt.h                   | C++        |         25 |          1 |          9 |         35 |
+| /Users/esadfurkanduman/kernel__/include/idt.h                   | C++        |         20 |          0 |          5 |         25 |
+| /Users/esadfurkanduman/kernel__/include/init_elf.h              | C++        |          5 |          0 |          2 |          7 |
+| /Users/esadfurkanduman/kernel__/include/io.h                    | C++        |         20 |          0 |          6 |         26 |
+| /Users/esadfurkanduman/kernel__/include/isr.h                   | C++        |         13 |          6 |          5 |         24 |
+| /Users/esadfurkanduman/kernel__/include/kernel.h                | C++        |         34 |          5 |          7 |         46 |
+| /Users/esadfurkanduman/kernel__/include/keyboard.h              | C++        |          6 |          0 |          3 |          9 |
+| /Users/esadfurkanduman/kernel__/include/kheap.h                 | C++        |          8 |          0 |          3 |         11 |
+| /Users/esadfurkanduman/kernel__/include/libft.h                 | C++        |         57 |          0 |          5 |         62 |
+| /Users/esadfurkanduman/kernel__/include/multiboot.h             | C++        |         28 |          0 |          5 |         33 |
+| /Users/esadfurkanduman/kernel__/include/paging.h                | C++        |         16 |          3 |          4 |         23 |
+| /Users/esadfurkanduman/kernel__/include/pipe.h                  | C++        |         17 |          0 |          5 |         22 |
+| /Users/esadfurkanduman/kernel__/include/pmm.h                   | C++        |         15 |          0 |          5 |         20 |
+| /Users/esadfurkanduman/kernel__/include/process.h               | C++        |         72 |          0 |         15 |         87 |
+| /Users/esadfurkanduman/kernel__/include/registers.h             | C++        |         22 |          2 |          5 |         29 |
+| /Users/esadfurkanduman/kernel__/include/rtc.h                   | C++        |          7 |          0 |          3 |         10 |
+| /Users/esadfurkanduman/kernel__/include/security.h              | C++        |         12 |          1 |          5 |         18 |
+| /Users/esadfurkanduman/kernel__/include/shell.h                 | C++        |          7 |          2 |          4 |         13 |
+| /Users/esadfurkanduman/kernel__/include/signal.h                | C++        |         16 |          1 |          6 |         23 |
+| /Users/esadfurkanduman/kernel__/include/stack.h                 | C++        |          5 |          0 |          3 |          8 |
+| /Users/esadfurkanduman/kernel__/include/stdio.h                 | C++        |         15 |          0 |          4 |         19 |
+| /Users/esadfurkanduman/kernel__/include/syscall.h               | C++        |         44 |          3 |          8 |         55 |
+| /Users/esadfurkanduman/kernel__/include/tss.h                   | C++        |         23 |          0 |          4 |         27 |
+| /Users/esadfurkanduman/kernel__/include/tty.h                   | C++        |         31 |          0 |          3 |         34 |
+| /Users/esadfurkanduman/kernel__/include/types.h                 | C++        |         12 |          0 |          5 |         17 |
+| /Users/esadfurkanduman/kernel__/kernel/core/kernel.c            | C          |        176 |          1 |         36 |        213 |
+| /Users/esadfurkanduman/kernel__/kernel/core/klog.c              | C          |         61 |          0 |         21 |         82 |
+| /Users/esadfurkanduman/kernel__/kernel/proc/elf.c               | C          |        142 |          1 |         30 |        173 |
+| /Users/esadfurkanduman/kernel__/kernel/proc/pipe.c              | C          |         60 |          0 |         13 |         73 |
+| /Users/esadfurkanduman/kernel__/kernel/proc/process.c           | C          |        330 |          0 |         73 |        403 |
+| /Users/esadfurkanduman/kernel__/kernel/proc/signal.c            | C          |         40 |          0 |          7 |         47 |
+| /Users/esadfurkanduman/kernel__/kernel/security/passwd.c        | C          |          0 |          0 |          1 |          1 |
+| /Users/esadfurkanduman/kernel__/kernel/security/security.c      | C          |         89 |          0 |         15 |        104 |
+| /Users/esadfurkanduman/kernel__/kernel/syscall/syscall.c        | C          |        737 |         12 |         91 |        840 |
+| /Users/esadfurkanduman/kernel__/lib/Makefile                    | Makefile   |         12 |          0 |          7 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_atoi.c                   | C          |         29 |         11 |          5 |         45 |
+| /Users/esadfurkanduman/kernel__/lib/ft_bzero.c                  | C          |         10 |         11 |          4 |         25 |
+| /Users/esadfurkanduman/kernel__/lib/ft_calloc.c                 | C          |         10 |         11 |          4 |         25 |
+| /Users/esadfurkanduman/kernel__/lib/ft_isalnum.c                | C          |          8 |         11 |          2 |         21 |
+| /Users/esadfurkanduman/kernel__/lib/ft_isalpha.c                | C          |          6 |         11 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_isascii.c                | C          |          6 |         11 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_isdigit.c                | C          |          6 |         11 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_isprint.c                | C          |          6 |         11 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_itoa.c                   | C          |         38 |         11 |          5 |         54 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstadd_back_bonus.c      | C          |         16 |         11 |          4 |         31 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstadd_front_bonus.c     | C          |          8 |         11 |          3 |         22 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstclear_bonus.c         | C          |         17 |         11 |          4 |         32 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstdelone_bonus.c        | C          |          8 |         11 |          3 |         22 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstlast_bonus.c          | C          |         11 |         11 |          4 |         26 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstnew_bonus.c           | C          |         11 |         11 |          4 |         26 |
+| /Users/esadfurkanduman/kernel__/lib/ft_lstsize_bonus.c          | C          |         12 |         11 |          4 |         27 |
+| /Users/esadfurkanduman/kernel__/lib/ft_memchr.c                 | C          |         14 |         11 |          4 |         29 |
+| /Users/esadfurkanduman/kernel__/lib/ft_memcmp.c                 | C          |         16 |         11 |          4 |         31 |
+| /Users/esadfurkanduman/kernel__/lib/ft_memcpy.c                 | C          |         13 |         11 |          4 |         28 |
+| /Users/esadfurkanduman/kernel__/lib/ft_memmove.c                | C          |         17 |         11 |          4 |         32 |
+| /Users/esadfurkanduman/kernel__/lib/ft_memset.c                 | C          |         14 |         11 |          4 |         29 |
+| /Users/esadfurkanduman/kernel__/lib/ft_putchar_fd.c             | C          |          5 |         11 |          3 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_putendl_fd.c             | C          |         12 |         11 |          3 |         26 |
+| /Users/esadfurkanduman/kernel__/lib/ft_putnbr_fd.c              | C          |         21 |         11 |          4 |         36 |
+| /Users/esadfurkanduman/kernel__/lib/ft_putstr_fd.c              | C          |         11 |         11 |          3 |         25 |
+| /Users/esadfurkanduman/kernel__/lib/ft_split.c                  | C          |         70 |          0 |         10 |         80 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strchr.c                 | C          |         17 |         11 |          4 |         32 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strcmp.c                 | C          |         13 |          0 |          2 |         15 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strcpy.c                 | C          |         13 |          0 |          3 |         16 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strdup.c                 | C          |         12 |         11 |          4 |         27 |
+| /Users/esadfurkanduman/kernel__/lib/ft_striteri.c               | C          |         12 |         11 |          3 |         26 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strjoin.c                | C          |         27 |         11 |          6 |         44 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strlcat.c                | C          |         26 |         11 |          5 |         42 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strlcpy.c                | C          |         18 |         11 |          4 |         33 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strlen.c                 | C          |          9 |         11 |          4 |         24 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strmapi.c                | C          |         21 |         11 |          4 |         36 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strncmp.c                | C          |         13 |         11 |          4 |         28 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strnstr.c                | C          |         19 |         11 |          4 |         34 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strrchr.c                | C          |         15 |         11 |          4 |         30 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strstr.c                 | C          |         19 |          0 |          2 |         21 |
+| /Users/esadfurkanduman/kernel__/lib/ft_strtrim.c                | C          |         52 |         11 |         10 |         73 |
+| /Users/esadfurkanduman/kernel__/lib/ft_substr.c                 | C          |         29 |         11 |          7 |         47 |
+| /Users/esadfurkanduman/kernel__/lib/ft_tolower.c                | C          |          6 |         11 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/ft_toupper.c                | C          |          6 |         11 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/lib/stack.c                     | C          |         31 |          0 |         15 |         46 |
+| /Users/esadfurkanduman/kernel__/lib/stdio.c                     | C          |        165 |         22 |         34 |        221 |
+| /Users/esadfurkanduman/kernel__/lib/utils.c                     | C          |         43 |          0 |          6 |         49 |
+| /Users/esadfurkanduman/kernel__/lib/utils2.c                    | C          |         34 |          0 |          6 |         40 |
+| /Users/esadfurkanduman/kernel__/mm/kheap.c                      | C          |        102 |          0 |         28 |        130 |
+| /Users/esadfurkanduman/kernel__/mm/paging.c                     | C          |         72 |          1 |         17 |         90 |
+| /Users/esadfurkanduman/kernel__/mm/paging_s.asm                 | Assembly   |         17 |          0 |          2 |         19 |
+| /Users/esadfurkanduman/kernel__/mm/pmm.c                        | C          |        112 |          0 |         23 |        135 |
+| /Users/esadfurkanduman/kernel__/src/resources/init_elf_data.c   | C          |      1,384 |          0 |          1 |      1,385 |
+| /Users/esadfurkanduman/kernel__/tests/host/c/fuzz_parser.c      | C          |         38 |         24 |         11 |         73 |
+| /Users/esadfurkanduman/kernel__/tests/host/c/test_crypto.c      | C          |         55 |         10 |         11 |         76 |
+| /Users/esadfurkanduman/kernel__/tests/host/c/test_hash.c        | C          |         25 |          5 |          7 |         37 |
+| /Users/esadfurkanduman/kernel__/tests/host/python/test_mkfs.py  | Python     |         17 |          3 |          8 |         28 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/ktest.h            | C++        |         35 |          1 |          7 |         43 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/selftest.c         | C          |         45 |          3 |         10 |         58 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_adversarial.c | C          |         23 |         14 |         10 |         47 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_concurrency.c | C          |         15 |          9 |          6 |         30 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_integration.c | C          |         46 |         16 |         14 |         76 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_memory.c      | C          |         17 |          0 |          6 |         23 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_pipe.c        | C          |         39 |         15 |         14 |         68 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_regression.c  | C          |         40 |         33 |         10 |         83 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_security.c    | C          |         38 |         12 |         13 |         63 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_stress.c      | C          |         27 |         10 |          7 |         44 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_string.c      | C          |         15 |          0 |          5 |         20 |
+| /Users/esadfurkanduman/kernel__/tests/kernel/test_vfs.c         | C          |         34 |          1 |         11 |         46 |
+| /Users/esadfurkanduman/kernel__/tools/encrypt_tool.c            | C          |         71 |          1 |         17 |         89 |
+| /Users/esadfurkanduman/kernel__/tools/hash.c                    | C          |         10 |          0 |          0 |         10 |
+| /Users/esadfurkanduman/kernel__/tools/inject.py                 | Python     |         28 |          0 |         11 |         39 |
+| /Users/esadfurkanduman/kernel__/tools/mkfs.py                   | Python     |         20 |          2 |         10 |         32 |
+| Total                                                           |            |      8,205 |        863 |      1,486 |     10,554 |
++-----------------------------------------------------------------+------------+------------+------------+------------+------------+

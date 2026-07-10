@@ -17,7 +17,7 @@ jobs:
       - name: Bagimliliklari Kur (GCC, Clang, QEMU, Python)
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm mtools xorriso
+          sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm mtools xorriso libssl-dev
 
       - name: 1. Host Araclarini Test Et
         run: make test

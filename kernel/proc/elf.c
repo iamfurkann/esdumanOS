@@ -116,6 +116,7 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id) {
         uint32_t page_addr = esp_addr - (j * 4096); 
         uint32_t phys = pmm_alloc_frame();
         map_page(page_addr, phys, 7);
+        ft_memset((void *)page_addr, 0, 4096);
     }
 
     uint32_t guard_page_addr = esp_addr - (33 * 4096);

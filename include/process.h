@@ -65,10 +65,29 @@ typedef struct {
     file_descriptor_t fd_table[MAX_FD_PER_TASK];
 
     char cmd_args[128];
+
+    uint8_t fpu_state[512] __attribute__((aligned(16)));
+    int fpu_initialized;
 } process_t;
 
+#define MAX_CPUS 8
+
+typedef struct {
+    int cpu_id;               // Çekirdeğin donanım ID'si (Local APIC ID)
+    int active_task;         // Bu işlemcide şu an çalışan görev
+    int is_bsp;               // Bu işlemci Boot Strap Processor (Ana İşlemci) mu?
+    uint32_t local_tss_addr;  // Her çekirdeğin kendi TSS'i olmalı
+} cpu_state_t;
+
+extern cpu_state_t cpus[MAX_CPUS];
+
+static inline int get_current_cpu_id(void) {
+    // İleride burası APIC ID okuma koduna dönüşecek.
+    return 0; 
+}
+#define current_task (cpus[get_current_cpu_id()].active_task)
+
 extern process_t tasks[MAX_TASKS];
-extern int current_task;
 extern int multitasking_enabled;
 extern int foreground_task;
 void mutex_init(mutex_t *m);

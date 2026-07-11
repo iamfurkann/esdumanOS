@@ -2,7 +2,7 @@
 #include "syscall.h"
 
 // Kernel'in kendi güvenlik duvarı fonksiyonunu doğrudan dışarıdan (extern) alıyoruz
-extern int is_valid_user_ptr(const void *ptr);
+extern int validate_user_pointer(const void *ptr, size_t size);
 
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
@@ -37,11 +37,11 @@ void run_adversarial_tests(void) {
 
     // 4. Alt Sınır İçi (Exact Lower Bound)
     // 0x400000 User Space'in ilk byte'ıdır. Güvenlik duvarı burayı 1 (Geçerli) dönmelidir.
-    int res_lower_bound = is_valid_user_ptr((const void *)0x400000);
+    int res_lower_bound = validate_user_pointer((const void *)0x400000, 1);
     KTEST_ASSERT(res_lower_bound == 1, "[STRICT] Security: User Space Alt Siniri (0x400000) basariyla KABUL EDILDI");
 
     // 5. Üst Sınır İçi (Exact Upper Bound)
     // 0xBFFFFFFF sınır içidir! Güvenlik duvarı burayı 1 (Geçerli) dönmelidir.
-    int res_upper_bound = is_valid_user_ptr((const void *)0xBFFFFFFF);
+    int res_upper_bound = validate_user_pointer((const void *)0xBFFFFFFF, 1);
     KTEST_ASSERT(res_upper_bound == 1, "[STRICT] Security: User Space Ust Siniri (0xBFFFFFFF) basariyla KABUL EDILDI");
 }

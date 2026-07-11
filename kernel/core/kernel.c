@@ -14,14 +14,43 @@ extern int fs_mkdir(const char *name, uint8_t parent_id);
 extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
 extern disk_file_entry_t dir_table[];
 
+multiboot_info_t global_mboot_info;
+char global_cmdline[256];
+
+// --- [YENİ]: KRİTİK HATA YÖNETİMİ (KERNEL PANIC) ---
+void kernel_panic(const char *message) {
+    asm volatile("cli"); // İşlemciyi dondur, kesmeleri kapat
+    terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
+    printk("\n==================================================\n");
+    printk("                KERNEL PANIC!                     \n");
+    printk("==================================================\n");
+    printk("Baslatma Hatasi: %s\n", message);
+    printk("Sistem guvenligi icin cekirdek durduruldu.\n");
+    printk("==================================================\n");
+    while (1) { asm volatile("hlt"); }
+}
+
+void spinlock_init(spinlock_t *lock) {
+    lock->locked = 0;
+}
+
+void spinlock_acquire(spinlock_t *lock) {
+    uint32_t current_val = 1;
+    while (1) {
+        asm volatile("xchg %0, %1" : "+m"(lock->locked), "+r"(current_val) :: "memory");
+        if (current_val == 0) break;
+        asm volatile("pause");
+    }
+}
+
+void spinlock_release(spinlock_t *lock) {
+    asm volatile("movl $0, %0" : "=m"(lock->locked) : : "memory");
+}
+
 void init_bss(void) {
     uint32_t *bss = &__bss_start;
     uint32_t *bss_end = &__bss_end;
-
-    if ((uint32_t)bss_end >= 0x1000000) {
-        asm volatile("cli; hlt");
-    }
-    
+    if ((uint32_t)bss_end >= 0x1000000) { asm volatile("cli; hlt"); }
     while (bss < bss_end) {
         *bss = 0;
         bss++;
@@ -34,14 +63,66 @@ int get_vfs_id(const char *name, uint8_t parent_id) {
     return -1;
 }
 
+void init_fpu(void) {
+    uint32_t cr0, cr4;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1 << 2); 
+    cr0 |=  (1 << 1); 
+    asm volatile("mov %0, %%cr0" :: "r"(cr0));
+
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1 << 9);  
+    cr4 |= (1 << 10); 
+    asm volatile("mov %0, %%cr4" :: "r"(cr4));
+
+    asm volatile("fninit");
+}
+
+void check_cpu_features(void) {
+    uint32_t eax, edx, ecx, unused;
+    asm volatile("cpuid" : "=a"(eax), "=b"(unused), "=c"(ecx), "=d"(edx) : "a"(1));
+}
+
+void init_acpi(void) {
+    // RSDP aranacak ve MADT/FADT işlenecek.
+}
+
 void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
     init_bss();
     terminal_initialize();
-    init_gdt();
-    init_idt();
 
-    init_timer(100);
+    // 1. BOOTLOADER DOĞRULAMASI
+    if (magic != 0x2BADB002) {
+        kernel_panic("Multiboot Magic Error! GRUB (veya uyumlu bir bootloader) bulunamadi.");
+    }
     
+    global_mboot_info = *mboot_info;
+    if (mboot_info->flags & 0x00000004) {
+        char *cmd = (char *)mboot_info->cmdline;
+        int i = 0;
+        while (cmd[i] && i < 255) {
+            global_cmdline[i] = cmd[i];
+            i++;
+        }
+        global_cmdline[i] = '\0';
+        global_mboot_info.cmdline = (uint32_t)global_cmdline;
+    }
+
+    // 2. CPU KONTROLÜ
+    check_cpu_features(); 
+
+    // 3. GDT DOĞRULAMASI
+    init_gdt();
+    uint16_t gdt_limit = 0;
+    asm volatile("sgdt %0" : "=m"(gdt_limit));
+    if (gdt_limit == 0) kernel_panic("GDT (Global Descriptor Table) donanima yuklenemedi!");
+
+    // 4. IDT DOĞRULAMASI
+    init_idt();
+    uint16_t idt_limit = 0;
+    asm volatile("sidt %0" : "=m"(idt_limit));
+    if (idt_limit == 0) kernel_panic("IDT (Interrupt Descriptor Table) donanima yuklenemedi!");
+
     char time_buffer[20];
     get_time_string(time_buffer);
     draw_status_bar(OS_VERSION_STR, time_buffer);
@@ -61,29 +142,46 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
     printk("  Memory Model        : Paging Enabled (16MB Identity Mapped)\n");
     printk("================================================================================\n\n");
     
+    // 5. PMM (FİZİKSEL BELLEK) DOĞRULAMASI
+    init_pmm(&global_mboot_info);
+    extern uint32_t pmm_get_total_memory(void);
+    if (pmm_get_total_memory() == 0) {
+        kernel_panic("PMM: Fiziksel RAM haritasi alinamadi veya bellek yetersiz!");
+    }
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    if (magic != 0x2BADB002) {
-        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        printk("Multiboot Magic Error!\n");
-    } else {
-        init_pmm(mboot_info);
-        printk("Physical Memory Manager (PMM) Initialized\n");
-    }
+    printk("Physical Memory Manager (PMM) Initialized\n");
 
+    // 6. VMM (SANAL BELLEK) DOĞRULAMASI
     init_paging();
+    uint32_t cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    if (!(cr0 & 0x80000000)) {
+        kernel_panic("VMM: Paging (Sanal Bellek) aktif edilemedi! Islemci reddetti.");
+    }
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     printk("Virtual Memory (Paging) Activated\n");
     
+    // 7. KERNEL HEAP DOĞRULAMASI
     init_kheap();
+    extern void *kmalloc(size_t size);
+    extern void kfree(void *);
+    void *heap_test = kmalloc(16);
+    if (!heap_test) kernel_panic("KHEAP: Kernel bellek tahsis sistemi (malloc) calismiyor!");
+    kfree(heap_test);
+
+    init_acpi();
+    init_timer(100);
     init_signals();
     register_signal(1, alarm_demo_callback);
+    asm volatile("sti");
+    
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     printk("Kernel Heap & Signal Handlers Registered\n");
 
-    init_security(mboot_info);
+    init_security(&global_mboot_info);
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     printk("Security Initialized (Zero-Trust Mode)\n");
@@ -94,46 +192,32 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
 
     if (get_vfs_id("bin", 0) == -1) {
         printk("[VFS] Linux Kok Dizin Hiyerarsisi (FHS) Kuruluyor...\n");
-        fs_mkdir("bin", 0);
-        fs_mkdir("dev", 0);
-        fs_mkdir("etc", 0);
-        fs_mkdir("home", 0);
-        fs_mkdir("root", 0);
-        fs_mkdir("tmp", 0);
-        fs_mkdir("var", 0);
+        fs_mkdir("bin", 0); fs_mkdir("dev", 0); fs_mkdir("etc", 0);
+        fs_mkdir("home", 0); fs_mkdir("root", 0); fs_mkdir("tmp", 0); fs_mkdir("var", 0);
 
         int var_id = get_vfs_id("var", 0);
-        if (var_id != -1) {
-            fs_mkdir("log", var_id);
-        }
+        if (var_id != -1) fs_mkdir("log", var_id);
 
         int etc_id = get_vfs_id("etc", 0);
         if (etc_id != -1) {
             extern int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
             extern uint32_t ft_strlen(const char *);
-            
             char *passwd_content = "root:x:0:/root\nesduman:x:1000:/home/esduman\n";
             fs_create_file("passwd", (uint8_t*)passwd_content, ft_strlen(passwd_content), etc_id);
-            
             char *shadow_content = "root:03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4:0\nesduman:03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4:1000\n";
             fs_create_file("shadow", (uint8_t*)shadow_content, ft_strlen(shadow_content), etc_id);
-            
             printk("[VFS] /etc/passwd ve /etc/shadow guvenli veritabanlari muhlendi.\n");
         }
 
         int home_id = get_vfs_id("home", 0);
-        if (home_id != -1) {
-            fs_mkdir("esduman", home_id);
-        }
+        if (home_id != -1) fs_mkdir("esduman", home_id);
     }
 
     int tmp_id = get_vfs_id("tmp", 0);
     if (tmp_id != -1) {
         printk("[VFS] /tmp gecici dizini temizleniyor (Reboot Flush)...\n");
-        
         extern disk_file_entry_t dir_table[];
         extern int fs_delete(const char *name, uint8_t parent_id);
-        
         for (int i = 0; i < MAX_FILES_IN_DIR; i++) { 
             if (dir_table[i].is_used == 1 && dir_table[i].parent_id == tmp_id) {
                 fs_delete(dir_table[i].filename, tmp_id);
@@ -168,6 +252,12 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
     printk("ATA PIO Disk Driver Loaded & VFS Mounted\n");
 
     asm volatile("cli");
+    
+    // 8. FPU DOĞRULAMASI
+    init_fpu();
+    uint32_t cr4;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    if (!(cr4 & (1 << 9))) kernel_panic("FPU: Islemciniz Kayar Nokta (SSE/FXSAVE) destegi saglamiyor!");
 
     init_multitasking();
     
@@ -182,8 +272,8 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
     printk("Boot islemi tamamlandi. Sifreli Minishell cozuluyor...\n");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
-    if (mboot_info->flags & 0x00000004) {
-        char *cmdline = (char *)mboot_info->cmdline;
+    if (global_mboot_info.flags & 0x00000004) {
+        char *cmdline = (char *)global_mboot_info.cmdline;
         int is_test_mode = 0;
         for (int i = 0; cmdline[i] != '\0'; i++) {
             if (cmdline[i] == 's' && cmdline[i+1] == 'e' && cmdline[i+2] == 'l' && cmdline[i+3] == 'f') {

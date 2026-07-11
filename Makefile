@@ -13,6 +13,7 @@ CORE_OBJS = kernel/core/kernel.o \
             src/resources/hello_elf_data.o \
             src/resources/clear_elf_data.o \
             src/resources/echo_elf_data.o \
+			fs/bcache.o \
             fs/vfs.o \
             fs/crypto_fs.o \
 			fs/devfs.o \

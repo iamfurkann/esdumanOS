@@ -57,3 +57,14 @@ int verify_user_password(const char *username, const char *password) {
     }
     return -1;
 }
+
+int update_passwd_file(const char *new_passwd_content, uint32_t size) {
+    extern int fs_get_entry_idx(const char *, uint8_t);
+    int etc_idx = fs_get_entry_idx("etc", 0);
+    if (etc_idx == -1) return -1;
+
+    extern disk_file_entry_t dir_table[];
+    int etc_id = dir_table[etc_idx].entry_id;
+    extern int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
+    return fs_atomic_update("passwd", (const uint8_t *)new_passwd_content, size, etc_id);
+}

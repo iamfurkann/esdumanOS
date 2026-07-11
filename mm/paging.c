@@ -31,7 +31,7 @@ void init_paging(void) {
     enable_paging();
 }
 
-void map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
+int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
     uint32_t pd_index = virtual_addr >> 22;
     uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
 
@@ -40,15 +40,41 @@ void map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
 
     if ((pd_virt[pd_index] & 1) == 0) {
         uint32_t new_table_phys = pmm_alloc_frame();
+        if (new_table_phys == 0xFFFFFFFF) return -1;
+        
         pd_virt[pd_index] = new_table_phys | PAGE_USER_ACCESS;
         asm volatile("invlpg (%0)" ::"r"(pt_virt) : "memory");
         for (int i = 0; i < 1024; i++) {
             pt_virt[i] = 0;
         }
     }
+    if (pt_virt[pt_index] & 1) {
+        uint32_t old_phys = pt_virt[pt_index] & 0xFFFFF000;
+        uint32_t new_phys = physical_addr & 0xFFFFF000;
+        if (old_phys != new_phys) {
+            printk("[VMM HATA] Cakisma Tespit Edildi! Sanal 0x%x zaten Fiziksel 0x%x'e esli. (Yeni: 0x%x reddedildi)\n", 
+                   virtual_addr, old_phys, new_phys);
+            return -1;
+        }
+    }
 
-    pt_virt[pt_index] = physical_addr | flags;
+    pt_virt[pt_index] = (physical_addr & 0xFFFFF000) | (flags & 0xFFF);
     asm volatile("invlpg (%0)" ::"r"(virtual_addr) : "memory");
+    
+    return 0;
+}
+
+void unmap_page(uint32_t virtual_addr) {
+    uint32_t pd_index = virtual_addr >> 22;
+    uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
+
+    uint32_t *pd_virt = (uint32_t *)RECURSIVE_PD_VADDR;
+    uint32_t *pt_virt = (uint32_t *)(RECURSIVE_PT_VADDR + (pd_index * PAGE_SIZE));
+
+    if (pd_virt[pd_index] & 1) {
+        pt_virt[pt_index] = 0; 
+        asm volatile("invlpg (%0)" ::"r"(virtual_addr) : "memory"); 
+    }
 }
 
 uint32_t clone_page_directory(void) {
@@ -68,16 +94,16 @@ uint32_t clone_page_directory(void) {
     uint32_t *current_pd = (uint32_t *)RECURSIVE_PD_VADDR;
 
     for (int i = 0; i < 1024; i++) {
-        if (i < 4) { // Kernel Identity Map
+        if (i < 4) {
             new_pd[i] = current_pd[i];
         }
-        else if (i >= 768 && i < 1023) { // Kernel Higher Half
+        else if (i >= 768 && i < 1023) {
             new_pd[i] = current_pd[i];
         } 
-        else if (i == 1023) { // Fractal Mapping pointer
+        else if (i == 1023) {
             new_pd[i] = new_pd_phys | PAGE_KERNEL_ONLY;
         } 
-        else { // Kullanıcı Boş Alanları
+        else {
             new_pd[i] = PAGE_NOT_PRESENT;
         }
     }
@@ -85,6 +111,7 @@ uint32_t clone_page_directory(void) {
     if (eflags & 0x200) {
         asm volatile("sti");
     }
+    unmap_page(TEMP_MAP_VADDR);
 
     return new_pd_phys; 
 }

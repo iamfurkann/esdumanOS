@@ -1,10 +1,11 @@
 #include "kernel.h"
+#include "pipe.h"
 
 extern uint32_t *page_directory;
 extern uint32_t clone_page_directory(void);
 
 process_t tasks[MAX_TASKS];
-int current_task = -1;
+cpu_state_t cpus[MAX_CPUS];
 int multitasking_enabled = 0;
 int next_pid = 0;
 int foreground_task = -1;
@@ -24,6 +25,10 @@ void init_multitasking(void) {
         tasks[i].msg_tail = 0;
         tasks[i].msg_count = 0;
     }
+
+    cpus[0].cpu_id = 0;
+    cpus[0].is_bsp = 1;
+    cpus[0].active_task = -1;
 
     create_process((uint32_t)idle_task_process, (uint32_t)&idle_stack[255], (uint32_t)page_directory);
     tasks[0].base_priority = 0;
@@ -62,6 +67,11 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     tasks[i].msg_head = 0;
     tasks[i].msg_tail = 0;
     tasks[i].msg_count = 0;
+
+    uint8_t *kstack_ptr = (uint8_t *)tasks[i].kstack;
+    for (int j = 0; j < 4096; j++) {
+        kstack_ptr[j] = 0;
+    }
 
     tasks[i].page_directory = cr3;
 
@@ -130,13 +140,52 @@ int receive_message(uint32_t *sender_out, uint32_t *payload_out) {
     return E_OK;
 }
 
+extern void pmm_free_frame(uint32_t addr);
+void cleanup_process_memory(uint32_t page_directory_phys) {
+    // Kendi (PID 0) Kernel dizinimiz değilse serbest bırak!
+    extern uint32_t *page_directory;
+    if (page_directory_phys != 0 && page_directory_phys != (uint32_t)page_directory) {
+        pmm_free_frame(page_directory_phys);
+    }
+}
+
 void exit_current_process(arch_regs_t *regs) {
-    if (tasks[current_task].held_mutex != 0) {
-        mutex_unlock(tasks[current_task].held_mutex);
+    process_t *curr = &tasks[current_task];
+
+    if (curr->held_mutex != 0) {
+        mutex_unlock(curr->held_mutex);
     }
     
-    int parent_pid = tasks[current_task].parent_pid;
-    tasks[current_task].state = TASK_DEAD;
+    // [DÜZELTİLDİ]: close_fd fonksiyonu aranmak yerine doğrudan burada uygulandı.
+    // Dosyaları ve Pipe'ları (Boru Hatları) RAM'den temizliyoruz.
+    for (int i = 0; i < MAX_FD_PER_TASK; i++) {
+        if (curr->fd_table[i].type != 0) { // 0 = FD_TYPE_NONE
+            if (curr->fd_table[i].type == 3 && curr->fd_table[i].ptr != 0) { // 3 = FD_TYPE_PIPE
+                pipe_t *p = (pipe_t *)curr->fd_table[i].ptr;
+                if (curr->fd_table[i].mode == 1) p->write_refs--; 
+                else p->read_refs--;
+                
+                if (p->read_refs <= 0 && p->write_refs <= 0) {
+                    extern void destroy_pipe(pipe_t *p);
+                    destroy_pipe(p); 
+                }
+            }
+            else if (curr->fd_table[i].type == 2 && curr->fd_table[i].ptr != 0) { // 2 = FD_TYPE_FILE
+                extern void kfree(void *);
+                kfree((void *)curr->fd_table[i].ptr);
+            }
+            
+            // FD'yi tertemiz sıfırla
+            curr->fd_table[i].type = 0;
+            curr->fd_table[i].ptr = 0;
+            curr->fd_table[i].mode = 0;
+        }
+    }
+
+    cleanup_process_memory(curr->page_directory);
+
+    int parent_pid = curr->parent_pid;
+    curr->state = TASK_DEAD; 
 
     int parent_idx = -1;
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -153,9 +202,10 @@ void exit_current_process(arch_regs_t *regs) {
     } else {
         foreground_task = 0; 
     }
+    
+    curr->state = TASK_EMPTY;
     schedule(regs);
 }
-
 void sleep_current_task(arch_regs_t *regs, int reason) {
     tasks[current_task].regs = *regs;
     tasks[current_task].state = TASK_WAITING;
@@ -174,6 +224,7 @@ void wakeup_tasks(int reason) {
 
 void schedule(arch_regs_t *regs) {
     if (!multitasking_enabled || current_task == -1) return;
+
     if ((regs->cs & 0x03) == 0 && current_task != 0) {
         return; 
     }
@@ -194,16 +245,27 @@ void schedule(arch_regs_t *regs) {
             }
         }
     }
-
     if (next_task == 0 && current_task == 0) return; 
+    if (current_task == next_task) return; 
+
+    if (current_task >= 0 && tasks[current_task].state != TASK_DEAD) {
+        asm volatile("fxsave %0" : "=m"(tasks[current_task].fpu_state));
+    }
 
     current_task = next_task;
-    
+    if (!tasks[current_task].fpu_initialized) {
+        asm volatile("fninit");
+        asm volatile("fxsave %0" : "=m"(tasks[current_task].fpu_state));
+        tasks[current_task].fpu_initialized = 1;
+    } else {
+        asm volatile("fxrstor %0" : : "m"(tasks[current_task].fpu_state));
+    }
+
     uint32_t k_stack_top = (((uint32_t)tasks[current_task].kstack + 4096) & 0xFFFFFFF0) - 4;
     set_kernel_stack(k_stack_top); 
-    
     asm volatile ("mov %0, %%cr3" : : "r"(tasks[current_task].page_directory));
 
+    
     *regs = tasks[current_task].regs;
     regs->eflags |= 0x200;
     check_and_deliver_signals(regs);

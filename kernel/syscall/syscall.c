@@ -17,7 +17,6 @@ extern void set_security_level(security_level_t level);
 extern char get_keyboard_char(void);
 extern void exit_current_process(arch_regs_t *regs);
 extern int load_and_exec_elf(const char *, uint8_t);
-extern int current_task;
 extern disk_file_entry_t dir_table[];
 extern process_t tasks[];
 extern void dump_klog(void);
@@ -110,7 +109,6 @@ static int vfs_resolve_path(const char *path, int start_dir_id, char *basename) 
 }
 
 static int check_vfs_access(int entry_id, int needs_write) {
-    extern int current_task;
     extern process_t tasks[];
     extern disk_file_entry_t dir_table[];
 
@@ -169,11 +167,26 @@ static int check_vfs_access(int entry_id, int needs_write) {
     return 1;
 }
 
-int is_valid_user_ptr(uint32_t addr) {
-    if (addr >= 0x400000 && addr < 0xC0000000) {
-        return 1;
+int validate_user_pointer(const void *ptr, size_t size) {
+    uint32_t start_addr = (uint32_t)ptr;
+    uint32_t end_addr = start_addr + size;
+
+    if (end_addr < start_addr) {
+        return 0; 
     }
-    return 0;
+
+    if (start_addr < 0x400000 || end_addr > 0xC0000000) {
+        return 0; 
+    }
+
+    return 1;
+}
+
+int validate_fd(int fd) {
+    if (fd < 0 || fd >= MAX_FD_PER_TASK) {
+        return 0; // Hata: Sınır dışı
+    }
+    return 1;
 }
 
 uint32_t hash_djb2_salted(const char *str) {
@@ -187,16 +200,16 @@ uint32_t hash_djb2_salted(const char *str) {
 }
 
 void syscall_handler(arch_regs_t *regs) {
+    asm volatile("sti");
     uint32_t syscall_num = regs->eax;
 
     switch (syscall_num) {
         case SYSCALL_EXIT: {
-            extern int current_task;
             exit_current_process(regs); 
             return;
         }
         case SYSCALL_EXEC: { // 5
-            if ( !is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if ( !validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             char *target_path = (char *)regs->ebx;
             uint8_t calling_dir_id = (uint8_t)regs->ecx;
 
@@ -204,7 +217,7 @@ void syscall_handler(arch_regs_t *regs) {
             for (int k = 0; k < 128; k++) temp_args[k] = '\0';
             temp_args[0] = '\0';
             char *args_str = (char *)regs->edx; 
-            if (args_str && is_valid_user_ptr((uint32_t)args_str)) {
+            if (args_str && validate_user_pointer((const void *)args_str, 1)) {
                 int i = 0;
                 while (args_str[i] && i < 127) {
                     temp_args[i] = args_str[i];
@@ -265,7 +278,6 @@ void syscall_handler(arch_regs_t *regs) {
         }
 
         case SYSCALL_SETUID: {
-            extern int current_task;
             extern process_t tasks[];
             
             uint32_t requested_uid = (uint32_t)regs->ebx;
@@ -279,7 +291,7 @@ void syscall_handler(arch_regs_t *regs) {
             }
 
             if (requested_uid == 0) {
-                if (!is_valid_user_ptr((uint32_t)provided_password)) {
+                if (!validate_user_pointer((const void *)provided_password, 1)) {
                     regs->eax = -1;
                     printk("ERISIM ENGELLENDI: Gecersiz parola adresi!\n");
                     break;
@@ -316,7 +328,10 @@ void syscall_handler(arch_regs_t *regs) {
             char *buf = (char *)regs->ecx;
             int size = (int)regs->edx;
 
-            if (fd < 0 || fd >= MAX_FD_PER_TASK || !is_valid_user_ptr((uint32_t)buf)) { regs->eax = -1; break; }
+            if (!validate_fd(fd) || !validate_user_pointer(buf, size)) {
+                regs->eax = -1; // -EFAULT veya -EBADF
+                break;
+            }
             file_descriptor_t *desc = &tasks[current_task].fd_table[fd];
 
             if (desc->type == FD_TYPE_CONSOLE) {
@@ -361,7 +376,10 @@ void syscall_handler(arch_regs_t *regs) {
             char *buf = (char *)regs->ecx;
             int size = (int)regs->edx;
 
-            if (fd < 0 || fd >= MAX_FD_PER_TASK || !is_valid_user_ptr((uint32_t)buf)) { regs->eax = -1; break; }
+            if (!validate_fd(fd) || !validate_user_pointer(buf, size)) {
+                regs->eax = -1; // -EFAULT veya -EBADF
+                break;
+            }
             file_descriptor_t *desc = &tasks[current_task].fd_table[fd];
 
             if (desc->type == FD_TYPE_CONSOLE) {
@@ -397,7 +415,8 @@ void syscall_handler(arch_regs_t *regs) {
 
         case SYSCALL_PIPE: { // SYSCALL_PIPE
             uint32_t *fds = (uint32_t *)regs->ebx;
-            if (!is_valid_user_ptr((uint32_t)fds)) { regs->eax = -1; break; }
+            // Bir int dizisi en az 2 eleman (8 byte) gerektirir
+            if (!validate_user_pointer((const void *)fds, 8)) { regs->eax = -1; break; }
             
             pipe_t *p = create_pipe();
             if (!p) { regs->eax = -1; break; }
@@ -430,7 +449,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_DUP2: { // 37
             int oldfd = (int)regs->ebx;
             int newfd = (int)regs->ecx;
-            if (oldfd < 0 || oldfd >= MAX_FD_PER_TASK || newfd < 0 || newfd >= MAX_FD_PER_TASK) { regs->eax = -1; break; }
+            if (!validate_fd(oldfd) || !validate_fd(newfd)) { regs->eax = -1; break; }
             if (tasks[current_task].fd_table[oldfd].type == FD_TYPE_NONE) { regs->eax = -1; break; }
 
             uint8_t old_type = tasks[current_task].fd_table[newfd].type;
@@ -460,7 +479,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         case SYSCALL_CLOSE: { // 38
             int fd = (int)regs->ebx;
-            if (fd < 0 || fd >= MAX_FD_PER_TASK) { regs->eax = -1; break; }
+            if (!validate_fd(fd)) { regs->eax = -1; break; }
             file_descriptor_t *desc = &tasks[current_task].fd_table[fd];
             
             if (desc->type == FD_TYPE_PIPE && desc->ptr != 0) { // [GÜVENLİK AĞI]
@@ -495,7 +514,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         /* FILE SYSTEM */
         case SYSCALL_CREATE_FILE: { // 8
-            if (!is_valid_user_ptr(regs->ebx) || !is_valid_user_ptr(regs->ecx)) { 
+            if (!validate_user_pointer((const void *)regs->ebx, 1) || !validate_user_pointer((const void *)regs->ecx, 1)) { 
                 regs->eax = -1; break; 
             }
             extern uint32_t ft_strlen(const char *);
@@ -521,7 +540,7 @@ void syscall_handler(arch_regs_t *regs) {
         }
 
         case SYSCALL_CAT_RAW: {
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             
             char *target_file = (char *)regs->ebx;
             uint8_t parent_id = (uint8_t)regs->ecx;
@@ -550,7 +569,7 @@ void syscall_handler(arch_regs_t *regs) {
         }
 
         case SYSCALL_CAT_FILE: { // 11
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             char *target_file = (char *)regs->ebx;
             uint8_t parent_id = (uint8_t)regs->ecx;
             
@@ -577,7 +596,7 @@ void syscall_handler(arch_regs_t *regs) {
         }
 
         case SYSCALL_RM_FILE: { // 22
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             uint8_t parent_id = (uint8_t)regs->ecx; 
 
             if (!check_vfs_access(parent_id, 1)) {
@@ -594,7 +613,7 @@ void syscall_handler(arch_regs_t *regs) {
         }
         
         case SYSCALL_MV_FILE: { // 23
-            if (!is_valid_user_ptr(regs->ebx) || !is_valid_user_ptr(regs->ecx)) { 
+            if (!validate_user_pointer((const void *)regs->ebx, 1) || !validate_user_pointer((const void *)regs->ecx, 1)) { 
                 regs->eax = -1; break; 
             }
             uint8_t parent_id = (uint8_t)regs->edx; 
@@ -613,7 +632,7 @@ void syscall_handler(arch_regs_t *regs) {
         }
 
         case SYSCALL_OPEN: {
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             char basename[64];
             for (int k = 0; k < 64; k++) basename[k] = '\0';
             int parent_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
@@ -720,7 +739,7 @@ void syscall_handler(arch_regs_t *regs) {
             break;
         }
         case SYSCALL_HEXDUMP: {
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             if (tasks[current_task].uid != 0) { 
                 regs->eax = -1; 
                 printk("ERISIM ENGELLENDI: Bu komut icin ROOT (sudo) yetkisi gereklidir.\n"); 
@@ -737,7 +756,8 @@ void syscall_handler(arch_regs_t *regs) {
             break;
         }
         case SYSCALL_IPC_RECEIVE: {
-            if (!is_valid_user_ptr(regs->ebx) || !is_valid_user_ptr(regs->ecx)) { 
+            // İki adres de uint32_t tutacağı için 4 byte boyutlarında olmalı
+            if (!validate_user_pointer((const void *)regs->ebx, 4) || !validate_user_pointer((const void *)regs->ecx, 4)) { 
                 regs->eax = -1; break; 
             }
             extern int receive_message(uint32_t *sender_out, uint32_t *payload_out);
@@ -751,8 +771,7 @@ void syscall_handler(arch_regs_t *regs) {
             break;
         }
         case SYSCALL_SIGNAL_REG: {
-            // [KONTROL]: Sinyal handler adresi güvenli bir User-Space fonksiyonu mu?
-            if (!is_valid_user_ptr(regs->ecx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ecx, 1)) { regs->eax = -1; break; }
             extern void register_user_signal(int sig_num, uint32_t handler_addr);
             register_user_signal((int)regs->ebx, (uint32_t)regs->ecx);
             break;
@@ -830,7 +849,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         case SYSCALL_MKDIR: // 26
             {
-                if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+                if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
                 uint8_t parent_id = (uint8_t)regs->ecx;
                 
                 if (!check_vfs_access(parent_id, 1)) { // 1 = WRITE İZNİ
@@ -860,7 +879,7 @@ void syscall_handler(arch_regs_t *regs) {
             break;
             
         case SYSCALL_GET_DIR_ID: { // 29
-            if (!is_valid_user_ptr(regs->ebx)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)regs->ebx, 1)) { regs->eax = -1; break; }
             
             char basename[64];
             int parent_dir_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
@@ -909,13 +928,8 @@ void syscall_handler(arch_regs_t *regs) {
                 regs->eax = -1;
             }
             break;
-        default: {
-            printk("Bilinmeyen Syscall Numarasi: %d\n", syscall_num);
-            break;
-        }
-
         case SYSCALL_AUTH: { // SYSCALL_AUTH
-            if (!is_valid_user_ptr(regs->ebx) || !is_valid_user_ptr(regs->ecx)) { 
+            if (!validate_user_pointer((const void *)regs->ebx, 1) || !validate_user_pointer((const void *)regs->ecx, 1)) { 
                 regs->eax = -1; break; 
             }
             char *user = (char *)regs->ebx;
@@ -935,7 +949,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         case SYSCALL_GET_ARGS: {
             char *buf = (char *)regs->ebx;
-            if (!is_valid_user_ptr((uint32_t)buf)) { regs->eax = -1; break; }
+            if (!validate_user_pointer((const void *)buf, 1)) { regs->eax = -1; break; }
             
             int i = 0;
             while (tasks[current_task].cmd_args[i] && i < 127) {
@@ -944,6 +958,10 @@ void syscall_handler(arch_regs_t *regs) {
             }
             buf[i] = '\0';
             regs->eax = i;
+            break;
+        }
+        default: {
+            printk("Bilinmeyen Syscall Numarasi: %d\n", syscall_num);
             break;
         }
     }

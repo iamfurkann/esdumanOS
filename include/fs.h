@@ -49,5 +49,6 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
 int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size);
 int fs_mkdir(const char *name, uint8_t parent_id);
 void fs_list_dir(uint8_t parent_id);
+int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
 
 #endif // FS_H

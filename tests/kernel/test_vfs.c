@@ -30,18 +30,18 @@ void test_vfs_boundary_and_depth(void) {
     printk("\n--- VFS Sinir ve Derinlik (OOB) Testleri ---\n");
     serial_print("\n--- VFS Sinir ve Derinlik (OOB) Testleri ---\n");
 
-    int current_parent = 0; 
+    int current_parent = 0; // Root ID (0)
     int depth_reached = 0;
     char dir_name[8] = "d0";
 
     for (int i = 0; i < 15; i++) {
         dir_name[1] = '0' + (i % 10); 
         
-        int res = fs_mkdir(dir_name, current_parent);
+        int res = sys_mkdir(dir_name, current_parent);
         if (res != 0) break; 
 
-        int new_id = fs_get_entry_idx(dir_name, current_parent);
-        if (new_id == -1 || new_id >= 32) break;
+        int new_id = sys_get_dir_id(dir_name, current_parent);
+        if (new_id <= 0 || new_id >= 255) break;
 
         current_parent = new_id;
         depth_reached++;
@@ -52,26 +52,34 @@ void test_vfs_boundary_and_depth(void) {
     int is_corrupted = 0;
 
     while (backtrack_id != 0) {
-        if (backtrack_id < 0 || backtrack_id >= 32) {
-            is_corrupted = 1; break;
+        int next_parent = -1;
+        for (int i = 0; i < 32; i++) { // MAX_FILES_IN_DIR = 32
+            if (dir_table[i].is_used && dir_table[i].entry_id == backtrack_id) {
+                next_parent = dir_table[i].parent_id;
+                break;
+            }
         }
-        int next_parent = dir_table[backtrack_id].parent_id;
+
+        if (next_parent == -1) {
+            is_corrupted = 1; break; // Parent bulunamadı (Kırık Zincir)
+        }
         if (next_parent == backtrack_id && backtrack_id != 0) {
-            is_corrupted = 2; break;
+            is_corrupted = 2; break; // Sonsuz Döngü (Kendisini gösteriyor)
         }
+        
         backtrack_id = next_parent;
         steps_back++;
         if (steps_back > depth_reached + 1) {
-            is_corrupted = 3; break;
+            is_corrupted = 3; break; // Çok fazla adım (Sınır aşımı)
         }
     }
 
     KTEST_ASSERT(is_corrupted == 0, "[STRICT] Derin dizinlerde 'cd ..' bellegi ihlal etmiyor");
     KTEST_ASSERT(backtrack_id == 0, "[STRICT] 'cd ..' zinciri basariyla Root (0) noktasina ulasti");
 
-    // DÜZELTME: uint8_t sınırlarına uygun (0-255) ama MAX_FILES (32) sınırını aşan testler
-    int oob_res1 = fs_mkdir("oob_test1", 35);
-    int oob_res2 = fs_mkdir("oob_test2", 255);
+    // 3. Sınır Dışı (Out of Bounds) Güvenlik Testleri
+    int oob_res1 = sys_mkdir("oob_test1", 35);
+    int oob_res2 = sys_mkdir("oob_test2", 255);
     
     KTEST_ASSERT(oob_res1 != 0, "[SECURITY] VFS sinir-disi (35) talepleri reddediyor");
     KTEST_ASSERT(oob_res2 != 0, "[SECURITY] VFS sinir-disi (255) talepleri reddediyor");

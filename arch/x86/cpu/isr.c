@@ -23,6 +23,12 @@ extern void set_security_level(security_level_t level);
 extern void keyboard_interrupt_handler(void);
 extern void timer_interrupt_handler(void);
 extern void syscall_handler(arch_regs_t *regs);
+extern void ata_irq_handler(void);
+volatile uint32_t system_timer_ticks = 0;
+
+uint32_t timer_get_ticks(void) {
+    return system_timer_ticks;
+}
 
 const char *exception_messages[] = {
     "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
@@ -115,12 +121,18 @@ void isr_handler(arch_regs_t *regs) {
     }
     else if (regs->int_no >= 32 && regs->int_no <= 47) {
         if (regs->int_no == IRQ0_TIMER) {
+            system_timer_ticks++;
             timer_interrupt_handler();
             signal_tick_handler();
             schedule(regs);
         }
         else if (regs->int_no == IRQ1_KEYBOARD) {
             keyboard_interrupt_handler();
+        }
+
+        //IRQ14 (PRIMARY ATA)
+        else if (regs->int_no == 46) {
+            ata_irq_handler();
         }
 
         if (regs->int_no >= 40) {

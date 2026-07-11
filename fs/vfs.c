@@ -6,6 +6,7 @@
 #include "security.h"
 #include "crypto.h"
 #include "process.h"
+#include "bcache.h"
 
 extern uint8_t kernel_master_key[32];
 extern uint32_t ata_identify(void);
@@ -88,6 +89,7 @@ static void save_directory_to_disk(void) {
 /* --- DOSYA SİSTEMİ BAŞLATMA --- */
 
 void init_fs(void) {
+    bcache_init();
     fs_max_sectors = ata_identify();
 
     if (fs_max_sectors > 4096) {
@@ -190,7 +192,6 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
 }
 
 int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
-    extern int current_task;
     extern process_t tasks[];
     uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
     
@@ -304,7 +305,6 @@ int fs_delete(const char *name, uint8_t parent_id) {
         return E_ACCESS;
     }
 
-    extern int current_task;
     extern process_t tasks[];
     uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
     
@@ -339,7 +339,6 @@ int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
         return E_ACCESS;
     }
 
-    extern int current_task;
     extern process_t tasks[];
     uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
     
@@ -366,6 +365,43 @@ int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
         }
     }
     return E_NOENT;
+}
+
+int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
+    if (fs_get_entry_idx(name, parent_id) == -1) {
+        return fs_create_file(name, content, size, parent_id);
+    }
+
+    char tmp_name[MAX_FILENAME];
+    ft_memset(tmp_name, 0, MAX_FILENAME);
+    int i;
+    for(i = 0; name[i] != '\0' && i < MAX_FILENAME - 4; i++) {
+        tmp_name[i] = name[i];
+    }
+    tmp_name[i] = '.'; tmp_name[i+1] = 't'; tmp_name[i+2] = 'm'; tmp_name[i+3] = 'p';
+
+    fs_delete(tmp_name, parent_id);
+    int res = fs_create_file(tmp_name, content, size, parent_id);
+    if (res != E_OK) return res;
+
+    // 4. Dizin tablosundaki indeksleri bul
+    int orig_idx = fs_get_entry_idx(name, parent_id);
+    int tmp_idx = fs_get_entry_idx(tmp_name, parent_id);
+
+    if (orig_idx == -1 || tmp_idx == -1) return E_NOENT; 
+    uint32_t old_sector = dir_table[orig_idx].start_sector;
+    uint32_t old_size = dir_table[orig_idx].file_size;
+
+    dir_table[orig_idx].start_sector = dir_table[tmp_idx].start_sector;
+    dir_table[orig_idx].file_size = dir_table[tmp_idx].file_size;
+
+    dir_table[tmp_idx].start_sector = old_sector;
+    dir_table[tmp_idx].file_size = old_size;
+    
+
+    save_directory_to_disk();
+    fs_delete(tmp_name, parent_id);
+    return E_OK;
 }
 
 int fs_get_entry_idx(const char *name, uint8_t parent_id) {
@@ -401,7 +437,6 @@ int fs_mkdir(const char *name, uint8_t parent_id) {
     dir_table[free_idx].parent_id = parent_id;
     dir_table[free_idx].is_used = 1;
 
-    extern int current_task;
     extern process_t tasks[];
     uint32_t current_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
     dir_table[free_idx].owner_uid = current_uid;

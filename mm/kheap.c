@@ -4,10 +4,13 @@
 #include "stdio.h"
 
 #define KHEAP_START_VIRTUAL 0xD0000000 
+#define HEAP_MAGIC_ALLOCATED 0xDEADBEEF
+#define HEAP_MAGIC_FREE      0xFEEDFACE 
 
 static uint32_t current_heap_end = KHEAP_START_VIRTUAL;
 
 typedef struct heap_block {
+    uint32_t magic;
     size_t size;
     int is_free;
     struct heap_block *next;
@@ -36,6 +39,7 @@ static int heap_grow(size_t size) {
     }
 
     heap_block_t *new_block = (heap_block_t *)start_addr;
+    new_block->magic = HEAP_MAGIC_FREE;
     new_block->size = total_alloc_size - sizeof(heap_block_t);
     new_block->is_free = 1;
     new_block->next = 0;
@@ -71,9 +75,17 @@ void *kmalloc(size_t size) {
     while (1) {
         heap_block_t *curr = heap_head;
         while (curr) {
+            if (curr->magic != HEAP_MAGIC_ALLOCATED && curr->magic != HEAP_MAGIC_FREE) {
+                HEAP_UNLOCK();
+                printk("\n[KERNEL PANIC] kmalloc: Heap Zinciri Bozuldu (Corruption)!\n");
+                asm volatile("cli; hlt");
+            }
+
             if (curr->is_free && curr->size >= size) {
                 if (curr->size > size + sizeof(heap_block_t) + 4) {
                     heap_block_t *new_block = (heap_block_t *)((uint8_t *)curr + sizeof(heap_block_t) + size);
+                    
+                    new_block->magic = HEAP_MAGIC_FREE;
                     new_block->size = curr->size - size - sizeof(heap_block_t);
                     new_block->is_free = 1;
                     new_block->next = curr->next;
@@ -83,12 +95,14 @@ void *kmalloc(size_t size) {
                 }
                 
                 curr->is_free = 0;
+                curr->magic = HEAP_MAGIC_ALLOCATED;
                 
                 HEAP_UNLOCK();
                 return (void *)((uint8_t *)curr + sizeof(heap_block_t));
             }
             curr = curr->next;
         }
+
         if (!heap_grow(size)) {
             HEAP_UNLOCK();
             printk("KERNEL PANIC: Out of Memory! Fiziksel hafiza doldu.\n");
@@ -103,7 +117,23 @@ void kfree(void *ptr) {
     HEAP_LOCK();
 
     heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    
+    if (block->magic == HEAP_MAGIC_FREE || block->is_free == 1) {
+        HEAP_UNLOCK();
+        printk("\n[KERNEL PANIC] kfree: Cift Serbest Birakma (Double Free) Yasak! Adres: 0x%x\n", (uint32_t)ptr);
+        asm volatile("cli; hlt");
+        return;
+    }
+
+    if (block->magic != HEAP_MAGIC_ALLOCATED) {
+        HEAP_UNLOCK();
+        printk("\n[KERNEL PANIC] kfree: Gecersiz gosterici (Invalid Pointer) veya Heap Bozulmasi! Adres: 0x%x\n", (uint32_t)ptr);
+        asm volatile("cli; hlt");
+        return;
+    }
+
     block->is_free = 1;
+    block->magic = HEAP_MAGIC_FREE;
 
     heap_block_t *curr = heap_head;
     while (curr) {
@@ -123,6 +153,13 @@ size_t kmalloc_size(void *ptr) {
     
     HEAP_LOCK();
     heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    
+    // Geçersiz pointer boyut okumasını engelle
+    if (block->magic != HEAP_MAGIC_ALLOCATED) {
+        HEAP_UNLOCK();
+        return 0; 
+    }
+    
     size_t size = block->size;
     HEAP_UNLOCK();
     

@@ -2,24 +2,50 @@
 #include "io.h"
 #include "stdio.h"
 
-static int ata_wait_bsy() {
-    uint32_t timeout = 100000;
-    while ((inb(ATA_PORT_STATUS) & ATA_SR_BSY) && --timeout);
+extern uint32_t timer_get_ticks(void); 
+#define ATA_TIMEOUT_MS 200
+
+volatile int ata_interrupt_fired = 0;
+
+void ata_irq_handler(void) {
+    ata_interrupt_fired = 1;
+    inb(ATA_PORT_STATUS); 
+}
+
+static int ata_wait_irq(void) {
+    uint32_t start_time = timer_get_ticks();
     
-    if (timeout == 0) {
-        printk("\n[ATA_DRV] KRITIK HATA: BSY Timeout! (Disk yanit vermiyor)\n");
-        return 0;
+    while (!ata_interrupt_fired) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+            printk("\n[ATA_DRV] KRITIK HATA: IRQ Zaman Asimi! Disk cevap vermiyor.\n");
+            return 0;
+        }
+        asm volatile("pause"); 
+    }
+    ata_interrupt_fired = 0;
+    return 1;
+}
+
+static int ata_wait_bsy() {
+    uint32_t start_time = timer_get_ticks();
+    
+    while (inb(ATA_PORT_STATUS) & ATA_SR_BSY) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+            printk("\n[ATA_DRV] KRITIK HATA: BSY Timeout! (Disk mesgul durumdan cikmadi)\n");
+            return 0;
+        }
     }
     return 1;
 }
 
 static int ata_wait_drq() {
-    uint32_t timeout = 100000;
-    while (!(inb(ATA_PORT_STATUS) & ATA_SR_DRQ) && --timeout);
+    uint32_t start_time = timer_get_ticks();
     
-    if (timeout == 0) {
-        printk("\n[ATA_DRV] KRITIK HATA: DRQ Timeout! (Veri okumaya/yazmaya hazir degil)\n");
-        return 0;
+    while (!(inb(ATA_PORT_STATUS) & ATA_SR_DRQ)) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+            printk("\n[ATA_DRV] KRITIK HATA: DRQ Timeout! (Veri akisina hazir degil)\n");
+            return 0;
+        }
     }
     return 1;
 }
@@ -35,25 +61,16 @@ uint32_t ata_identify(void) {
     uint8_t status = inb(ATA_PORT_STATUS);
     if (status == 0) return 4096;
 
-    uint32_t timeout = 100000;
-    while ((inb(ATA_PORT_STATUS) & ATA_SR_BSY) && --timeout);
-    if (timeout == 0) {
-        printk("[ATA_DRV] UYARI: Identify asamasinda BSY Timeout! (4096 donuluyor)\n");
-        return 4096;
-    }
+    if (!ata_wait_bsy()) return 4096;
 
     if (inb(ATA_PORT_LBA_MID) != 0 || inb(ATA_PORT_LBA_HIGH) != 0) return 4096;
 
-    timeout = 100000;
+    uint32_t start_time = timer_get_ticks();
     while (1) {
         status = inb(ATA_PORT_STATUS);
         if (status & ATA_SR_ERR) return 4096;
         if (status & ATA_SR_DRQ) break;
-        
-        if (--timeout == 0) {
-            printk("[ATA_DRV] UYARI: Identify DRQ/ERR Timeout! Donanim yanit vermiyor.\n");
-            return 4096;
-        }
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) return 4096;
     }
 
     uint16_t buffer[256];
@@ -62,9 +79,9 @@ uint32_t ata_identify(void) {
     }
 
     uint32_t total_sectors = (buffer[61] << 16) | buffer[60];
-    
     if (total_sectors > 0) {
-        printk("[ATA] Disk tanindi! Kapasite: %d Sektor (%d KB)\n", total_sectors, (total_sectors * 512) / 1024);
+        printk("[ATA] Disk tanindi! Kapasite: %d Sektor (%d KB) [IRQ Modu Aktif]\n", 
+               total_sectors, (total_sectors * 512) / 1024);
         return total_sectors;
     }
     
@@ -72,9 +89,13 @@ uint32_t ata_identify(void) {
 }
 
 void ata_read_sector(uint32_t lba, uint8_t *buffer) {
-    outb(ATA_PORT_CONTROL, 0x02);
+    outb(ATA_PORT_CONTROL, 0x00);
 
-    if (!ata_wait_bsy()) return; 
+    if (!ata_wait_bsy()) {
+        extern void *ft_memset(void *, int, uint32_t);
+        ft_memset(buffer, 0, 512);
+        return; 
+    }
 
     outb(ATA_PORT_DRV_HEAD, 0xE0 | ((lba >> 24) & 0x0F));
     outb(ATA_PORT_SECT_COUNT, 1);
@@ -83,15 +104,21 @@ void ata_read_sector(uint32_t lba, uint8_t *buffer) {
     outb(ATA_PORT_LBA_MID, (uint8_t)(lba >> 8));
     outb(ATA_PORT_LBA_HIGH, (uint8_t)(lba >> 16));
 
+    ata_interrupt_fired = 0;
     outb(ATA_PORT_COMMAND, ATA_CMD_READ_PIO);
 
-    if (!ata_wait_bsy()) return;
-    if (!ata_wait_drq()) return;
+    if (!ata_wait_irq()) {
+        extern void *ft_memset(void *, int, uint32_t);
+        ft_memset(buffer, 0, 512);
+        return;
+    }
     
     if (inb(ATA_PORT_STATUS) & ATA_SR_ERR) {
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
         printk("[ATA_DRV] DONANIM HATASI: Disk okuma basarisiz (Sector: %d)!\n", lba);
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        extern void *ft_memset(void *, int, uint32_t);
+        ft_memset(buffer, 0, 512);
         return;
     }
     
@@ -102,7 +129,7 @@ void ata_read_sector(uint32_t lba, uint8_t *buffer) {
 }
 
 void ata_write_sector(uint32_t lba, uint8_t *buffer) {
-    outb(ATA_PORT_CONTROL, 0x02);
+    outb(ATA_PORT_CONTROL, 0x00);
     
     if (!ata_wait_bsy()) return;
     
@@ -112,10 +139,19 @@ void ata_write_sector(uint32_t lba, uint8_t *buffer) {
     outb(ATA_PORT_LBA_LOW, (uint8_t) lba);
     outb(ATA_PORT_LBA_MID, (uint8_t)(lba >> 8));
     outb(ATA_PORT_LBA_HIGH, (uint8_t)(lba >> 16));
+
     outb(ATA_PORT_COMMAND, ATA_CMD_WRITE_PIO);
-    
     if (!ata_wait_bsy()) return;
     if (!ata_wait_drq()) return;
+
+    uint16_t *ptr = (uint16_t *)buffer;
+    ata_interrupt_fired = 0;
+    
+    for (int i = 0; i < 256; i++) {
+        outw(ATA_PORT_DATA, ptr[i]);
+    }
+
+    if (!ata_wait_irq()) return;
 
     if (inb(ATA_PORT_STATUS) & ATA_SR_ERR) {
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
@@ -123,12 +159,7 @@ void ata_write_sector(uint32_t lba, uint8_t *buffer) {
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         return;
     }
-    
-    uint16_t *ptr = (uint16_t *)buffer;
-    for (int i = 0; i < 256; i++) {
-        outw(ATA_PORT_DATA, ptr[i]);
-    }
-    
+
     outb(ATA_PORT_COMMAND, ATA_CMD_CACHE_FLUSH);
     ata_wait_bsy(); 
 }

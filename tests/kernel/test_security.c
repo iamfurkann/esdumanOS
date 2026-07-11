@@ -6,7 +6,6 @@ extern void ft_strcpy(char *dest, const char *src);
 
 // Test bitince UID'yi temizleyebilmek icin Kernel degiskenlerini ice aktariyoruz
 extern process_t tasks[];
-extern int current_task;
 
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;

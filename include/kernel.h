@@ -15,7 +15,6 @@
 
 #define OS_VERSION_STR "  v" STRINGIFY(OS_VERSION_MAJOR) "." STRINGIFY(OS_VERSION_MINOR) "." STRINGIFY(OS_VERSION_PATCH) " "
 
-
 #include "types.h"
 #include "tty.h"
 #include "stdio.h"
@@ -36,6 +35,15 @@
 #include "isr.h"
 #include "security.h"
 #include "devfs.h"
+
+
+typedef struct {
+    volatile uint32_t locked;
+} spinlock_t;
+
+void spinlock_release(spinlock_t *lock);
+void spinlock_acquire(spinlock_t *lock);
+void spinlock_init(spinlock_t *lock);
 
 extern void switch_to_user_mode(uint32_t eip, uint32_t esp);
 extern unsigned char init_elf[];

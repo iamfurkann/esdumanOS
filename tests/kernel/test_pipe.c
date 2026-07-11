@@ -35,8 +35,6 @@ void run_pipe_tests(void) {
     // ---------------------------------------------------------
     // BÖLÜM 2: UÇTAN UCA ENTEGRASYON TESTİ (Syscall & FD Table)
     // ---------------------------------------------------------
-    // Not: Syscall yöneticisinin güvenlik duvarını (is_valid_user_ptr) 
-    // aşmak için test adreslerini Kullanıcı Alanına (User Space) koyuyoruz.
     
     int *u_fds = (int *)0x500700;
     char *u_write_buf = (char *)0x500800;

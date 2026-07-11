@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "stdio.h"
+#include "kernel.h"
 
 uint32_t pmm_bitmap[BITMAP_SIZE];
 uint32_t used_memory = 0;
@@ -7,6 +8,7 @@ uint32_t used_memory = 0;
 uint32_t actual_total_memory = 0; 
 
 static uint32_t last_scanned_index = 0;
+spinlock_t pmm_lock;
 
 static uint32_t pmm_find_first_free(void) {
     for (int i = 0; i < BITMAP_SIZE; i++) {
@@ -25,6 +27,7 @@ static uint32_t pmm_find_first_free(void) {
 }
 
 void init_pmm(multiboot_info_t *mboot_info) {
+    spinlock_init(&pmm_lock);
     for (int i = 0; i < BITMAP_SIZE; i++) {
         pmm_bitmap[i] = 0xFFFFFFFF;
     }
@@ -99,9 +102,13 @@ void init_pmm(multiboot_info_t *mboot_info) {
 }
 
 uint32_t pmm_alloc_frame(void) {
+    spinlock_acquire(&pmm_lock);
+
     uint32_t frame = pmm_find_first_free();
     
     if (frame == 0xFFFFFFFF) {
+        // Hata durumunda da kilidi bırakmayı unutma (Deadlock önlemi)
+        spinlock_release(&pmm_lock);
         printk("KERNEL PANIC: Fiziksel Hafiza Doldu!\n");
         asm volatile("cli; hlt"); 
     }
@@ -109,7 +116,9 @@ uint32_t pmm_alloc_frame(void) {
     pmm_bitmap[frame / 32] |= (1U << (frame % 32));
     used_memory += PAGE_SIZE;
     
-    return frame * PAGE_SIZE; 
+    spinlock_release(&pmm_lock);
+
+    return frame * PAGE_SIZE;
 }
 
 void pmm_free_frame(uint32_t addr) {
@@ -119,11 +128,14 @@ void pmm_free_frame(uint32_t addr) {
         printk("[PMM UYARISI] Kritik Kernel alanini (Frame %d) serbest birakma reddedildi!\n", frame);
         return; 
     }
+    spinlock_acquire(&pmm_lock);
+
     pmm_bitmap[frame / 32] &= ~(1U << (frame % 32));
     used_memory -= PAGE_SIZE;
     if ((frame / 32) < last_scanned_index) {
         last_scanned_index = frame / 32;
     }
+    spinlock_release(&pmm_lock);
 }
 uint32_t pmm_get_total_memory(void) {
     return actual_total_memory; 

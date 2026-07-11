@@ -27,6 +27,18 @@ int ft_strlen(const char *s) {
     int i = 0; while(s[i]) i++; return i;
 }
 
+char *ft_strstr(const char *haystack, const char *needle) {
+    if (!*needle) return (char *)haystack;
+    for (int i = 0; haystack[i]; i++) {
+        int j = 0;
+        while (haystack[i + j] && haystack[i + j] == needle[j]) {
+            if (!needle[j + 1]) return (char *)&haystack[i];
+            j++;
+        }
+    }
+    return 0;
+}
+
 void ft_itoa(int n, char *buf) {
     if (n == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
     char temp[16]; int i = 0;
@@ -168,12 +180,10 @@ void show_help(void) {
     printk("  export     : Yeni degisken tanimlar (Orn: export DEG DEGER)\n");
 }
 
-// Linuxtaki 'cat' programinin yuksek performansli (Buffered I/O) implementasyonu
 int builtin_cat(char **args, int current_dir_id) {
     int flag_n = 0, flag_b = 0, flag_E = 0, flag_s = 0, flag_T = 0;
     int file_args_start = 1;
     
-    // 1. FLAG AYRIŞTIRMA
     for (int i = 1; args[i] != 0; i++) {
         if (args[i][0] == '-' && args[i][1] != '\0') {
             for (int j = 1; args[i][j] != '\0'; j++) {
@@ -199,7 +209,6 @@ int builtin_cat(char **args, int current_dir_id) {
         return 1;
     }
 
-    // 2. DOSYA OKUMA VE BİÇİMLENDİRME (Buffered I/O)
     for (int i = file_args_start; args[i] != 0; i++) {
         int fd = sys_open(args[i], current_dir_id); 
         if (fd < 0) { 
@@ -306,6 +315,26 @@ void execute_command(char **args, char *redirect_file) {
         char *target = args[1];
         if (!target) target = "~";
 
+        int invalid_path = 0;
+        char *ptr = target;
+        while (*ptr) {
+            if (*ptr == '/' && *(ptr + 1) == '/') {
+                char *check = ptr;
+                while (*check == '/') check++; 
+                if (*check != '\0') {
+                    invalid_path = 1;
+                    break;
+                }
+            }
+            ptr++;
+        }
+
+        if (invalid_path) {
+            printk("minishell: cd: "); printk(target); printk(": Boyle bir dosya ya da dizin yok\n");
+            last_exit_status = 1;
+            return;
+        }
+
         int new_id = sys_get_dir_id(target, current_dir_id);
         if (new_id != -1) { 
             current_dir_id = new_id;
@@ -323,8 +352,21 @@ void execute_command(char **args, char *redirect_file) {
                 if (ft_strcmp(current_path, "/") != 0) ft_strcpy(&current_path[ft_strlen(current_path)], "/");
                 ft_strcpy(&current_path[ft_strlen(current_path)], target);
             }
+
+            int r = 0, w = 0;
+            while (current_path[r]) {
+                if (current_path[r] == '/' && current_path[r+1] == '/') { r++; continue; }
+                current_path[w++] = current_path[r++];
+            }
+            current_path[w] = '\0';
+            if (w > 1 && current_path[w-1] == '/') current_path[w-1] = '\0';
+
+            last_exit_status = 0;
         } 
-        else { printk("cd: Boyle bir dizin yok: "); printk(target); printk("\n"); }
+        else { 
+            printk("cd: Boyle bir dizin yok: "); printk(target); printk("\n"); 
+            last_exit_status = 1; 
+        }
     }
     else if (ft_strcmp(args[0], "write") == 0) {
         if (args[1] && args[2]) {
@@ -546,84 +588,88 @@ void main(void) {
         }
         if (idx == 0) continue;
 
-        for (int i = 0; i < 32; i++) { args[i] = 0; }
-        
-        int arg_count = 0; 
-        int in_word = 0; 
-        char *redirect_file = 0;
+        char *current_cmd = cmd_buf;
+        int skip_execution = 0;
 
-        char *pipe_args[32]; 
-        for (int i = 0; i < 32; i++) { pipe_args[i] = 0; }
-        int has_pipe = 0;
-        int pipe_arg_count = 0;
+        while (current_cmd && *current_cmd) {
+            char *next_cmd = 0;
+            int op_type = 0;
 
-        for (int i = 0; cmd_buf[i] != '\0'; i++) {
-            if (cmd_buf[i] == ' ') { cmd_buf[i] = '\0'; in_word = 0; } 
-            else if (!in_word) { args[arg_count++] = &cmd_buf[i]; in_word = 1; }
-        }
+            char *and_p = ft_strstr(current_cmd, "&&");
+            char *or_p = ft_strstr(current_cmd, "||");
 
-        for (int i = 0; i < arg_count; i++) {
-            if (ft_strcmp(args[i], ">") == 0) {
-                args[i] = 0; 
-                if (args[i+1]) redirect_file = args[i+1]; 
-                break;
+            if (and_p && (!or_p || and_p < or_p)) {
+                *and_p = '\0';
+                next_cmd = and_p + 2;
+                op_type = 1;
+            } else if (or_p) {
+                *or_p = '\0';
+                next_cmd = or_p + 2;
+                op_type = 2;
             }
 
-            else if (ft_strcmp(args[i], "|") == 0) {
-                args[i] = 0;
-                has_pipe = 1;
-                
-                for (int j = i + 1; j < arg_count; j++) {
-                    pipe_args[pipe_arg_count++] = args[j];
+            if (!skip_execution) {
+                for (int i = 0; i < 32; i++) { args[i] = 0; }
+                int arg_count = 0; int in_word = 0; char *redirect_file = 0;
+                char *pipe_args[32]; for (int i = 0; i < 32; i++) { pipe_args[i] = 0; }
+                int has_pipe = 0; int pipe_arg_count = 0;
+
+                for (int i = 0; current_cmd[i] != '\0'; i++) {
+                    if (current_cmd[i] == ' ') { current_cmd[i] = '\0'; in_word = 0; } 
+                    else if (!in_word) { args[arg_count++] = &current_cmd[i]; in_word = 1; }
                 }
-                break;
-            }
-        }
 
-        /* ENV VARIABLE VE TILDE (~) EXPANSION */
-        for (int i = 0; args[i] != 0; i++) {
-            if (args[i][0] == '$') {
-                if (args[i][1] == '?') {
-                    static char status_str[16]; ft_itoa(last_exit_status, status_str); args[i] = status_str;
-                } else args[i] = get_env(&args[i][1]);
-            }
-            else if (args[i][0] == '~') {
-                static char expanded_path[128];
-                char *home = get_env("HOME");
-                ft_strcpy(expanded_path, home);
-                
-                if (args[i][1] == '/') {
-                    ft_strcpy(&expanded_path[ft_strlen(expanded_path)], &args[i][1]);
+                for (int i = 0; i < arg_count; i++) {
+                    if (ft_strcmp(args[i], ">") == 0) {
+                        args[i] = 0; if (args[i+1]) redirect_file = args[i+1]; break;
+                    }
+                    else if (ft_strcmp(args[i], "|") == 0) {
+                        args[i] = 0; has_pipe = 1;
+                        for (int j = i + 1; j < arg_count; j++) pipe_args[pipe_arg_count++] = args[j];
+                        break;
+                    }
                 }
-                args[i] = expanded_path;
+
+                for (int i = 0; args[i] != 0; i++) {
+                    if (args[i][0] == '$') {
+                        if (args[i][1] == '?') {
+                            static char status_str[16]; ft_itoa(last_exit_status, status_str); args[i] = status_str;
+                        } else args[i] = get_env(&args[i][1]);
+                    }
+                    else if (args[i][0] == '~') {
+                        static char expanded_path[128];
+                        ft_strcpy(expanded_path, get_env("HOME"));
+                        if (args[i][1] == '/') ft_strcpy(&expanded_path[ft_strlen(expanded_path)], &args[i][1]);
+                        args[i] = expanded_path;
+                    }
+                }
+
+                if (args[0] != 0) {
+                    if (has_pipe) {
+                        int pfd[2];
+                        if (pipe(pfd) >= 0) {
+                            dup2(1, 10); dup2(0, 11);
+                            dup2(pfd[1], 1); execute_command(args, redirect_file); dup2(10, 1);
+                            sys_close(pfd[1]);
+                            dup2(pfd[0], 0); execute_command(pipe_args, 0); dup2(11, 0);
+                            sys_close(pfd[0]);
+                        } else printk("Hata: Pipe olusturulamadi!\n");
+                    } else {
+                        execute_command(args, redirect_file);
+                    }
+                }
             }
-        }
 
-        if (args[0] == 0) continue;
-         
-        if (has_pipe) {
-            int pfd[2];
-            if (pipe(pfd) < 0) { printk("Hata: Pipe olusturulamadi!\n"); continue; }
-            
-            dup2(1, 10);
-            dup2(0, 11);
-            
-            dup2(pfd[1], 1);
-            execute_command(args, redirect_file);
-            dup2(10, 1);
+            if (!skip_execution) {
+                if (op_type == 1) { skip_execution = (last_exit_status != 0); }
+                else if (op_type == 2) { skip_execution = (last_exit_status == 0); }
+            } else {
+                if (op_type == 1) { skip_execution = 1; }
+                else if (op_type == 2) { skip_execution = 0; }
+            }
 
-            sys_close(pfd[1]);
-            
-            dup2(pfd[0], 0);
-            execute_command(pipe_args, 0); 
-            
-            dup2(11, 0);
-            sys_close(pfd[0]);
-            
-            last_exit_status = 0;
-            continue; 
+            current_cmd = next_cmd;
         }
-        execute_command(args, redirect_file);
     }
 }
 

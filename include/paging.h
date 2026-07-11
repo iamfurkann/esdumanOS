@@ -15,7 +15,9 @@
 #define PAGE_USER_ACCESS   7          // Present=1, RW=1, User=1
 #define PAGE_NOT_PRESENT   2          // Present=0, RW=1
 void init_paging(void);
-void map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+void unmap_page(uint32_t virtual_addr);
+
 //asm
 extern void load_page_directory(uint32_t* dir);
 extern void enable_paging(void);

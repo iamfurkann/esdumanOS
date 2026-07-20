@@ -14,7 +14,7 @@
 
 ## Live Website
 
-**https://esduman.github.io/esdumanOS-website/**
+**https://iamfurkann.github.io/esdumanOS-website/**
 ---
 
 *An independent operating system, booting through GRUB via Multiboot,*

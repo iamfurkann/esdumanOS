@@ -10,7 +10,11 @@
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 ![License](https://img.shields.io/badge/license-MIT-purple)
 ![Status](https://img.shields.io/badge/status-alpha-red)
+[![Website](https://img.shields.io/badge/Website-Live-2ea44f)](https://iamfurkann.github.io/esdumanOS-website/)
 
+## Live Website
+
+**https://esduman.github.io/esdumanOS-website/**
 ---
 
 *An independent operating system, booting through GRUB via Multiboot,*

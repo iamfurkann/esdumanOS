@@ -3,6 +3,7 @@
 #include "process.h"
 
 extern void klog_write_char(char c);
+extern void serial_write_char(char c);
 
 mutex_t vga_mutex;
 int vga_mutex_initialized = 0;
@@ -213,6 +214,7 @@ int printk(const char *format, ...) {
     for (int i = 0; i < len; i++) {
         klog_write_char(print_buffer[i]); // Dmesg Kaydı (Açmak istersen kullanabilirsin)
         terminal_putchar(print_buffer[i]); 
+        serial_write_char(print_buffer[i]);
     }
 
     if (!kernel_panic_mode) mutex_unlock(&vga_mutex);

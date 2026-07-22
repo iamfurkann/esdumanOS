@@ -9,17 +9,6 @@ extern void *kmalloc(uint32_t size);
 extern void kfree(void *ptr);
 extern uint32_t timer_ticks;
 
-#include "aes.h"
-#include "fs.h"
-#include "crypto.h"
-#include "security.h"
-#include "errno.h"
-#include "stdio.h"
-
-extern void *kmalloc(uint32_t size);
-extern void kfree(void *ptr);
-extern uint32_t timer_ticks;
-
 static int rdrand_supported = -1;
 
 static int check_rdrand_support(void) {
@@ -45,9 +34,9 @@ static uint32_t get_hardware_rand(void) {
 }
 
 int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, const uint8_t key[32], uint8_t parent_id) {
-    uint32_t payload_len = 12 + len;
+    uint32_t payload_len = 40 + len;
     uint32_t padded_len = (payload_len + 15) & ~15; 
-    uint32_t total_len = 16 + padded_len; 
+    uint32_t total_len = 16 + padded_len;
 
     uint8_t *enc_buffer = (uint8_t *)kmalloc(total_len);
     if (!enc_buffer) return E_NOMEM;
@@ -89,15 +78,18 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
     uint32_t *hdr = (uint32_t *)(enc_buffer + 16); 
     hdr[0] = 0x53414645; // "SAFE"
     hdr[1] = len;        
-    hdr[2] = checksum;   
+
+    extern void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary);
+    sha256_binary(data, len, (uint8_t *)&hdr[2]);
 
     for(uint32_t i = 0; i < len; i++) {
-        enc_buffer[28 + i] = data[i];
+        enc_buffer[56 + i] = data[i];
     }
     
-    for(uint32_t i = 12 + len; i < padded_len; i++) {
+    for(uint32_t i = 40 + len; i < padded_len; i++) {
         enc_buffer[16 + i] = 0;
     }
+    
     struct AES_ctx ctx;
     AES_init_ctx_iv(&ctx, key, enc_buffer); 
     AES_CBC_encrypt_buffer(&ctx, enc_buffer + 16, padded_len); 
@@ -108,8 +100,7 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
 }
 
 int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const uint8_t key[32]) {
-    // 1. Dosya IV (16) + Header (12) boyutundan küçükse geçersizdir
-    if (file->file_size <= 28) return 0; 
+    if (file->file_size <= 56) return 0; 
 
     uint8_t *temp_buf = (uint8_t *)kmalloc(file->file_size);
     if (!temp_buf) return 0;
@@ -118,7 +109,7 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
     file->current_offset = 0;
 
     int read_bytes = fs_read_raw(file, temp_buf, file->file_size);
-    if (read_bytes <= 28) { 
+    if (read_bytes <= 56) { 
         file->current_offset = requested_offset; 
         kfree(temp_buf); 
         return 0; 
@@ -133,7 +124,7 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
     uint32_t *hdr = (uint32_t *)(temp_buf + 16);
     uint32_t magic = hdr[0];
     uint32_t orig_len = hdr[1];
-    uint32_t stored_checksum = hdr[2];
+    uint8_t *stored_hash = (uint8_t *)&hdr[2];
 
     if (magic != 0x53414645) {
         printk("[CRYPTO HATA] Magic Number uyumsuzlugu! Parola yanlis veya veri bozuk.\n");
@@ -141,16 +132,27 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
         return 0;
     }
 
-    uint8_t *plaintext = temp_buf + 28;
-    uint32_t calc_checksum = 5381;
-    for (uint32_t i = 0; i < orig_len; i++) {
-        calc_checksum = ((calc_checksum << 5) + calc_checksum) + plaintext[i];
+    uint32_t max_possible_len = cipher_len - 40;
+    if (orig_len > max_possible_len) {
+        printk("[CRYPTO KRITIK HATA] Başlıkta belirtilen dosya boyutu veriden büyük!\n");
+        kfree(temp_buf);
+        return 0;
     }
 
-    if (calc_checksum != stored_checksum) {
+    uint8_t *plaintext = temp_buf + 56;
+    uint8_t calc_hash[32];
+    extern void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary);
+    sha256_binary(plaintext, orig_len, calc_hash);
+
+    int hash_ok = 1;
+    for (int i = 0; i < 32; i++) {
+        if (calc_hash[i] != stored_hash[i]) hash_ok = 0;
+    }
+
+    if (!hash_ok) {
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
         printk("\n[CRYPTO KRITIK HATA] BÜTÜNLÜK (INTEGRITY) İHLALİ!\n");
-        printk("Dosya uzerinde oynanmis veya disk sektörleri bozulmus!\n");
+        printk("Dosya uzerinde oynanmis veya SHA-256 Hash'i uyusmuyor!\n");
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         kfree(temp_buf);
         return 0;

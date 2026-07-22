@@ -1,14 +1,20 @@
-// [MİMARİ YAMASI]: Ubuntu'nun sistem dosyalarını (<stdio.h>, <stdint.h> vb.) SİLDİK!
-// Artık sadece kendi Kernel tiplerimizi kullanıyoruz, böylece çakışma (conflict) olmuyor.
+/*
+ * File: test_crypto.c
+ * Purpose: Correctness test for AES-256-CBC encryption and decryption using NIST FIPS-197 standards.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
+// [ARCHITECTURE PATCH]: Removed Ubuntu's system headers (<stdio.h>, <stdint.h>, etc.)!
+// We only use our own Kernel types now to avoid conflicts.
 #include "types.h"
 #include "aes.h"
 
-// Ubuntu libc'sinden sadece ekrana yazı basmak için printf'i dışarıdan (extern) alıyoruz
+// Externally declaring printf from Ubuntu's libc just to print to the screen
 extern int printf(const char *format, ...);
 
 // =========================================================================
-// MOCKING (Taklit) KATI: 
-// aes.c'nin aradığı Kernel bellek fonksiyonlarını test için burada taklit ediyoruz.
+// MOCKING LAYER: 
+// Mocking the kernel memory functions required by aes.c for testing.
 // =========================================================================
 void *ft_memcpy(void *dest, const void *src, uint32_t n) {
     uint8_t *d = (uint8_t *)dest;
@@ -27,7 +33,7 @@ int ft_memcmp(const void *s1, const void *s2, uint32_t n) {
 }
 
 // =========================================================================
-// NIST SP 800-38A (AES-256 CBC) Standart Test Vektörü (F.2.5)
+// NIST SP 800-38A (AES-256 CBC) Standard Test Vector (F.2.5)
 // =========================================================================
 const uint8_t nist_key[32] = {
     0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
@@ -44,7 +50,7 @@ const uint8_t nist_expected_ciphertext[16] = {
 };
 
 int main(void) {
-    printf("\n--- Host Crypto (AES-256-CBC) Dogruluk Testi ---\n");
+    printf("\n--- Host Crypto (AES-256-CBC) Correctness Test ---\n");
 
     uint8_t buffer[16];
     ft_memcpy(buffer, nist_plaintext, 16); 
@@ -57,20 +63,20 @@ int main(void) {
     AES_CBC_encrypt_buffer(&ctx, buffer, 16);
 
     if (ft_memcmp(buffer, nist_expected_ciphertext, 16) != 0) {
-        printf("[FAIL] AES Sifreleme NIST Standartlarina UYMUYOR!\n");
+        printf("[FAIL] AES Encryption DOES NOT COMPLY with NIST Standards!\n");
         return 1;
     }
-    printf("[PASS] AES-256 Sifreleme NIST FIPS-197 Standartlarina %s Uygun.\n", "100%%");
+    printf("[PASS] AES-256 Encryption Complies %s with NIST FIPS-197 Standards.\n", "100%%");
 
     ft_memcpy(temp_iv, nist_iv, 16); 
     AES_init_ctx_iv(&ctx, nist_key, temp_iv);
     AES_CBC_decrypt_buffer(&ctx, buffer, 16);
 
     if (ft_memcmp(buffer, nist_plaintext, 16) != 0) {
-        printf("❌ [FAIL] AES Sifre Cozme (Decryption) asamasinda veri bozuldu!\n");
+        printf("❌ [FAIL] Data corrupted during AES Decryption phase!\n");
         return 1;
     }
-    printf("[PASS] AES-256 Sifre Cozme (Decryption) NIST Standartlarina %s Uygun.\n", "100%%");
+    printf("[PASS] AES-256 Decryption Complies %s with NIST Standards.\n", "100%%");
     printf("====================================================\n\n");
     return 0; 
 }

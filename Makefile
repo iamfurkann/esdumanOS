@@ -1,3 +1,8 @@
+ifndef ESDUMAN_KEY
+$(warning DIKKAT: ESDUMAN_KEY ortam degiskeni tanimli degil! Varsayilan, guvensiz test anahtari kullanilacak.)
+ESDUMAN_KEY ?= TEST_KEY_123456789012345678901234
+endif
+
 ARCH ?= x86
 
 CORE_OBJS = kernel/core/kernel.o \
@@ -7,12 +12,18 @@ CORE_OBJS = kernel/core/kernel.o \
 			kernel/proc/pipe.o \
             kernel/proc/elf.o \
             kernel/syscall/syscall.o \
-            kernel/security/security.o \
+			kernel/syscall/sys_fs.o \
+			kernel/syscall/sys_ipc.o \
+			kernel/syscall/sys_process.o \
+			kernel/syscall/sys_sec.o \
+			kernel/syscall/sys_utils.o \
 			kernel/security/passwd.o \
+			kernel/security/security.o \
             src/resources/init_elf_data.o \
             src/resources/hello_elf_data.o \
             src/resources/clear_elf_data.o \
             src/resources/echo_elf_data.o \
+			src/resources/sh_elf_data.o \
 			fs/bcache.o \
             fs/vfs.o \
             fs/crypto_fs.o \
@@ -39,8 +50,14 @@ TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_adversarial.o \
             tests/kernel/test_integration.o \
             tests/kernel/test_regression.o \
-			tests/kernel/test_concurrency.o
-
+			tests/kernel/test_concurrency.o \
+            tests/kernel/test_paging.o \
+            tests/kernel/test_pmm.o \
+            tests/kernel/test_syscall.o \
+            tests/kernel/test_process.o \
+            tests/kernel/test_signal.o \
+            tests/kernel/test_crypto.o \
+            tests/kernel/test_bcache.o
 ifeq ($(ARCH), x86)
     # x86
     CC = gcc
@@ -48,7 +65,7 @@ ifeq ($(ARCH), x86)
     LD = ld
     AR = ar
 
-    CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-stack-protector -Wall -Wextra -I include -I src/libc -c -DARCH_X86
+    CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-stack-protector -Wall -Wextra -I include -I src/libc -c -DARCH_X86 -MMD -MP
     ASFLAGS = -f elf32
     LDFLAGS = -m elf_i386 -T arch/x86/linker.ld -z noexecstack
 
@@ -56,7 +73,7 @@ ifeq ($(ARCH), x86)
     USER_LDFLAGS = -m elf_i386
 
     QEMU = qemu-system-i386
-    QEMU_FLAGS = -cdrom $(ISO) -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+    QEMU_FLAGS = -cdrom $(ISO) -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
     
     ARCH_OBJS = arch/x86/boot/boot.o \
                 arch/x86/cpu/gdt.o  \
@@ -71,7 +88,8 @@ ifeq ($(ARCH), x86)
                 drivers/tty.o \
                 drivers/keyboard.o \
                 drivers/ata.o \
-                drivers/rtc.o
+                drivers/rtc.o \
+				drivers/serial.o \
 
 else ifeq ($(ARCH), riscv64)
     # RISC-V (64-bit)
@@ -100,6 +118,9 @@ endif
 export CC AS LD CFLAGS
 
 OBJS = $(CORE_OBJS) $(ARCH_OBJS)
+
+-include $(OBJS:.o=.d)
+-include $(TEST_OBJS:.o=.d)
 
 BIN = myos.bin
 TEST_BIN = myos_test.bin
@@ -145,11 +166,14 @@ apps/bin/clear.elf: apps/bin/clear.c
 apps/bin/echo.elf: apps/bin/echo.c
 	$(CC) $(USER_CFLAGS) apps/bin/echo.c -o apps/bin/echo.elf
 
+apps/bin/sh.elf: apps/bin/sh.c
+	$(CC) $(USER_CFLAGS) apps/bin/sh.c -o apps/bin/sh.elf
+
 tools/encrypt_tool: tools/encrypt_tool.c
 	gcc tools/encrypt_tool.c -o tools/encrypt_tool -lcrypto
 
 apps/init_encrypted.elf: apps/init.elf tools/encrypt_tool
-	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_KEY)
 
 src/resources/init_elf_data.c: apps/init_encrypted.elf
 	@mkdir -p src/resources
@@ -158,21 +182,27 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 
 src/resources/hello_elf_data.c: hello.elf
 	@mkdir -p src/resources
-	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_KEY)
 	@xxd -i apps/hello_encrypted.elf | \
 	sed 's/apps_hello_encrypted_elf/hello_elf/g' > src/resources/hello_elf_data.c
 
 src/resources/clear_elf_data.c: apps/bin/clear.elf tools/encrypt_tool
 	@mkdir -p src/resources
-	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf $(ESDUMAN_KEY)
 	@xxd -i apps/bin/clear_encrypted.elf | \
 	sed 's/apps_bin_clear_encrypted_elf/clear_elf/g' > src/resources/clear_elf_data.c
 
 src/resources/echo_elf_data.c: apps/bin/echo.elf tools/encrypt_tool
 	@mkdir -p src/resources
-	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
+	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf $(ESDUMAN_KEY)
 	@xxd -i apps/bin/echo_encrypted.elf | \
 	sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
+
+src/resources/sh_elf_data.c: apps/bin/sh.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf $(ESDUMAN_KEY)
+	@xxd -i apps/bin/sh_encrypted.elf | \
+	sed 's/apps_bin_sh_encrypted_elf/sh_elf/g' > src/resources/sh_elf_data.c
 
 test:
 	@echo "--- Host Unit Tests Calistiriliyor ---"
@@ -194,7 +224,7 @@ test_kernel: $(TEST_BIN) hello.elf
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
-	@dd if=message.txt of=disk.img conv=notrunc > /dev/null 2>&1
+	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
 	@if $(QEMU) -kernel $(TEST_BIN) -append "kernel_pass=selftest" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -218,19 +248,21 @@ fuzz:
 	@echo "Bilinen 'Crash' (Zero-Day) dosyalari (Corpus) test ediliyor, ardindan yeni saldirilar uretilecek..."
 	@./tests/host/fuzz_parser tests/host/corpus -max_total_time=10
 
-run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf
+run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
 	@echo "--- [1/4] ELF dosyalari sifreli pakete donusturuluyor..."
-	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
-	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
-	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
-	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf dF8pQ2mX7kL4zR9tN1cV5wHy
-	
+	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf $(ESDUMAN_KEY)
+
 	@echo "--- [2/4] C veri dosyalari uretiliyor..."
 	@mkdir -p src/resources
 	@xxd -i apps/init_encrypted.elf | sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
 	@xxd -i apps/hello_encrypted.elf | sed 's/apps_hello_encrypted_elf/hello_elf/g' > src/resources/hello_elf_data.c
 	@xxd -i apps/bin/clear_encrypted.elf | sed 's/apps_bin_clear_encrypted_elf/clear_elf/g' > src/resources/clear_elf_data.c
 	@xxd -i apps/bin/echo_encrypted.elf | sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
+	@xxd -i apps/bin/sh_encrypted.elf | sed 's/apps_bin_sh_encrypted_elf/sh_elf/g' > src/resources/sh_elf_data.c
 	
 	@echo "--- [3/4] Kernel yeniden derleniyor (sifreli ELF ile)..."
 	@$(MAKE) $(ISO)
@@ -241,6 +273,8 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 clean:
 	$(MAKE) -C lib clean
 	rm -f apps/bin/hello.o apps/bin/hello.elf hello.elf apps/init.o apps/init.elf apps/init_encrypted.elf tools/encrypt_tool apps/hello_encrypted.elf
-	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf src/resources/clear_elf_data.c src/resources/echo_elf_data.c
+	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf 
+	rm -rf src/resources/*_data.c src/resources/*.o
+	rm -f disk.img kernel_log.txt
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/fuzz_parser
-	rm -rf $(OBJS) $(TEST_OBJS) $(BIN) $(TEST_BIN) $(ISO) isodir message.txt gizli.txt
+	rm -rf $(OBJS) $(TEST_OBJS) $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(BIN) $(TEST_BIN) $(ISO) isodir message.txt gizli.txt

@@ -3,12 +3,14 @@
 
 #include "types.h"
 
-//SANAL BELLEK ADRES MAKTOLARI
 #define RECURSIVE_PD_VADDR 0xFFFFF000 // Fractal haritalama (Page Directory kendi üzerinde)
 #define RECURSIVE_PT_VADDR 0xFFC00000 // Page Table başlangıç adresi
 #define USER_STACK_TOP     0xBFFFF000 // Ring 3 Kullanıcı yığını (stack) başlangıcı
 #define TEMP_MAP_VADDR     0xE0000000 // Klonlama esnasında kullanılan geçici adres
+
+#ifndef PAGE_SIZE
 #define PAGE_SIZE          4096       // Standart sayfa boyutu (4 KB)
+#endif
 
 // Page Table/Directory Flags
 #define PAGE_KERNEL_ONLY   3          // Present=1, RW=1, User=0
@@ -22,4 +24,4 @@ void unmap_page(uint32_t virtual_addr);
 extern void load_page_directory(uint32_t* dir);
 extern void enable_paging(void);
 
-#endif 
+#endif

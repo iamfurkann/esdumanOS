@@ -54,4 +54,5 @@
 #define SYSCALL_OPEN            40
 #define SYSCALL_AUTH            41
 #define SYSCALL_GET_ARGS        42
+#define SYSCALL_GETUID          43
 #endif // SYSCALL_H

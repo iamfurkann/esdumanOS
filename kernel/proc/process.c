@@ -1,21 +1,18 @@
 #include "kernel.h"
 #include "pipe.h"
+#include "klog.h"
+#include "errno.h"
 
+extern void process_pending_kernel_timers(void);
 extern uint32_t *page_directory;
 extern uint32_t clone_page_directory(void);
 
-process_t tasks[MAX_TASKS];
+process_t tasks[MAX_TASKS] __attribute__((aligned(16)));
 cpu_state_t cpus[MAX_CPUS];
 int multitasking_enabled = 0;
 int next_pid = 0;
 int foreground_task = -1;
-
-uint32_t idle_stack[256];
-void idle_task_process(void) {
-    while (1) {
-        asm volatile ("int $0x80" : : "a"(99));
-    }
-}
+mutex_t *task_wait_mutex[MAX_TASKS] = {0};
 
 void init_multitasking(void) {
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -24,13 +21,27 @@ void init_multitasking(void) {
         tasks[i].msg_head = 0;
         tasks[i].msg_tail = 0;
         tasks[i].msg_count = 0;
+        task_wait_mutex[i] = 0;
     }
 
     cpus[0].cpu_id = 0;
     cpus[0].is_bsp = 1;
     cpus[0].active_task = -1;
+    extern uint32_t pmm_alloc_frame(void);
+    extern int map_page(uint32_t, uint32_t, uint32_t);
+    
+    uint32_t idle_phys = pmm_alloc_frame();
+    map_page(0x80000000, idle_phys, 7); // 7 = User, RW, Present
+    
+    // Asm: mov eax, 99 (B8 63 00 00 00) | int 0x80 (CD 80) | jmp short -9 (EB F7)
+    uint8_t idle_code[] = { 0xB8, 0x63, 0x00, 0x00, 0x00, 0xCD, 0x80, 0xEB, 0xF7 };
+    uint8_t *idle_page = (uint8_t *)0x80000000;
+    for(int i = 0; i < 9; i++) {
+        idle_page[i] = idle_code[i];
+    }
 
-    create_process((uint32_t)idle_task_process, (uint32_t)&idle_stack[255], (uint32_t)page_directory);
+    // Idle gorevini 0x80000000 User adresinde baslat
+    create_process(0x80000000, 0x80000000 + 4096 - 4, (uint32_t)page_directory);
     tasks[0].base_priority = 0;
     tasks[0].current_priority = 0;
 }
@@ -40,8 +51,14 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     for (i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_EMPTY || tasks[i].state == TASK_DEAD) break;
     }
-    if (i == MAX_TASKS) return -1;
-
+    if (i == MAX_TASKS) {
+        klog(LOG_LEVEL_ERROR, "PROCESS", "Yeni surec (process) olusturulamadi: MAX_TASKS sinirina ulasildi.");
+        return E_NOMEM; 
+    }
+    
+    if (next_pid < 0 || next_pid == 0x7FFFFFFF) {
+        next_pid = 2; 
+    }
     tasks[i].pid = next_pid++;
 
     if (current_task == -1 || current_task == 0) {
@@ -52,11 +69,14 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
         tasks[i].uid = tasks[current_task].uid;
     }
 
+    klog_int(LOG_LEVEL_DEBUG, "PROCESS", "Yeni surec olusturuldu", tasks[i].pid);
+
     tasks[i].in_signal_handler = 0;
     tasks[i].state = TASK_RUNNING;
     tasks[i].wait_reason = WAIT_NONE;
     tasks[i].held_mutex = 0;
     tasks[i].pending_signals = 0;
+    task_wait_mutex[i] = 0;
     for (int k = 0; k < MAX_USER_SIGNALS; k++) {
         tasks[i].signal_handlers[k] = 0;
     }
@@ -78,15 +98,9 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     uint8_t *ptr = (uint8_t *)&tasks[i].regs;
     for (uint32_t j = 0; j < sizeof(arch_regs_t); j++) ptr[j] = 0;
 
-    if (i == 0) {
-        tasks[i].regs.cs = 0x08; // KERNEL_CS
-        tasks[i].regs.ds = 0x10; // KERNEL_DS
-        tasks[i].regs.ss = 0x10;
-    } else {
-        tasks[i].regs.cs = GDT_USER_CS; // USER_CS (Ring 3)
-        tasks[i].regs.ds = GDT_USER_DS; // USER_DS (Ring 3)
-        tasks[i].regs.ss = GDT_USER_DS;
-    }
+    tasks[i].regs.cs = GDT_USER_CS; // USER_CS (Ring 3)
+    tasks[i].regs.ds = GDT_USER_DS; // USER_DS (Ring 3)
+    tasks[i].regs.ss = GDT_USER_DS;
     
     tasks[i].regs.eip = eip;         
     tasks[i].regs.useresp = esp;     
@@ -112,8 +126,10 @@ void set_task_priority(int pid, uint8_t new_priority) {
 int send_message(int target_pid, uint32_t payload) {
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].pid == target_pid && tasks[i].state != TASK_EMPTY) {
-            if (tasks[i].msg_count >= MAX_MESSAGES)
+            if (tasks[i].msg_count >= MAX_MESSAGES) {
+                klog_int(LOG_LEVEL_WARN, "IPC", "Mesaj gonderilemedi: Hedef kuyrugu dolu (PID)", target_pid);
                 return E_BUSY;
+            }
             
             int head = tasks[i].msg_head;
             tasks[i].mailbox[head].sender_pid = tasks[current_task].pid;
@@ -124,9 +140,9 @@ int send_message(int target_pid, uint32_t payload) {
             return E_OK;
         }
     }
+    klog_int(LOG_LEVEL_WARN, "IPC", "Mesaj gonderilemedi: Hedef surec bulunamadi (PID)", target_pid);
     return E_NOENT;
 }
-
 int receive_message(uint32_t *sender_out, uint32_t *payload_out) {
     if (tasks[current_task].msg_count == 0)
         return E_NOENT;
@@ -142,10 +158,31 @@ int receive_message(uint32_t *sender_out, uint32_t *payload_out) {
 
 extern void pmm_free_frame(uint32_t addr);
 void cleanup_process_memory(uint32_t page_directory_phys) {
-    // Kendi (PID 0) Kernel dizinimiz değilse serbest bırak!
     extern uint32_t *page_directory;
     if (page_directory_phys != 0 && page_directory_phys != (uint32_t)page_directory) {
+        
+        uint32_t cr3_val;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3_val));
+
+        if ((cr3_val & 0xFFFFF000) == (page_directory_phys & 0xFFFFF000)) {
+            uint32_t *pd_virt = (uint32_t *)0xFFFFF000;
+            for (int i = 4; i < 768; i++) {
+                if (pd_virt[i] & 1) {
+                    uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (i * 0x1000));
+                    for (int j = 0; j < 1024; j++) {
+                        if (pt_virt[j] & 1) {
+                            pmm_free_frame(pt_virt[j] & 0xFFFFF000);
+                        }
+                    }
+                    pmm_free_frame(pd_virt[i] & 0xFFFFF000);
+                    pd_virt[i] = 0;
+                }
+            }
+        }
+        asm volatile("mov %0, %%cr3" :: "r"((uint32_t)page_directory));
         pmm_free_frame(page_directory_phys);
+        
+        klog(LOG_LEVEL_INFO, "PMM", "Kullanici sureci bellegi (PD, PT, PTE) tamamen geri kazanildi.");
     }
 }
 
@@ -155,9 +192,7 @@ void exit_current_process(arch_regs_t *regs) {
     if (curr->held_mutex != 0) {
         mutex_unlock(curr->held_mutex);
     }
-    
-    // [DÜZELTİLDİ]: close_fd fonksiyonu aranmak yerine doğrudan burada uygulandı.
-    // Dosyaları ve Pipe'ları (Boru Hatları) RAM'den temizliyoruz.
+
     for (int i = 0; i < MAX_FD_PER_TASK; i++) {
         if (curr->fd_table[i].type != 0) { // 0 = FD_TYPE_NONE
             if (curr->fd_table[i].type == 3 && curr->fd_table[i].ptr != 0) { // 3 = FD_TYPE_PIPE
@@ -172,7 +207,11 @@ void exit_current_process(arch_regs_t *regs) {
             }
             else if (curr->fd_table[i].type == 2 && curr->fd_table[i].ptr != 0) { // 2 = FD_TYPE_FILE
                 extern void kfree(void *);
-                kfree((void *)curr->fd_table[i].ptr);
+                vfs_file_t *f = (vfs_file_t *)curr->fd_table[i].ptr;
+                f->ref_count--;
+                if (f->ref_count <= 0) {
+                    kfree((void *)curr->fd_table[i].ptr);
+                }
             }
             
             // FD'yi tertemiz sıfırla
@@ -186,26 +225,44 @@ void exit_current_process(arch_regs_t *regs) {
 
     int parent_pid = curr->parent_pid;
     curr->state = TASK_DEAD; 
+    task_wait_mutex[current_task] = 0;
 
-    int parent_idx = -1;
+    int next_fg = -1;
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].pid == parent_pid && tasks[i].state == TASK_WAITING && tasks[i].wait_reason == WAIT_CHILD) {
             tasks[i].state = TASK_RUNNING;
             tasks[i].wait_reason = WAIT_NONE;
-            parent_idx = i;
+            next_fg = i;
             break;
         }
     }
 
-    if (parent_idx != -1) {
-        foreground_task = parent_idx;
+    if (next_fg == -1) {
+        for (int i = 1; i < MAX_TASKS; i++) { 
+            if (tasks[i].state == TASK_RUNNING || tasks[i].state == TASK_WAITING) {
+                next_fg = i;
+                break;
+            }
+        }
+    }
+
+    if (next_fg != -1) {
+        foreground_task = next_fg;
     } else {
-        foreground_task = 0; 
+        klog(LOG_LEVEL_INFO, "KERNEL", "Sistemde calisan son surec kapandi. Sistem durduruluyor.");
+        
+        printk("\n\n=======================================================\n");
+        printk("      esdumanOS GUVENLI BIR SEKILDE KAPATILDI        \n");
+        printk("      Sistemi simdi guvenle kapatabilirsiniz.        \n");
+        printk("=======================================================\n\n");
+        
+        asm volatile("cli; hlt");
     }
     
     curr->state = TASK_EMPTY;
     schedule(regs);
 }
+
 void sleep_current_task(arch_regs_t *regs, int reason) {
     tasks[current_task].regs = *regs;
     tasks[current_task].state = TASK_WAITING;
@@ -239,12 +296,21 @@ void schedule(arch_regs_t *regs) {
         if (idx == 0) continue; 
 
         if (tasks[idx].state == TASK_RUNNING) {
+            if (idx != current_task && tasks[idx].current_priority < 250) {
+                tasks[idx].current_priority++; 
+            }
+
             if ((int)tasks[idx].current_priority > max_priority) {
                 max_priority = tasks[idx].current_priority;
                 next_task = idx;
             }
         }
     }
+
+    if (next_task != 0) {
+        tasks[next_task].current_priority = tasks[next_task].base_priority;
+    }
+
     if (next_task == 0 && current_task == 0) return; 
     if (current_task == next_task) return; 
 
@@ -265,11 +331,13 @@ void schedule(arch_regs_t *regs) {
     set_kernel_stack(k_stack_top); 
     asm volatile ("mov %0, %%cr3" : : "r"(tasks[current_task].page_directory));
 
-    
     *regs = tasks[current_task].regs;
     regs->eflags |= 0x200;
+    process_pending_kernel_timers();
+    
     check_and_deliver_signals(regs);
 }
+
 void mutex_init(mutex_t *m) {
     m->locked = 0;
     m->owner_pid = -1;
@@ -290,7 +358,7 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs) {
             m->locked = 1;
             m->owner_pid = tasks[current_task].pid;
             tasks[current_task].held_mutex = m;
-
+            task_wait_mutex[current_task] = 0;
             asm volatile("sti"); 
             return;
         }
@@ -298,6 +366,8 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs) {
         if (regs != 0 && (regs->cs & 0x03) != 0) {
             regs->eip -= 2;
             asm volatile("sti");
+            
+            task_wait_mutex[current_task] = m;
             sleep_current_task(regs, WAIT_MUTEX);
             return;
         } else {
@@ -305,11 +375,11 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs) {
             asm volatile("nop");
             spin_count++;
             if (spin_count > 100000000) { 
-                terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-                printk("\n[KERNEL PANIC] Spinlock Deadlock Tespit Edildi!\n");
-                printk("PID %d (Kernel Mode) sonsuz donguye girdi. Mutex sahibi: PID %d\n", 
-                       tasks[current_task].pid, m->owner_pid);
-                asm volatile("cli; hlt");
+                klog_int(LOG_LEVEL_CRITICAL, "MUTEX", "Spinlock Deadlock! Mutex sahibi PID", m->owner_pid);
+                klog_int(LOG_LEVEL_CRITICAL, "MUTEX", "Kilitlenen Kernel PID", tasks[current_task].pid);
+                
+                extern void kernel_panic(const char *msg);
+                kernel_panic("Kernel Mutex Deadlock");
             }
         }
     }
@@ -328,14 +398,40 @@ void mutex_unlock(mutex_t *m) {
         m->locked = 0;
         m->owner_pid = -1;
         tasks[current_task].held_mutex = 0;
-        wakeup_tasks(WAIT_MUTEX);
-    }
 
+        int next_to_wake = -1;
+        int max_prio = -1;
+
+        for (int i = 0; i < MAX_TASKS; i++) {
+            if (tasks[i].state == TASK_WAITING && 
+                tasks[i].wait_reason == WAIT_MUTEX && 
+                task_wait_mutex[i] == m) {
+                
+                if ((int)tasks[i].current_priority > max_prio) {
+                    max_prio = tasks[i].current_priority;
+                    next_to_wake = i;
+                }
+            }
+        }
+        if (next_to_wake != -1) {
+            tasks[next_to_wake].state = TASK_RUNNING;
+            tasks[next_to_wake].wait_reason = WAIT_NONE;
+            task_wait_mutex[next_to_wake] = 0;
+        }
+    }
     asm volatile("sti"); 
 }
 
+extern int validate_user_pointer(const void *ptr, size_t size);
+
 void register_user_signal(int sig_num, uint32_t handler_addr) {
     if (current_task == -1 || sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return;
+    
+    if (handler_addr != 0 && !validate_user_pointer((const void *)handler_addr, 1)) {
+        klog_int(LOG_LEVEL_WARN, "SIGNAL", "Gecersiz signal handler adresi reddedildi! PID", tasks[current_task].pid);
+        return;
+    }
+    
     tasks[current_task].signal_handlers[sig_num] = handler_addr;
 }
 
@@ -367,6 +463,12 @@ void check_and_deliver_signals(arch_regs_t *regs) {
                 
                 uint32_t handler = curr->signal_handlers[i];
                 if (handler != 0) {
+                    if (!validate_user_pointer((const void *)handler, 1)) {
+                        klog_int(LOG_LEVEL_ERROR, "SIGNAL", "Teslimat Sirasinda Gecersiz Handler Adresi tespit edildi! PID", curr->pid);
+                        curr->signal_handlers[i] = 0;
+                        return;
+                    }
+                    
                     curr->signal_saved_regs = *regs;
                     curr->in_signal_handler = 1;
                     regs->eip = handler;
@@ -377,7 +479,6 @@ void check_and_deliver_signals(arch_regs_t *regs) {
         }
     }
 }
-
 void restore_signal_context(arch_regs_t *regs) {
     if (current_task == -1) return;
     process_t *curr = &tasks[current_task];
@@ -395,12 +496,15 @@ int check_free_task_slot(void) {
 }
 
 void start_first_task(void) {
+    // [KRİTİK]: Bu işlem bitene kadar tüm kesmeleri dondur! 
+    // Yoksa Timer Interrupt araya girip yığını darmadağın eder.
+    asm volatile("cli"); 
+
     int first_task_idx = -1;
 
     if (foreground_task > 0 && tasks[foreground_task].state == TASK_RUNNING) {
         first_task_idx = foreground_task;
-    } 
-    else {
+    } else {
         for (int i = 1; i < MAX_TASKS; i++) {
             if (tasks[i].state == TASK_RUNNING) {
                 first_task_idx = i;
@@ -410,7 +514,7 @@ void start_first_task(void) {
     }
 
     if (first_task_idx == -1) {
-        printk("[SCHEDULER UYARISI] Calisacak hicbir kullanici gorevi yok.\n");
+        printk("[SCHEDULER UYARISI] Calisacak hicbir kullanici gorevi yok. Idle goreve geciliyor.\n");
         first_task_idx = 0; 
     }
 
@@ -419,25 +523,29 @@ void start_first_task(void) {
     uint32_t k_stack_top = (((uint32_t)tasks[current_task].kstack + 4096) & 0xFFFFFFF0) - 4;
     set_kernel_stack(k_stack_top); 
 
+    // Yeni sürecin bellek haritasına geç
     asm volatile ("mov %0, %%cr3" : : "r"(tasks[current_task].page_directory));
     
     multitasking_enabled = 1;
 
     uint32_t eip = tasks[current_task].regs.eip;
     uint32_t esp = tasks[current_task].regs.useresp;
+        
+    // Bütün süreçler (Idle dahil) artık Ring 3'te olduğu için sabit değerler kullanıyoruz.
+    uint32_t cs = 0x23; 
+    uint32_t ds = 0x2B; 
 
     asm volatile(
-        "mov $0x2B, %%ax \n"
-        "mov %%ax, %%ds \n"
-        "mov %%ax, %%es \n"
-        "mov %%ax, %%fs \n"
-        "mov %%ax, %%gs \n"
-        "pushl $0x2B \n"     // SS (Stack Segment)
-        "pushl %0 \n"        // Kullanıcı ESP'si
-        "pushl $0x202 \n"    // EFLAGS (0x202 = Interruptlar AÇIK!)
-        "pushl $0x23 \n"     // CS (gdt.h içindeki GDT_USER_CS değeri)
-        "pushl %1 \n"        // EIP (Kullanıcı kodu başlama adresi)
-        "iret \n"            // Ring 3'e güvenli geçiş!
-        : : "r"(esp), "r"(eip)
+        "movw %%ax, %%ds \n"
+        "movw %%ax, %%es \n"
+        "movw %%ax, %%fs \n"
+        "movw %%ax, %%gs \n"
+        "pushl %%eax \n"     
+        "pushl %0 \n"        
+        "pushl $0x202 \n"    
+        "pushl %2 \n"        
+        "pushl %1 \n"        
+        "iret \n"            
+        : : "r"(esp), "r"(eip), "r"(cs), "a"(ds)
     );
 }

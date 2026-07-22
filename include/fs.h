@@ -25,15 +25,16 @@ typedef struct {
     uint8_t  is_used;                // 1 Byte
     uint8_t  file_type;              // 1 Byte (FT_REGULAR veya FT_DIR)
     uint8_t  entry_id;               // 1 Byte (0 - 31 arası eşsiz ID)
-    uint8_t  parent_id;              // 1 Byte (Üst dizinin entry_id'si, Kök dizin için 0)
-    uint32_t owner_uid;
-} disk_file_entry_t;
+    uint8_t  parent_id;              // 1 Byte (Üst dizinin entry_id'si)
+    uint32_t owner_uid;              // 4 Byte
+} __attribute__((packed)) disk_file_entry_t;
 
 typedef struct {
-    char     filename[32];
+    char     filename[MAX_FILENAME];
     uint32_t file_size;
     uint32_t current_offset;
     uint32_t start_sector;
+    int      ref_count;  // [GÜVENLİK YAMASI EKLENDİ]: Use-After-Free zafiyetini önlemek için Referans Sayacı!
 } vfs_file_t;
 
 int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size);

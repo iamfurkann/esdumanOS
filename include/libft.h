@@ -4,6 +4,8 @@
 # include "types.h"
 # include "kheap.h"
 
+int write(int fd, const void *buf, unsigned long count);
+
 #ifndef NULL
 # define NULL ((void *)0)
 #endif

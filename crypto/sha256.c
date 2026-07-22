@@ -19,23 +19,14 @@ static const uint32_t k[64] = {
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
 };
 
-// Basitleştirilmiş, tek atımlık (one-shot) SHA-256 Fonksiyonu
-void sha256_to_hex(const char *input, char *output_hex) {
-    uint8_t data[64] = {0};
-    uint32_t state[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
-                         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    uint32_t len = 0;
-    while(input[len]) { data[len] = input[len]; len++; }
-    
-    data[len] = 0x80; // Padding bit
-    uint32_t bitlen = len * 8;
-    data[63] = bitlen; // Sadece küçük veri için basitleştirilmiş padding
-    
+static void sha256_transform(uint32_t state[8], const uint8_t data[64]) {
     uint32_t m[64];
-    for (int i = 0, j = 0; i < 16; ++i, j += 4)
+    for (int i = 0, j = 0; i < 16; ++i, j += 4) {
         m[i] = (data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | (data[j + 3]);
-    for (int i = 16; i < 64; ++i)
+    }
+    for (int i = 16; i < 64; ++i) {
         m[i] = SIG1(m[i - 2]) + m[i - 7] + SIG0(m[i - 15]) + m[i - 16];
+    }
 
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3],
              e = state[4], f = state[5], g = state[6], h = state[7];
@@ -48,6 +39,53 @@ void sha256_to_hex(const char *input, char *output_hex) {
     }
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+void sha256_to_hex(const char *input, char *output_hex) {
+    uint32_t state[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    };
+
+    uint32_t len = 0;
+    while(input[len]) len++;
+    
+    uint32_t offset = 0;
+
+    while (len - offset >= 64) {
+        sha256_transform(state, (const uint8_t*)(input + offset));
+        offset += 64;
+    }
+
+    uint8_t buffer[64];
+    uint32_t rem = len - offset;
+    for (uint32_t i = 0; i < rem; i++) {
+        buffer[i] = input[offset + i];
+    }
+    
+    buffer[rem++] = 0x80;
+
+    if (rem > 56) {
+        while (rem < 64) buffer[rem++] = 0x00;
+        sha256_transform(state, buffer);
+        rem = 0;
+    }
+    
+    while (rem < 56) buffer[rem++] = 0x00;
+    
+    uint32_t bitlen_hi = (len >> 29);
+    uint32_t bitlen_lo = (len << 3);
+    
+    buffer[56] = (bitlen_hi >> 24) & 0xFF;
+    buffer[57] = (bitlen_hi >> 16) & 0xFF;
+    buffer[58] = (bitlen_hi >> 8) & 0xFF;
+    buffer[59] = (bitlen_hi) & 0xFF;
+    buffer[60] = (bitlen_lo >> 24) & 0xFF;
+    buffer[61] = (bitlen_lo >> 16) & 0xFF;
+    buffer[62] = (bitlen_lo >> 8) & 0xFF;
+    buffer[63] = (bitlen_lo) & 0xFF;
+    
+    sha256_transform(state, buffer);
 
     const char hex_chars[] = "0123456789abcdef";
     for(int i = 0; i < 8; i++) {
@@ -58,4 +96,55 @@ void sha256_to_hex(const char *input, char *output_hex) {
         }
     }
     output_hex[64] = '\0';
+}
+
+void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary) {
+    uint32_t state[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    };
+    
+    uint32_t offset = 0;
+    
+    while (len - offset >= 64) {
+        sha256_transform(state, (const uint8_t*)(input + offset));
+        offset += 64;
+    }
+    
+    uint8_t buffer[64];
+    uint32_t rem = len - offset;
+    for (uint32_t i = 0; i < rem; i++) {
+        buffer[i] = input[offset + i];
+    }
+    
+    buffer[rem++] = 0x80;
+    
+    if (rem > 56) {
+        while (rem < 64) buffer[rem++] = 0x00;
+        sha256_transform(state, buffer);
+        rem = 0; 
+    }
+    
+    while (rem < 56) buffer[rem++] = 0x00;
+    
+    uint32_t bitlen_hi = (len >> 29);
+    uint32_t bitlen_lo = (len << 3); 
+    
+    buffer[56] = (bitlen_hi >> 24) & 0xFF;
+    buffer[57] = (bitlen_hi >> 16) & 0xFF;
+    buffer[58] = (bitlen_hi >> 8) & 0xFF;
+    buffer[59] = (bitlen_hi) & 0xFF;
+    buffer[60] = (bitlen_lo >> 24) & 0xFF;
+    buffer[61] = (bitlen_lo >> 16) & 0xFF;
+    buffer[62] = (bitlen_lo >> 8) & 0xFF;
+    buffer[63] = (bitlen_lo) & 0xFF;
+    
+    sha256_transform(state, buffer);
+
+    for(int i = 0; i < 8; i++) {
+        output_binary[(i*4)]     = (state[i] >> 24) & 0xFF;
+        output_binary[(i*4) + 1] = (state[i] >> 16) & 0xFF;
+        output_binary[(i*4) + 2] = (state[i] >> 8)  & 0xFF;
+        output_binary[(i*4) + 3] = (state[i])       & 0xFF;
+    }
 }

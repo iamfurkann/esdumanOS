@@ -4,6 +4,8 @@ SECTIONS
 {
     . = 1M;
 
+    _kernel_start = .;
+
     .text BLOCK(4K) : ALIGN(4K)
     {
         *(.multiboot)
@@ -12,7 +14,9 @@ SECTIONS
 
     .rodata BLOCK(4K) : ALIGN(4K)
     {
+        _rodata_start = .;
         *(.rodata .rodata.*)
+        _rodata_end = .;
     }
 
     .data BLOCK(4K) : ALIGN(4K)
@@ -22,9 +26,12 @@ SECTIONS
 
     .bss BLOCK(4K) : ALIGN(4K)
     {
-        __bss_start = .;
+        _bss_start = .;
         *(COMMON)
         *(.bss .bss.*)
-        __bss_end = .;
+        _bss_end = .;
     }
+
+    . = ALIGN(4K);
+    _kernel_end = .;
 }

@@ -4,6 +4,7 @@
 #include "types.h"
 
 void keyboard_interrupt_handler(void);
+char get_keyboard_char(void);
 extern int current_layout;
 
-#endif
+#endif // KEYBOARD_H

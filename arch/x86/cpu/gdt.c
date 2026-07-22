@@ -8,6 +8,8 @@ gdt_ptr_t gdt_ptr;
 extern void gdt_flush(uint32_t);
 extern void tss_flush(void);
 
+extern uint32_t kernel_stack_ring0[1024];
+
 void gdt_set_gate(int32_t num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt_entries[num].base_low    = (base & 0xFFFF);
     gdt_entries[num].base_middle = (base >> 16) & 0xFF;
@@ -31,7 +33,8 @@ void init_gdt(void) {
     gdt_set_gate(5, 0, 0xFFFFFFFF, 0xF2, 0xCF); // User Data
     gdt_set_gate(6, 0, 0xFFFFFFFF, 0xF2, 0xCF); // User Stack
 
-    tss_install(7, 0x10, 0x0);
+    uint32_t default_kernel_esp = (((uint32_t)kernel_stack_ring0 + sizeof(kernel_stack_ring0)) & 0xFFFFFFF0) - 4;
+    tss_install(7, 0x10, default_kernel_esp);
 
     gdt_flush((uint32_t)&gdt_ptr);
     tss_flush();

@@ -20,6 +20,9 @@ void aes256_decrypt(aes256_ctx_t *ctx, const uint8_t *in, uint8_t *out);
 void aes256_cbc_encrypt(aes256_ctx_t *ctx, const uint8_t *iv, const uint8_t *in, uint8_t *out, uint32_t len);
 void aes256_cbc_decrypt(aes256_ctx_t *ctx, const uint8_t *iv, const uint8_t *in, uint8_t *out, uint32_t len);
 
+// SHA-256 [EKSİK OLAN TANIM EKLENDİ]
+void sha256_to_hex(const char *input, char *output_hex);
+
 /* RISC-V DONANIM HIZLANDIRMASI*/
 #if defined(ARCH_RISCV64) && defined(HAS_ZKN_EXTENSION)
     void aes256_encrypt_hw(aes256_ctx_t *ctx, const uint8_t *in, uint8_t *out);

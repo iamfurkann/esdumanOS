@@ -24,11 +24,6 @@ extern void keyboard_interrupt_handler(void);
 extern void timer_interrupt_handler(void);
 extern void syscall_handler(arch_regs_t *regs);
 extern void ata_irq_handler(void);
-volatile uint32_t system_timer_ticks = 0;
-
-uint32_t timer_get_ticks(void) {
-    return system_timer_ticks;
-}
 
 const char *exception_messages[] = {
     "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
@@ -120,10 +115,14 @@ void isr_handler(arch_regs_t *regs) {
         asm volatile("cli; hlt");
     }
     else if (regs->int_no >= 32 && regs->int_no <= 47) {
+        if (regs->int_no >= 40) {
+            outb(PIC2_COMMAND, PIC_EOI); // Slave PIC
+        }
+        outb(PIC1_COMMAND, PIC_EOI);     // Master PIC
+        
+        
         if (regs->int_no == IRQ0_TIMER) {
-            system_timer_ticks++;
             timer_interrupt_handler();
-            signal_tick_handler();
             schedule(regs);
         }
         else if (regs->int_no == IRQ1_KEYBOARD) {
@@ -135,10 +134,6 @@ void isr_handler(arch_regs_t *regs) {
             ata_irq_handler();
         }
 
-        if (regs->int_no >= 40) {
-            outb(PIC2_COMMAND, PIC_EOI); // Slave PIC
-        }
-        outb(PIC1_COMMAND, PIC_EOI);     // Master PIC
     }
     else if (regs->int_no == ISR_SYSCALL) {
         syscall_handler(regs);

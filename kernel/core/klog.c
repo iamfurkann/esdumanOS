@@ -1,82 +1,104 @@
+#include "klog.h"
 #include "kernel.h"
-#include "fs.h"
-#include "process.h"
+#include "stdio.h"
+#include "serial.h"
 
-extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-extern disk_file_entry_t dir_table[];
+int current_log_level = LOG_LEVEL_INFO;
 
-#define KLOG_BUFFER_SIZE 4096
+void ft_itoa_hex(uint32_t n, char *buf) {
+    static const char hex_chars[] = "0123456789ABCDEF";
+    if (n == 0) { 
+        buf[0] = '0'; 
+        buf[1] = '\0'; 
+        return; 
+    }
+    
+    char temp[9];
+    int i = 0;
 
-static char klog_buffer[KLOG_BUFFER_SIZE];
-static uint32_t klog_head = 0;
-static uint32_t klog_tail = 0;
-static int klog_is_full = 0;
+    while (n > 0) {
+        temp[i++] = hex_chars[n & 0xF];
+        n >>= 4;
+    }
+
+    int j = 0;
+    while (i > 0) {
+        buf[j++] = temp[--i];
+    }
+    
+    buf[j] = '\0';
+}
+
+static const char* level_strings[] = {
+    "[DEBUG]",
+    "[INFO ]",
+    "[WARN ]",
+    "[ERROR]",
+    "[FATAL]"
+};
+
+static uint8_t level_colors[] = {
+    VGA_COLOR_LIGHT_GREY, // DEBUG
+    VGA_COLOR_LIGHT_CYAN, // INFO
+    VGA_COLOR_BROWN,      // WARN
+    VGA_COLOR_LIGHT_RED,  // ERROR
+    VGA_COLOR_WHITE       // FATAL/CRITICAL
+};
+
+static uint8_t level_bg_colors[] = {
+    VGA_COLOR_BLACK, VGA_COLOR_BLACK, VGA_COLOR_BLACK, VGA_COLOR_BLACK, VGA_COLOR_RED
+};
+
+void klog(int level, const char *module, const char *message) {
+    if (level < current_log_level) return;
+    if (level < 0) level = 0;
+    if (level > 4) level = 4;
+
+    terminal_setcolor(level_colors[level], level_bg_colors[level]);
+    printk(level_strings[level]);
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    
+    printk(" ");
+    printk(module);
+    printk(": ");
+    printk(message);
+    printk("\n");
+}
+
+void klog_int(int level, const char *module, const char *message, int val) {
+    if (level < current_log_level) return;
+    char num_str[16];
+    extern void ft_itoa(int n, char *buf);
+    ft_itoa(val, num_str);
+    
+    klog(level, module, message);
+    printk(" -> Value: "); printk(num_str); printk("\n");
+}
+
+#define KLOG_BUF_SIZE 8192
+static char dmesg_buffer[KLOG_BUF_SIZE];
+static int dmesg_idx = 0;
 
 void klog_write_char(char c) {
-    if ((c < 32 && c != '\n') || c > 126) return;
-
-    klog_buffer[klog_head] = c;
-    klog_head = (klog_head + 1) % KLOG_BUFFER_SIZE;
-
-    if (klog_head == klog_tail) {
-        klog_is_full = 1;
-        klog_tail = (klog_tail + 1) % KLOG_BUFFER_SIZE;
+    if (dmesg_idx < KLOG_BUF_SIZE - 1) {
+        dmesg_buffer[dmesg_idx++] = c;
+        dmesg_buffer[dmesg_idx] = '\0';
     }
 }
 
 void dump_klog(void) {
-    terminal_setcolor(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    printk("\n--- KERNEL DIAGNOSTIC MESSAGES (dmesg) ---\n");
-    
-    if (!klog_is_full && klog_head == 0) {
-        printk("Log tamponu bos.\n");
-        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        return;
+    extern void terminal_putchar(char);
+    for(int i = 0; i < dmesg_idx; i++) {
+        terminal_putchar(dmesg_buffer[i]);
     }
-
-    uint32_t current = klog_is_full ? klog_tail : 0;
-    
-    while (current != klog_head) {
-        terminal_putchar(klog_buffer[current]);
-        current = (current + 1) % KLOG_BUFFER_SIZE;
-    }
-    printk("\n--- END OF dmesg ---\n");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 }
 
-void klog_persist_to_disk(void) {
-    int var_idx = fs_get_entry_idx("var", 0);
-    if (var_idx == -1) return;
-    int var_id = dir_table[var_idx].entry_id;
-
-    int log_idx = fs_get_entry_idx("log", var_id);
-    if (log_idx == -1) return;
-    int log_parent_id = dir_table[log_idx].entry_id;
-
-    printk("[KERNEL] Volatil dmesg tamponu /var/log/dmesg.log dosyasina aktariliyor...\n");
-
-    extern int fs_delete(const char *name, uint8_t parent_id);
-    fs_delete("dmesg.log", log_parent_id);
-
-    char flat_log[KLOG_BUFFER_SIZE];
-    uint32_t idx = 0;
+void klog_hex(int level, const char *module, const char *message, uint32_t val) {
+    if (level < current_log_level) return;
     
-    uint32_t current = klog_is_full ? klog_tail : 0;
+    char hex_str[16];
+    ft_itoa_hex(val, hex_str);
     
-    while (current != klog_head) {
-        flat_log[idx++] = klog_buffer[current];
-        current = (current + 1) % KLOG_BUFFER_SIZE;
-    }
-    
-    uint32_t log_size = idx;
-
-    extern int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
-    
-    int res = fs_create_file("dmesg.log", (uint8_t *)flat_log, log_size, log_parent_id);
-
-    if (res == 0) {
-        printk("[OK] Kalici log dosyasi basariyla olusturuldu (Sifreli saklama aktif).\n");
-    } else {
-        printk("[HATA] Log kaliciligi saglanamadi! Hata Kodu: %d\n", res);
-    }
+    klog(level, module, message);
+    printk(" -> Hex: 0x"); printk(hex_str); printk("\n");
 }

@@ -35,7 +35,9 @@
 #include "isr.h"
 #include "security.h"
 #include "devfs.h"
-
+#include "serial.h"
+#include "klog.h"
+#include "crypto.h"
 
 typedef struct {
     volatile uint32_t locked;

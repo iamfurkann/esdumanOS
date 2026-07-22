@@ -1,3 +1,9 @@
+/*
+ * File: test_vfs.c
+ * Purpose: VFS (Virtual File System) unit and security tests.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "ktest.h"
 #include "syscall.h" 
 #include "fs.h"
@@ -27,8 +33,8 @@ static inline int sys_get_dir_id(const char *name, int parent_id) {
 }
 
 void test_vfs_boundary_and_depth(void) {
-    printk("\n--- VFS Sinir ve Derinlik (OOB) Testleri ---\n");
-    serial_print("\n--- VFS Sinir ve Derinlik (OOB) Testleri ---\n");
+    printk("\n--- VFS Boundary and Depth (OOB) Tests ---\n");
+    serial_print("\n--- VFS Boundary and Depth (OOB) Tests ---\n");
 
     int current_parent = 0; // Root ID (0)
     int depth_reached = 0;
@@ -61,34 +67,41 @@ void test_vfs_boundary_and_depth(void) {
         }
 
         if (next_parent == -1) {
-            is_corrupted = 1; break; // Parent bulunamadı (Kırık Zincir)
+            is_corrupted = 1; break; // Parent not found (Broken Chain)
         }
         if (next_parent == backtrack_id && backtrack_id != 0) {
-            is_corrupted = 2; break; // Sonsuz Döngü (Kendisini gösteriyor)
+            is_corrupted = 2; break; // Infinite Loop (Points to itself)
         }
         
         backtrack_id = next_parent;
         steps_back++;
         if (steps_back > depth_reached + 1) {
-            is_corrupted = 3; break; // Çok fazla adım (Sınır aşımı)
+            is_corrupted = 3; break; // Too many steps (Out of bounds)
         }
     }
 
-    KTEST_ASSERT(is_corrupted == 0, "[STRICT] Derin dizinlerde 'cd ..' bellegi ihlal etmiyor");
-    KTEST_ASSERT(backtrack_id == 0, "[STRICT] 'cd ..' zinciri basariyla Root (0) noktasina ulasti");
+    KTEST_ASSERT(is_corrupted == 0, "[STRICT] 'cd ..' in deep directories does not violate memory");
+    KTEST_ASSERT(backtrack_id == 0, "[STRICT] 'cd ..' chain successfully reached Root (0)");
 
-    // 3. Sınır Dışı (Out of Bounds) Güvenlik Testleri
+    // 3. Out of Bounds Security Tests
     int oob_res1 = sys_mkdir("oob_test1", 35);
     int oob_res2 = sys_mkdir("oob_test2", 255);
     
-    KTEST_ASSERT(oob_res1 != 0, "[SECURITY] VFS sinir-disi (35) talepleri reddediyor");
-    KTEST_ASSERT(oob_res2 != 0, "[SECURITY] VFS sinir-disi (255) talepleri reddediyor");
+    KTEST_ASSERT(oob_res1 != 0, "[SECURITY] VFS rejects out-of-bounds (35) requests");
+    KTEST_ASSERT(oob_res2 != 0, "[SECURITY] VFS rejects out-of-bounds (255) requests");
+
+    // 4. Path Traversal (../../) Security Test
+    // SYSCALL_OPEN (37) for sys_open
+    char *trav_path = (char *)0x500A00;
+    ft_strcpy(trav_path, "../../etc/shadow");
+    int trav_fd = ktest_syscall(37, (int)trav_path, 0, 0); // O_RDONLY (0)
+    KTEST_ASSERT(trav_fd < 0, "[SECURITY] VFS rejected Path Traversal (../../etc/shadow) request");
 }
 
-// ANA VFS TEST FONKSİYONU
+// MAIN VFS TEST FUNCTION
 void run_vfs_tests(void) {
-    printk("\n--- VFS (Sanal Dosya Sistemi) Testleri ---\n");
-    serial_print("\n--- VFS (Sanal Dosya Sistemi) Testleri ---\n");
+    printk("\n--- VFS (Virtual File System) Tests ---\n");
+    serial_print("\n--- VFS (Virtual File System) Tests ---\n");
 
     char *u_dir = (char *)0x500000;
     char *u_fake = (char *)0x500100;
@@ -96,24 +109,24 @@ void run_vfs_tests(void) {
     char *u_content = (char *)0x500300;
     
     ft_strcpy(u_dir, "test_dir");
-    ft_strcpy(u_fake, "olmayan_klasor");
+    ft_strcpy(u_fake, "nonexistent_folder");
     ft_strcpy(u_file, "test.txt");
-    ft_strcpy(u_content, "Merhaba Test");
+    ft_strcpy(u_content, "Hello Test");
 
     int mkdir_res = sys_mkdir(u_dir, 0);
-    KTEST_ASSERT(mkdir_res >= 0, "[STRICT] sys_mkdir basariyla yeni klasor olusturdu");
+    KTEST_ASSERT(mkdir_res >= 0, "[STRICT] sys_mkdir successfully created new folder");
 
     int dir_id = sys_get_dir_id(u_dir, 0);
-    KTEST_ASSERT(dir_id >= 0, "[STRICT] sys_get_dir_id gecerli ID dondu");
+    KTEST_ASSERT(dir_id >= 0, "[STRICT] sys_get_dir_id returned valid ID");
 
     int fake_dir = sys_get_dir_id(u_fake, 0);
-    KTEST_ASSERT(fake_dir == -1, "[STRICT] sys_get_dir_id olmayan klasorde -1 donuyor");
+    KTEST_ASSERT(fake_dir == -1, "[STRICT] sys_get_dir_id returns -1 for nonexistent folder");
 
     int file_res = sys_create_file(u_file, u_content, 0);
-    KTEST_ASSERT(file_res >= 0, "[STRICT] sys_create_file basariyla sanal dosya yazdi");
+    KTEST_ASSERT(file_res >= 0, "[STRICT] sys_create_file successfully wrote virtual file");
 
     int del_res = sys_delete_file(u_file, 0);
-    KTEST_ASSERT(del_res >= 0, "[STRICT] sys_delete_file dosyayi basariyla sildi");
+    KTEST_ASSERT(del_res >= 0, "[STRICT] sys_delete_file successfully deleted the file");
 
     test_vfs_boundary_and_depth();
 }

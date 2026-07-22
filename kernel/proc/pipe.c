@@ -11,9 +11,14 @@ static int ft_strcmp(const char *s1, const char *s2) {
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
-static void ft_strcpy(char *dest, const char *src) {
-    while (*src) { *dest++ = *src++; }
-    *dest = '\0';
+static void safe_strcpy(char *dest, const char *src, int max_len) {
+    if (max_len <= 0) return;
+    int i = 0;
+    while (i < max_len - 1 && src[i] != '\0') {
+        dest[i] = src[i];
+        i++;
+    }
+    dest[i] = '\0'; // Her zaman null ile bitir
 }
 
 pipe_t* create_pipe(void) {
@@ -43,7 +48,7 @@ pipe_t* get_or_create_named_pipe(const char *name) {
     if (p) {
         for (int i = 0; i < MAX_SYSTEM_PIPES; i++) {
             if (&pipe_pool[i] == p) {
-                ft_strcpy(pipe_names[i], name);
+                safe_strcpy(pipe_names[i], name, 32);
                 break;
             }
         }

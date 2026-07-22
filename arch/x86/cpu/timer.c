@@ -5,12 +5,15 @@
 #define PIT_CH0_PORT 0x40
 #define PIT_CMD_INIT 0x36
 #define PIT_BASE_FREQ 1193180
-uint32_t timer_ticks = 0;
+
+volatile uint32_t timer_ticks = 0; 
 extern void rtc_timer_callback(void);
+extern void kernel_timer_tick_handler(void);
 
 void timer_interrupt_handler(void) {
     timer_ticks++;
     rtc_timer_callback();
+    kernel_timer_tick_handler(); 
 }
 
 void init_timer(uint32_t freq) {
@@ -22,4 +25,8 @@ void init_timer(uint32_t freq) {
 
     outb(PIT_CH0_PORT, low);
     outb(PIT_CH0_PORT, high);
+}
+
+uint32_t timer_get_ticks(void) {
+    return timer_ticks;
 }

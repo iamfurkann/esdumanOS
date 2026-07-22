@@ -4,7 +4,10 @@
 #include "types.h"
 #include "multiboot.h"
 
+#ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
+#endif
+
 #define PMM_FRAMES_COUNT   32768
 #define BITMAP_SIZE        1024
 #define PMM_TOTAL_MEMORY   134217728

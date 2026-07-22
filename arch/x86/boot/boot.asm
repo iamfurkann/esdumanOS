@@ -57,6 +57,8 @@ _start:
         mov ecx, cr0
         or ecx, 0x80000000
         mov cr0, ecx
+        
+        ; Yığını (Stack) ayarla
         mov esp, stack_top
 
         push ebx ; Parametre 2: mboot_info

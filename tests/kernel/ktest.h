@@ -13,10 +13,30 @@
 extern int tests_passed;
 extern int tests_failed;
 
+/**
+ * @brief Transmits a single character to the primary serial port.
+ *
+ * Bypasses standard output mechanisms to provide low-level debugging capabilities 
+ * over the COM1 port (0x3F8). Critical for safely logging test results when higher-level 
+ * printing subsystems are unstable.
+ *
+ * @param c The character to transmit.
+ * @expected The character is written directly to the serial I/O port without relying on interrupts.
+ */
 static inline void serial_putchar(char c) {
     __asm__ volatile ( "outb %0, %1" : : "a"(c), "Nd"((uint16_t)0x3F8) );
 }
 
+/**
+ * @brief Converts an integer to a null-terminated string representation.
+ *
+ * Provides a highly isolated integer-to-string conversion utility designed explicitly 
+ * for the testing framework, preventing reliance on potentially untested libc implementations.
+ *
+ * @param n The integer to convert.
+ * @param buf The pre-allocated character buffer to store the resulting string.
+ * @expected The buffer safely contains the numerical string representation of 'n'.
+ */
 static inline void ktest_itoa(int n, char *buf) {
     if (n == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
     char temp[16]; int i = 0;
@@ -26,6 +46,15 @@ static inline void ktest_itoa(int n, char *buf) {
     buf[j] = '\0';
 }
 
+/**
+ * @brief Transmits a full null-terminated string to the serial port.
+ *
+ * Iterates through a character string and sequentially pushes each byte to the serial 
+ * interface using the primitive `serial_putchar` function.
+ *
+ * @param str A pointer to the null-terminated string to output.
+ * @expected The entire string is emitted to the COM1 serial interface.
+ */
 static inline void serial_print(const char *str) {
     while (*str) serial_putchar(*str++);
 }

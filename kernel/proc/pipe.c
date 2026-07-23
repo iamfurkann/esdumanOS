@@ -1,5 +1,7 @@
 #include "pipe.h"
 #include "stdio.h"
+#include "errno.h"
+#include "klog.h"
 
 #define MAX_SYSTEM_PIPES 16
 static pipe_t pipe_pool[MAX_SYSTEM_PIPES];
@@ -70,11 +72,11 @@ void destroy_pipe(pipe_t *p) {
 }
 
 int pipe_read(pipe_t *p, uint8_t *buf, int size) {
-    if (!p || !buf || size <= 0) return -1;
+    if (!p || !buf || size <= 0) return E_INVAL;
 
     if (p->head == p->tail) {
         if (p->write_refs <= 0) return 0; // EOF (Yazan taraf tamamen kapattı)
-        return -11; // EAGAIN: Bloke ol, uykuya dal!
+        return E_AGAIN; // EAGAIN: Bloke ol, uykuya dal!
     }
     
     int bytes_read = 0;
@@ -90,11 +92,14 @@ int pipe_read(pipe_t *p, uint8_t *buf, int size) {
 }
 
 int pipe_write(pipe_t *p, const uint8_t *buf, int size) {
-    if (!p || !buf || size <= 0) return -1;
+    if (!p || !buf || size <= 0) return E_INVAL;
     
     if (p->tail - p->head >= PIPE_SIZE) {
-        if (p->read_refs <= 0) return -1; // EPIPE (Okuyan kimse kalmadı, kırık pipe)
-        return -11; // EAGAIN: Bloke ol, uykuya dal!
+        if (p->read_refs <= 0) {
+            klog(LOG_LEVEL_WARN, "PIPE", "Broken pipe! Write attempted on pipe with no readers.");
+            return E_PIPE; // EPIPE
+        }
+        return E_AGAIN; // EAGAIN: Bloke ol, uykuya dal!
     }
     
     int bytes_written = 0;

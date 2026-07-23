@@ -1,6 +1,8 @@
 #include "types.h"
 #include "fs.h"
 #include "stdio.h"
+#include "errno.h"
+#include "klog.h"
 
 extern disk_file_entry_t dir_table[];
 extern void sha256_to_hex(const char *input, char *output_hex);
@@ -16,20 +18,27 @@ static int constant_time_cmp(const char *s1, const char *s2) {
 int verify_user_password(const char *username, const char *password) {
     extern int fs_get_entry_idx(const char *, uint8_t);
     int etc_idx = fs_get_entry_idx("etc", 0);
-    if (etc_idx == -1) return -1;
+    if (etc_idx == -1) {
+        klog(LOG_LEVEL_ERROR, "PASSWD", "/etc directory not found!");
+        return E_NOENT;
+    }
 
     int etc_id = dir_table[etc_idx].entry_id;
     vfs_file_t p_file;
     extern int fs_open(const char *, uint8_t, vfs_file_t *);
 
-    if (fs_open("shadow", etc_id, &p_file) != 0) return -1; 
+    if (fs_open("shadow", etc_id, &p_file) != 0) {
+        klog(LOG_LEVEL_ERROR, "PASSWD", "/etc/shadow file missing or inaccessible!");
+        return E_NOENT; 
+    }
 
     char buf[1024];
     extern int fs_read(vfs_file_t *, uint8_t *, uint32_t);
     int bytes = fs_read(&p_file, (uint8_t *)buf, 1023);
 
     if (bytes < 0) {
-        return -1;
+        klog(LOG_LEVEL_ERROR, "PASSWD", "Failed to read /etc/shadow file!");
+        return E_IO;
     }
 
     buf[bytes] = '\0';
@@ -82,20 +91,25 @@ int verify_user_password(const char *username, const char *password) {
                     }
                     return uid;
                 } else {
-                    return -1;
+                    klog(LOG_LEVEL_WARN, "PASSWD", "Invalid password provided for user");
+                    return E_ACCES;
                 }
             }
             line_start = i + 1;
         }
         if (buf[i] == '\0') break;
     }
-    return -1;
+    klog(LOG_LEVEL_WARN, "PASSWD", "User not found in shadow file");
+    return E_NOENT;
 }
 
 int update_passwd_file(const char *new_passwd_content, uint32_t size) {
     extern int fs_get_entry_idx(const char *, uint8_t);
     int etc_idx = fs_get_entry_idx("etc", 0);
-    if (etc_idx == -1) return -1;
+    if (etc_idx == -1) {
+        klog(LOG_LEVEL_ERROR, "PASSWD", "/etc directory not found for updating passwd");
+        return E_NOENT;
+    }
 
     extern disk_file_entry_t dir_table[];
     int etc_id = dir_table[etc_idx].entry_id;

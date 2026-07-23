@@ -2,7 +2,7 @@
 #include "io.h"
 #include "stdio.h"
 
-//isr define
+// isr define
 extern void isr0(void); extern void isr1(void); extern void isr2(void); extern void isr3(void);
 extern void isr4(void); extern void isr5(void); extern void isr6(void); extern void isr7(void);
 extern void isr8(void); extern void isr9(void); extern void isr10(void); extern void isr11(void);
@@ -13,7 +13,7 @@ extern void isr24(void); extern void isr25(void); extern void isr26(void); exter
 extern void isr28(void); extern void isr29(void); extern void isr30(void); extern void isr31(void);
 extern void isr32(void); extern void isr33(void);
 
-//IRQ2 - IRQ15 Arası Tüm Donanım Kesmeleri (ATA dahil) Eklendi
+// Added All Hardware Interrupts between IRQ2 - IRQ15 (Including ATA)
 extern void isr34(void); extern void isr35(void); extern void isr36(void); extern void isr37(void);
 extern void isr38(void); extern void isr39(void); extern void isr40(void); extern void isr41(void);
 extern void isr42(void); extern void isr43(void); extern void isr44(void); extern void isr45(void);
@@ -29,6 +29,11 @@ idt_ptr_t idtp;
 #define PIC2_COMMAND 0xA0
 #define PIC2_DATA 0xA1
 
+/**
+ * Remaps the Programmable Interrupt Controllers (PICs).
+ * Expected behavior: Changes the master and slave PIC vector offsets from 0x00-0x0F to 0x20-0x2F
+ * to prevent conflicts with CPU exceptions.
+ */
 static void pic_remap(void) {
     uint8_t a1, a2;
 
@@ -51,6 +56,11 @@ static void pic_remap(void) {
     outb(PIC2_DATA, a2);
 }
 
+/**
+ * Sets an Interrupt Descriptor Table (IDT) gate.
+ * Expected behavior: Configures a single IDT entry with the given base address,
+ * segment selector, and attributes (flags).
+ */
 void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_lo = (base & 0xFFFF);
     idt[num].base_hi = (base >> 16) & 0xFFFF;
@@ -59,6 +69,11 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].flags   = flags;
 }
 
+/**
+ * Initializes the Interrupt Descriptor Table (IDT).
+ * Expected behavior: Clears all IDT entries, sets up handlers for exceptions and IRQs,
+ * remaps the PICs, and finally loads the new IDT into the CPU.
+ */
 void init_idt(void) {
     idtp.limit = (sizeof(idt_entry_t) * 256) - 1;
     idtp.base = (uint32_t)&idt;
@@ -86,7 +101,7 @@ void init_idt(void) {
     
     idt_set_gate(32, (uint32_t)isr32, 0x08, 0x8E); idt_set_gate(33, (uint32_t)isr33, 0x08, 0x8E);
     
-    // [YENİ]: Kapılar (Gates) Açıldı
+    // [NEW]: Gates Opened
     idt_set_gate(34, (uint32_t)isr34, 0x08, 0x8E); idt_set_gate(35, (uint32_t)isr35, 0x08, 0x8E);
     idt_set_gate(36, (uint32_t)isr36, 0x08, 0x8E); idt_set_gate(37, (uint32_t)isr37, 0x08, 0x8E);
     idt_set_gate(38, (uint32_t)isr38, 0x08, 0x8E); idt_set_gate(39, (uint32_t)isr39, 0x08, 0x8E);

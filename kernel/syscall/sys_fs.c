@@ -32,7 +32,7 @@ void sys_read(arch_regs_t *regs) {
     int size = (int)regs->edx;
 
     if (!validate_fd(fd) || !validate_user_pointer(buf, size)) {
-        regs->eax = -1; 
+        regs->eax = E_INVAL; 
         return;
     }
     
@@ -71,9 +71,9 @@ void sys_read(arch_regs_t *regs) {
         int d_idx = desc->ptr;
         if (dev_table[d_idx].read) {
             regs->eax = dev_table[d_idx].read((uint8_t *)buf, size);
-        } else { regs->eax = -1; }
+        } else { regs->eax = E_NOENT; }
     }
-    else { regs->eax = -1; }
+    else { regs->eax = E_BADF; }
 }
 
 void sys_write(arch_regs_t *regs) {
@@ -82,7 +82,7 @@ void sys_write(arch_regs_t *regs) {
     int size = (int)regs->edx;
 
     if (!validate_fd(fd) || !validate_user_pointer(buf, size)) {
-        regs->eax = -1; 
+        regs->eax = E_INVAL; 
         return;
     }
     file_descriptor_t *desc = &tasks[current_task].fd_table[fd];
@@ -107,17 +107,17 @@ void sys_write(arch_regs_t *regs) {
         int d_idx = desc->ptr;
         if (dev_table[d_idx].write) {
             regs->eax = dev_table[d_idx].write((const uint8_t *)buf, size);
-        } else { regs->eax = -1; }
+        } else { regs->eax = E_NOENT; }
     }
-    else { regs->eax = -1; }
+    else { regs->eax = E_BADF; }
 }
 
 void sys_pipe(arch_regs_t *regs) {
     uint32_t *fds = (uint32_t *)regs->ebx;
-    if (!validate_user_pointer((const void *)fds, 8)) { regs->eax = -1; return; }
+    if (!validate_user_pointer((const void *)fds, 8)) { regs->eax = E_FAULT; return; }
     
     pipe_t *p = create_pipe();
-    if (!p) { regs->eax = -1; return; }
+    if (!p) { regs->eax = E_NOMEM; return; }
 
     int fd1 = -1, fd2 = -1;
     for(int i=3; i<MAX_FD_PER_TASK; i++) {
@@ -126,7 +126,7 @@ void sys_pipe(arch_regs_t *regs) {
             else if (fd2 == -1) { fd2 = i; break; }
         }
     }
-    if (fd2 == -1) { destroy_pipe(p); regs->eax = -1; return; }
+    if (fd2 == -1) { destroy_pipe(p); regs->eax = E_MFILE; return; }
 
     // OKUMA UCU
     tasks[current_task].fd_table[fd1].type = FD_TYPE_PIPE;
@@ -146,8 +146,8 @@ void sys_pipe(arch_regs_t *regs) {
 void sys_dup2(arch_regs_t *regs) {
     int oldfd = (int)regs->ebx;
     int newfd = (int)regs->ecx;
-    if (!validate_fd(oldfd) || !validate_fd(newfd)) { regs->eax = -1; return; }
-    if (tasks[current_task].fd_table[oldfd].type == FD_TYPE_NONE) { regs->eax = -1; return; }
+    if (!validate_fd(oldfd) || !validate_fd(newfd)) { regs->eax = E_BADF; return; }
+    if (tasks[current_task].fd_table[oldfd].type == FD_TYPE_NONE) { regs->eax = E_BADF; return; }
 
     uint8_t old_type = tasks[current_task].fd_table[newfd].type;
     if (old_type == FD_TYPE_PIPE) {
@@ -174,7 +174,7 @@ void sys_dup2(arch_regs_t *regs) {
 
 void sys_close(arch_regs_t *regs) {
     int fd = (int)regs->ebx;
-    if (!validate_fd(fd)) { regs->eax = -1; return; }
+    if (!validate_fd(fd)) { regs->eax = E_BADF; return; }
     file_descriptor_t *desc = &tasks[current_task].fd_table[fd];
     
     if (desc->type == FD_TYPE_PIPE && desc->ptr != 0) {
@@ -204,12 +204,12 @@ void sys_close(arch_regs_t *regs) {
 /* ── SANAL DOSYA SİSTEMİ (VFS) DİSK İŞLEMLERİ ────────────────────── */
 
 void sys_open(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, 256)) { regs->eax = -1; return; }
+    if (!validate_string_pointer((const char *)regs->ebx, 256)) { regs->eax = E_FAULT; return; }
     char basename[64];
     for (int k = 0; k < 64; k++) basename[k] = '\0';
     int parent_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
     
-    if (parent_id == -1 || basename[0] == '\0') { regs->eax = -1; return; }
+    if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
     int dev_idx_vfs = fs_get_entry_idx("dev", 0);
     int dev_id = (dev_idx_vfs != -1) ? dir_table[dev_idx_vfs].entry_id : -1;
@@ -226,8 +226,8 @@ void sys_open(arch_regs_t *regs) {
                 tasks[current_task].fd_table[fd].ptr = d_idx;
                 tasks[current_task].fd_table[fd].mode = 0;
                 regs->eax = fd;
-            } else { regs->eax = -1; }
-        } else { regs->eax = -1; }
+            } else { regs->eax = E_MFILE; }
+        } else { regs->eax = E_NOENT; }
         return;
     }
 
@@ -235,14 +235,14 @@ void sys_open(arch_regs_t *regs) {
         terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         printk("cat: Erisim Engellendi (Permission Denied)\n");
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        regs->eax = -1; return;
+        regs->eax = E_ACCES; return;
     }
 
     int fd = -1;
     for (int i = 3; i < MAX_FD_PER_TASK; i++) {
         if (tasks[current_task].fd_table[i].type == 0) { fd = i; break; }
     }
-    if (fd == -1) { regs->eax = -1; return; }
+    if (fd == -1) { regs->eax = E_MFILE; return; }
 
     vfs_file_t *new_file = (vfs_file_t *)kmalloc(sizeof(vfs_file_t));
     
@@ -254,7 +254,7 @@ void sys_open(arch_regs_t *regs) {
         regs->eax = fd;
     } else {
         kfree(new_file);
-        regs->eax = -1;
+        regs->eax = E_NOENT;
     }
 }
 
@@ -318,11 +318,11 @@ void sys_ls_dir(arch_regs_t *regs) {
 }
 
 void sys_get_dir_id(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, 256)) { regs->eax = -1; return; }
+    if (!validate_string_pointer((const char *)regs->ebx, 256)) { regs->eax = E_FAULT; return; }
     
     char basename[64];
     int parent_dir_id = vfs_resolve_path((char*)regs->ebx, (uint8_t)regs->ecx, basename);
-    if (parent_dir_id == -1) { regs->eax = -1; return; }
+    if (parent_dir_id < 0) { regs->eax = E_NOENT; return; }
 
     if (basename[0] == '\0' || (basename[0] == '.' && basename[1] == '\0')) {
         regs->eax = parent_dir_id; 
@@ -341,13 +341,13 @@ void sys_get_dir_id(arch_regs_t *regs) {
         int idx = fs_get_entry_idx(basename, parent_dir_id);
         if (idx != -1) {
             if (dir_table[idx].file_type == 1) regs->eax = dir_table[idx].entry_id;
-            else regs->eax = -1;
+            else regs->eax = E_NOTDIR;
         } else {
-            regs->eax = -1;
+            regs->eax = E_NOENT;
         }
     }
-    if (regs->eax != (uint32_t)-1 && !check_vfs_access(regs->eax, 0)) {
-        regs->eax = -1;
+    if (regs->eax != (uint32_t)E_NOENT && regs->eax != (uint32_t)E_NOTDIR && !check_vfs_access(regs->eax, 0)) {
+        regs->eax = E_ACCES;
     }
 }
 
@@ -357,7 +357,7 @@ void sys_list_files(arch_regs_t *regs) {
 }
 
 void sys_cat_raw(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, 64)) { regs->eax = -1; return; }
+    if (!validate_string_pointer((const char *)regs->ebx, 64)) { regs->eax = E_FAULT; return; }
     char *target_file = (char *)regs->ebx;
     uint8_t parent_id = (uint8_t)regs->ecx;
     vfs_file_t file;
@@ -388,7 +388,7 @@ void sys_cat_raw(arch_regs_t *regs) {
 }
 
 void sys_cat_file(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, 64)) { regs->eax = -1; return; }
+    if (!validate_string_pointer((const char *)regs->ebx, 64)) { regs->eax = E_FAULT; return; }
     char *target_file = (char *)regs->ebx;
     uint8_t parent_id = (uint8_t)regs->ecx;
     vfs_file_t file;

@@ -15,35 +15,53 @@ extern void kfree(void *ptr);
 extern process_t tasks[];
 extern uint32_t fs_max_sectors;
 
+/**
+ * @brief Regression tests to prevent the recurrence of historically patched kernel bugs.
+ *
+ * This suite ensures that previously identified and fixed critical issues (such as
+ * memory management faults, array index miscalculations, ATA driver hardware livelocks, 
+ * and ABI alignment corruption) do not inadvertently resurface during new development cycles.
+ *
+ * Expected behavior:
+ * - Specific exploits/bugs trigger safe error handling or bypasses instead of kernel panics.
+ * - System stability is maintained when exposing past vulnerability vectors.
+ *
+ * Edge cases covered:
+ * - Null pointer frees.
+ * - Task slot vs PID decoupling.
+ * - ATA driver timeout hardware emulation.
+ * - Architecture pointer sizing.
+ */
 void run_regression_tests(void) {
     printk("\n--- Regression (Past Bug) Tests ---\n");
     serial_print("\n--- Regression (Past Bug) Tests ---\n");
 
     // =========================================================
     // BUG-01: Dangling Pointer & NULL Free Protection
-    // Past Bug: When previously allocated or NULL memory 
-    // was attempted to be freed with kfree, it caused a Kernel Panic.
     // =========================================================
+    // Past Bug Description: Calling `kfree` on an already freed pointer or a NULL pointer 
+    // lacked boundary checks and caused an immediate Kernel Panic (page fault in the heap manager).
     void *ptr = kmalloc(32);
     kfree(ptr);
-    kfree(NULL); // IF NULL protection is missing, the system crashes HERE!
+    kfree(NULL); // If the NULL protection regression patch is missing, the system will crash HERE!
+    
+    // If execution reaches this assertion, the kernel safely ignored the NULL free attempt.
     KTEST_ASSERT(1, "[STRICT] REG-01: kfree(NULL) prevented system crash (Heap stable)");
 
     // =========================================================
     // BUG-02: PID and Array Index (Slot) Confusion
-    // Past Bug: The index in the Process Table (0, 1, 2) 
-    // and real PID number (e.g. 1005) were confused 
-    // and the wrong task was closed.
     // =========================================================
+    // Past Bug Description: The kernel scheduler occasionally confused the hardcoded index 
+    // of the task in the `tasks[]` array (e.g., 0, 1, 2) with the dynamically assigned PID 
+    // (e.g., 1005). This resulted in terminating the wrong tasks.
     int test_slot = -1;
-    for (int i = 0; i < 16; i++) { // MAX_TASKS = 16
+    for (int i = 0; i < 16; i++) { // Assuming MAX_TASKS is 16.
         if (tasks[i].state == 0) { test_slot = i; break; }
     }
     
     if (test_slot >= 0) {
-        // PID is deliberately set entirely different from the index (1000 higher)
         tasks[test_slot].pid = test_slot + 1000; 
-        tasks[test_slot].state = 1; // Mark as occupied
+        tasks[test_slot].state = 1; // Mark slot as occupied so search routines see it.
         
         int found_slot = -1;
         for (int i = 0; i < 16; i++) {
@@ -52,38 +70,39 @@ void run_regression_tests(void) {
                 break; 
             }
         }
+        
+        // The search logic must correctly map the large PID back to the smaller array index.
         KTEST_ASSERT(found_slot == test_slot, "[STRICT] REG-02: PID and Slot (Index) confusion prevented");
-        tasks[test_slot].state = 0; // Clean the slot after the test (Avoid Memory Leak)
+        
+        tasks[test_slot].state = 0; 
     }
 
     // =========================================================
     // BUG-03: ATA Disk Boundary Overflow (Timeout) Protection
-    // Past Bug: Attempting to read beyond the disk's maximum size (4096 sectors) 
-    // caused the ATA driver to lock up (timeout) 
-    // and put the whole system into an infinite loop.
     // =========================================================
-    // Testing whether fs_max_sectors is capped to 4096.
+    // Past Bug Description: Attempting to request reads beyond the disk's physical boundaries 
+    // (e.g., beyond 4096 sectors) caused the ATA driver to wait indefinitely for a DRQ signal 
+    // that the hardware would never send, locking up the kernel.
     KTEST_ASSERT(fs_max_sectors <= 4096, "[STRICT] REG-03: ATA driver prevented from exceeding max boundary (4096)");
 
     // =========================================================
     // BUG-04: Ring 0 <-> Ring 3 ABI and Struct Padding Mismatch
-    // Past Bug: Pointers must be 4 bytes on 32-bit (i386) architecture. 
-    // While passing data via Syscall, data type (ABI) 
-    // alignment was getting corrupted.
     // =========================================================
+    // Past Bug Description: 32-bit (i386) architecture strictly requires 4-byte pointers. 
+    // Due to improper struct packing/padding during Syscalls between Ring 3 and Ring 0, 
+    // pointer alignment became misaligned and corrupted memory.
     KTEST_ASSERT(sizeof(void *) == 4, "[STRICT] REG-04: Architectural ABI pointer size (4 bytes / 32-bit) preserved");
 
     // =========================================================================
     // BUG-05: ATA Identify Infinite Loop Lockup (Hardware Livelock)
     // =========================================================================
-    // Old Code: If hardware (Real Disk) fails and never raises DRQ/ERR flags, 
-    // ata_identify() locked up infinitely inside 'while(1)'.
-    // New Code: Thanks to the timeout mechanism, even if hardware fails, the function
-    // safely returns without hanging.
+    // Past Bug Description: `ata_identify()` used an unbound `while(1)` loop waiting for hardware 
+    // status flags. If the real disk controller failed to raise DRQ/ERR flags, the CPU hung forever.
+    // The patch introduced a timeout-based escape mechanism.
     extern uint32_t ata_identify(void);
     uint32_t identified_sectors = ata_identify();
     
-    // If we reached here, the function did not trap us in an infinite loop!
+    // If the thread of execution reaches this line, the timeout patch worked successfully.
     KTEST_ASSERT(identified_sectors >= 4096, 
         "[STRICT] REG-05: ATA Identify protected with Timeout against hardware lockup");
 }

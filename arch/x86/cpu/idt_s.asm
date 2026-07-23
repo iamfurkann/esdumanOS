@@ -1,5 +1,12 @@
 global load_idt
 
+; =============================================================================
+; load_idt
+; -----------------------------------------------------------------------------
+; Low-level architectural purpose:
+; Loads the Interrupt Descriptor Table (IDT) pointer into the CPU's IDTR
+; register using the `lidt` instruction, enabling hardware and software interrupts.
+; =============================================================================
 load_idt:
     push ebp
     mov ebp, esp
@@ -62,7 +69,7 @@ ISR_NOERRCODE 31
 
 ;(IRQs)
 ISR_NOERRCODE 32 ; IRQ0: PIT (Timer)
-ISR_NOERRCODE 33 ; IRQ1: Klavye
+ISR_NOERRCODE 33 ; IRQ1: Keyboard
 ISR_NOERRCODE 34 ; IRQ2: Cascade
 ISR_NOERRCODE 35 ; IRQ3: COM2
 ISR_NOERRCODE 36 ; IRQ4: COM1
@@ -70,10 +77,10 @@ ISR_NOERRCODE 37 ; IRQ5: LPT2
 ISR_NOERRCODE 38 ; IRQ6: Floppy Disk
 ISR_NOERRCODE 39 ; IRQ7: LPT1
 ISR_NOERRCODE 40 ; IRQ8: CMOS RTC
-ISR_NOERRCODE 41 ; IRQ9: Boş
-ISR_NOERRCODE 42 ; IRQ10: Boş
-ISR_NOERRCODE 43 ; IRQ11: Boş
-ISR_NOERRCODE 44 ; IRQ12: Fare (PS/2)
+ISR_NOERRCODE 41 ; IRQ9: Empty
+ISR_NOERRCODE 42 ; IRQ10: Empty
+ISR_NOERRCODE 43 ; IRQ11: Empty
+ISR_NOERRCODE 44 ; IRQ12: Mouse (PS/2)
 ISR_NOERRCODE 45 ; IRQ13: FPU
 ISR_NOERRCODE 46 ; IRQ14: Primary ATA Hard Disk
 ISR_NOERRCODE 47 ; IRQ15: Secondary ATA Hard Disk
@@ -81,6 +88,14 @@ ISR_NOERRCODE 47 ; IRQ15: Secondary ATA Hard Disk
 ISR_NOERRCODE 128 ; Syscall (0x80)
 
 extern isr_handler
+; =============================================================================
+; isr_common_stub
+; -----------------------------------------------------------------------------
+; Low-level architectural purpose:
+; Provides a common entry path for all ISRs. It saves the complete CPU state,
+; switches to kernel data segments, calls the C-level interrupt dispatcher,
+; and then restores the state before executing `iret` to return.
+; =============================================================================
 isr_common_stub:
     pusha
     mov ax, ds

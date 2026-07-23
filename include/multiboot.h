@@ -3,6 +3,9 @@
 
 #include "types.h"
 
+/**
+ * @brief Multiboot information structure provided by the bootloader
+ */
 typedef struct multiboot_info {
     uint32_t flags;
     uint32_t mem_lower;
@@ -20,6 +23,9 @@ typedef struct multiboot_info {
     uint32_t mmap_addr;   
 } __attribute__((packed)) multiboot_info_t;
 
+/**
+ * @brief Multiboot memory map entry structure representing a memory region
+ */
 typedef struct multiboot_mmap_entry {
     uint32_t size;
     uint32_t addr_low;

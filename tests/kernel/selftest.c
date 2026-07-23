@@ -12,23 +12,51 @@ int tests_failed = 0;
 
 
 
+/**
+ * @brief Writes a byte to a specified hardware I/O port.
+ *
+ * A primitive inline wrapper around the x86 `outb` instruction, utilized here 
+ * to interface directly with the QEMU debug exit port.
+ *
+ * @param port The target I/O port address.
+ * @param val The 8-bit value to write to the port.
+ * @expected The exact byte value is dispatched to the specified hardware port.
+ */
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
 }
 
+/**
+ * @brief Triggers an automated QEMU emulator shutdown with an exit code.
+ *
+ * Communicates with QEMU's debug exit device (commonly located at port 0xf4) 
+ * to forcefully terminate the virtual machine. It maps the test suite's success 
+ * state into standard system exit codes for CI/CD pipeline integration.
+ *
+ * @param is_success Integer flag indicating overall test suite success (1) or failure (0).
+ * @expected QEMU gracefully terminates, yielding Exit Code 33 for success or Exit Code 35 for failure.
+ */
 void qemu_shutdown(int is_success) {
-    // Sending 0x10 gives Exit Code 33 (SUCCESS)
-    // Sending 0x11 gives Exit Code 35 (FAILURE)
     outb(0xf4, is_success ? 0x10 : 0x11);
 }
 
+/**
+ * @brief The master execution routine for the kernel test suite.
+ *
+ * Orchestrates the sequential initialization and execution of all modular kernel tests, 
+ * ranging from low-level memory handling up to complex integration testing. After 
+ * traversing all modules, it aggregates the results and halts the emulator.
+ *
+ * @expected The terminal is initialized, all registered sub-tests are dispatched 
+ *           consecutively, and a final statistical summary of passes and failures 
+ *           is reported before cleanly halting execution.
+ */
 void run_all_selftests(void) {
     terminal_initialize();
     printk("\n======================================================\n");
     printk("       KFS COMPREHENSIVE KERNEL TEST SUITE            \n");
     printk("======================================================\n");
     
-    // Call Modules
     run_string_tests();
     run_memory_tests();
     run_pipe_tests();

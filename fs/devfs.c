@@ -1,5 +1,7 @@
 #include "devfs.h"
 #include "io.h"
+#include "errno.h"
+#include "klog.h"
 
 int dev_null_read(uint8_t *buf, int size) { 
     (void)buf;
@@ -66,7 +68,8 @@ int dev_random_read(uint8_t *buf, int size) {
 int dev_random_write(const uint8_t *buf, int size) { 
     (void)buf;
     (void)size;
-    return -1;
+    klog(LOG_LEVEL_WARN, "DEVFS", "Attempted write to read-only random device");
+    return E_PERM;
 }
 
 device_node_t dev_table[] = {
@@ -80,5 +83,6 @@ int get_device_idx(const char *name) {
     for(int i = 0; dev_table[i].name[0] != '\0'; i++) {
         if (ft_strcmp(dev_table[i].name, name) == 0) return i;
     }
-    return -1;
+    klog(LOG_LEVEL_ERROR, "DEVFS", "Device not found");
+    return E_NOENT;
 }

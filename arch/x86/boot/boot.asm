@@ -13,20 +13,28 @@ align 4
 section .data
 align 4096
 boot_page_directory:
-        times 1024 dd 0      ; İçi 0 ile dolu 4KB'lık Dizin
+        times 1024 dd 0      ; 4KB Directory filled with 0s
 boot_page_table_0:
-        times 4096 dd 0      ; İçi 0 ile dolu 16KB'lık Tablo alanı
+        times 4096 dd 0      ; 16KB Table area filled with 0s
 
 section .bss
 align 16
 stack_bottom:
-        resb 16384           ; 16 KB Çekirdek Yığını
+        resb 16384           ; 16 KB Kernel Stack
 stack_top:
 
 section .text
 global _start
 extern kernel_main
 
+; =============================================================================
+; _start
+; -----------------------------------------------------------------------------
+; Low-level architectural purpose:
+; Acts as the entry point for the kernel as invoked by the Multiboot compliant
+; bootloader. It sets up initial paging for higher-half mapping, configures
+; the basic kernel stack, and transfers execution to the C kernel main entry.
+; =============================================================================
 _start:
         mov edi, boot_page_table_0
         mov esi, 0
@@ -45,7 +53,7 @@ _start:
         mov dword [boot_page_directory + 8], boot_page_table_0 + 8192 + 0x003
         mov dword [boot_page_directory + 12], boot_page_table_0 + 12288 + 0x003
 
-        ; Higher Half (0xC0000000) Eşleşmesi
+        ; Higher Half (0xC0000000) Mapping
         mov dword [boot_page_directory + 768 * 4], boot_page_table_0 + 0x003
         mov dword [boot_page_directory + 769 * 4], boot_page_table_0 + 4096 + 0x003
         mov dword [boot_page_directory + 770 * 4], boot_page_table_0 + 8192 + 0x003
@@ -58,11 +66,11 @@ _start:
         or ecx, 0x80000000
         mov cr0, ecx
         
-        ; Yığını (Stack) ayarla
+        ; Setup the Stack
         mov esp, stack_top
 
-        push ebx ; Parametre 2: mboot_info
-        push eax ; Parametre 1: magic
+        push ebx ; Parameter 2: mboot_info
+        push eax ; Parameter 1: magic
 
         call kernel_main
 

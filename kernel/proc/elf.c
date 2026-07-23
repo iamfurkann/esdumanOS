@@ -25,29 +25,30 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
 {
     if (!check_free_task_slot())
     {
-        printk("[ELF LOADER] HATA: Maksimum gorev limitine (16) ulasildi. '%s' yuklenemedi!\n", filename);
-        return -1;
+        klog(LOG_LEVEL_ERROR, "ELF", "Maksimum gorev limitine ulasildi!");
+        return E_AGAIN;
     }
 
     vfs_file_t file;
     if (fs_open(filename, parent_id, &file) != E_OK)
     {
-        printk("Hata: '%s' disk uzerinde bulunamadi!\n", filename);
-        return -1;
+        klog(LOG_LEVEL_ERROR, "ELF", "Dosya disk uzerinde bulunamadi!");
+        return E_NOENT;
     }
 
     uint8_t *file_buffer = (uint8_t *)kmalloc(file.file_size);
     if (!file_buffer)
     {
-        printk("Hata: ELF yukleyici icin RAM ayrilamadi!\n");
-        return -1;
+        klog(LOG_LEVEL_ERROR, "ELF", "ELF yukleyici icin RAM ayrilamadi!");
+        return E_NOMEM;
     }
 
     int read_bytes = fs_read(&file, file_buffer, file.file_size);
     if (read_bytes < (int)sizeof(elf32_ehdr_t))
     {
+        klog(LOG_LEVEL_ERROR, "ELF", "Dosya okuma hatasi veya dosya cok kucuk!");
         kfree(file_buffer);
-        return -1;
+        return E_IO;
     }
 
     elf32_ehdr_t *ehdr = (elf32_ehdr_t *)file_buffer;
@@ -55,27 +56,28 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
     // 1. TEMEL ELF İMZASI VE MİMARİ KONTROLÜ
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' || 
         ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
-        printk("Hata: %s gecerli bir ELF dosyasi degil!\n", filename);
+        klog(LOG_LEVEL_ERROR, "ELF", "Gecerli bir ELF dosyasi degil!");
         kfree(file_buffer);
-        return -1;
+        return E_NOEXEC;
     }
 
     // [KRİTİK GÜVENLİK YAMASI 1]: Sadece 32-bit x86 (i386) dosyaları kabul et!
     if (ehdr->e_ident[4] != 1) { // 1 = ELFCLASS32
-        printk("Hata: %s 32-bit (ELFCLASS32) degil!\n", filename);
+        klog(LOG_LEVEL_ERROR, "ELF", "Dosya 32-bit (ELFCLASS32) degil!");
         kfree(file_buffer);
-        return -1;
+        return E_NOEXEC;
     }
     if (ehdr->e_machine != 3) { // 3 = EM_386 (Intel 80386)
-        printk("Hata: %s x86 (i386) mimarisine uygun degil!\n", filename);
+        klog(LOG_LEVEL_ERROR, "ELF", "Dosya x86 (i386) mimarisine uygun degil!");
         kfree(file_buffer);
-        return -1;
+        return E_NOEXEC;
     }
 
     uint32_t new_pd = clone_page_directory();
     if (!new_pd) {
+        klog(LOG_LEVEL_ERROR, "ELF", "Sayfa dizini kopyalanamadi!");
         kfree(file_buffer);
-        return -1;
+        return E_NOMEM;
     }
 
     uint32_t eflags;
@@ -165,8 +167,8 @@ cleanup_and_fail:
     // İptal edilen Page Directory'yi temizlemek için kendi yazdığın metodu çağır
     extern void cleanup_process_memory(uint32_t pd);
     cleanup_process_memory(new_pd);
-    
-    return -1;
+    klog(LOG_LEVEL_ERROR, "ELF", "Gorev iptal edildi, hafiza temizlendi.");
+    return E_NOEXEC;
 
 load_success:
 
@@ -244,6 +246,6 @@ load_success:
         }
     }
 
-    printk("[ELF LOADER] Hata: Gorev olusturulamadi!\n");
-    return -1;
+    klog(LOG_LEVEL_ERROR, "ELF", "Gorev olusturulamadi (Icmantık hatasi)!");
+    return E_FAULT;
 }

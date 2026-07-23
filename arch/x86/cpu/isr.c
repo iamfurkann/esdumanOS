@@ -36,6 +36,10 @@ const char *exception_messages[] = {
     "Reserved", "Reserved", "Reserved", "Reserved"
 };
 
+/**
+ * Cleans the general purpose registers.
+ * Expected behavior: Clears eax, ebx, ecx, edx, esi, and edi to zero.
+ */
 void clean_registers(void) {
     asm volatile (
         "xor %%eax, %%eax\n"
@@ -52,6 +56,10 @@ void clean_registers(void) {
 
 uint32_t saved_panic_stack[256];
 
+/**
+ * Saves the current stack state before a kernel panic.
+ * Expected behavior: Copies the top 256 DWORDs of the stack into a buffer for debugging.
+ */
 void save_stack_before_panic(void) {
     uint32_t current_esp;
 
@@ -62,6 +70,11 @@ void save_stack_before_panic(void) {
         saved_panic_stack[i] = stack_ptr[i];
 }
 
+/**
+ * Handles page fault exceptions.
+ * Expected behavior: Identifies if the fault occurred in user or kernel mode.
+ * Kills the faulting user task or triggers a kernel panic if it originated in kernel space.
+ */
 void page_fault_handler(arch_regs_t *regs) {
     uint32_t faulting_address;
     asm volatile("mov %%cr2, %0" : "=r" (faulting_address));
@@ -69,20 +82,24 @@ void page_fault_handler(arch_regs_t *regs) {
     int is_user = regs->err_code & 0x4;
 
     if (is_user) {
-        printk("\n[SEGFAULT] Ihlal (PID: %d)! Yetkisiz bellek erisimi: 0x%x\n", 
+        printk("\n[SEGFAULT] Violation (PID: %d)! Unauthorized memory access: 0x%x\n", 
                tasks[current_task].pid, faulting_address);
         
         tasks[current_task].state = TASK_DEAD; 
         schedule(regs);
     } else {
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-        printk("\n[KERNEL PANIC] Cekirdek Page Fault yaratti: 0x%x\n", faulting_address);
-        printk("Hata Kodu: %d\n", regs->err_code);
+        printk("\n[KERNEL PANIC] Kernel generated Page Fault: 0x%x\n", faulting_address);
+        printk("Error Code: %d\n", regs->err_code);
         asm volatile("cli; hlt");
     }
 }
 
-/*INTERRUPT DISPATCHER*/
+/**
+ * The main interrupt dispatcher.
+ * Expected behavior: Routes the interrupt to the appropriate handler based on the interrupt number.
+ * Handles exceptions by panicking, and hardware interrupts by acknowledging the PIC and calling specific drivers.
+ */
 void isr_handler(arch_regs_t *regs) {
     
     /* EXCEPTIONS (0-31)*/
@@ -98,8 +115,8 @@ void isr_handler(arch_regs_t *regs) {
         printk("                KERNEL PANIC!                     \n");
         printk("==================================================\n");
         
-        printk("Hata Turu : %s (Interrupt: %d)\n", exception_messages[regs->int_no], regs->int_no);
-        printk("Hata Kodu : 0x%x\n\n", regs->err_code);
+        printk("Error Type : %s (Interrupt: %d)\n", exception_messages[regs->int_no], regs->int_no);
+        printk("Error Code : 0x%x\n\n", regs->err_code);
 
         printk("--- CPU REGISTERS ---\n");
         printk("EAX: 0x%x   EBX: 0x%x   ECX: 0x%x\n", regs->eax, regs->ebx, regs->ecx);
@@ -108,7 +125,7 @@ void isr_handler(arch_regs_t *regs) {
         printk("CS:  0x%x   DS:  0x%x   EFLAGS: 0x%x\n", regs->cs, regs->ds, regs->eflags);
         
         printk("==================================================\n");
-        printk("Sistem kilitlendi. Lutfen yeniden baslatin.\n");
+        printk("System halted. Please restart.\n");
 
         save_stack_before_panic();
         clean_registers();
@@ -139,6 +156,6 @@ void isr_handler(arch_regs_t *regs) {
         syscall_handler(regs);
     }
     else {
-        printk("Bilinmeyen Interrupt: %d\n", regs->int_no);
+        printk("Unknown Interrupt: %d\n", regs->int_no);
     }
 }

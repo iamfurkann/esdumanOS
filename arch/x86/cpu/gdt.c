@@ -10,6 +10,11 @@ extern void tss_flush(void);
 
 extern uint32_t kernel_stack_ring0[1024];
 
+/**
+ * Configures a single descriptor gate in the Global Descriptor Table (GDT).
+ * Expected behavior: Sets up the base address, limit, access flags, and granularity
+ * for the specified GDT entry index.
+ */
 void gdt_set_gate(int32_t num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt_entries[num].base_low    = (base & 0xFFFF);
     gdt_entries[num].base_middle = (base >> 16) & 0xFF;
@@ -21,6 +26,12 @@ void gdt_set_gate(int32_t num, uint32_t base, uint32_t limit, uint8_t access, ui
     gdt_entries[num].access      = access;
 }
 
+/**
+ * Initializes the Global Descriptor Table (GDT).
+ * Expected behavior: Sets up default segments including the null segment,
+ * kernel code/data/stack, and user code/data/stack segments. It also configures
+ * the Task State Segment (TSS) and flushes the new GDT to the CPU.
+ */
 void init_gdt(void) {
     gdt_ptr.limit = (sizeof(gdt_entry_t) * 8) - 1;
     gdt_ptr.base = (uint32_t)&gdt_entries;

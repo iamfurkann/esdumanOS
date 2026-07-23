@@ -18,11 +18,8 @@
  * @return The uppercase equivalent if applicable, otherwise the original character.
  */
 static char map_to_upper(unsigned int i, char c) {
-    // Step 1: Silence the unused parameter warning for the index 'i'.
     (void)i;
-    // Step 2: Check if the character falls within the lowercase ASCII range.
     if (c >= 'a' && c <= 'z') return c - 32;
-    // Step 3: Return the modified or original character.
     return c;
 }
 
@@ -35,9 +32,7 @@ static char map_to_upper(unsigned int i, char c) {
  * @param c A pointer to the character to be mutated.
  */
 static void iter_add_one(unsigned int i, char *c) {
-    // Step 1: Silence the unused parameter warning for the index 'i'.
     (void)i;
-    // Step 2: If the character is not the null terminator, increment its value.
     if (*c) (*c) += 1;
 }
 
@@ -53,16 +48,12 @@ static void iter_add_one(unsigned int i, char *c) {
  */
 static void test_ctype(void) {
     printk("\n--- Ctype Tests ---\n");
-    // Step 1: Verify that ft_isalpha correctly identifies letters and rejects numbers.
     KTEST_ASSERT(ft_isalpha('A') != 0, "ft_isalpha finds letter");
     KTEST_ASSERT(ft_isalpha('1') == 0, "ft_isalpha filters number");
-    // Step 2: Verify that ft_isdigit correctly identifies numbers and rejects letters.
     KTEST_ASSERT(ft_isdigit('5') != 0, "ft_isdigit finds digit");
     KTEST_ASSERT(ft_isdigit('a') == 0, "ft_isdigit filters letter");
-    // Step 3: Verify that ft_isalnum properly accepts both letters and numbers, but filters symbols.
     KTEST_ASSERT(ft_isalnum('Z') != 0 && ft_isalnum('9') != 0, "ft_isalnum finds alphanumeric");
     KTEST_ASSERT(ft_isalnum('?') == 0, "ft_isalnum filters special character");
-    // Step 4: Test character case conversion utilities for both upper and lower cases.
     KTEST_ASSERT(ft_toupper('a') == 'A', "ft_toupper converts to uppercase");
     KTEST_ASSERT(ft_tolower('Z') == 'z', "ft_tolower converts to lowercase");
 }
@@ -80,25 +71,21 @@ static void test_ctype(void) {
 static void test_string_basics(void) {
     printk("\n--- String (Basic & Search) Tests ---\n");
     
-    // Step 1: Test string length and comparison tools for accurate evaluations.
     KTEST_ASSERT(ft_strlen("42Kocaeli") == 9, "ft_strlen works correctly");
     KTEST_ASSERT(ft_strncmp("abc", "abc", 3) == 0, "ft_strncmp equal strings");
     KTEST_ASSERT(ft_strncmp("abc", "abd", 3) < 0, "ft_strncmp case difference");
     KTEST_ASSERT(ft_strcmp("test", "test") == 0, "ft_strcmp equal");
 
-    // Step 2: Verify safe string copying mechanisms (strlcpy).
     char buf1[20] = "Welcome";
     // Attempt to copy "Test" into the buffer with a strict size limit.
     KTEST_ASSERT(ft_strlcpy(buf1, "Test", 5) == 4, "ft_strlcpy return value (source length)");
     KTEST_ASSERT(ft_strcmp(buf1, "Test") == 0, "ft_strlcpy copy successful");
     
-    // Step 3: Verify safe string concatenation mechanisms (strlcat).
     char buf2[20] = "42";
     // Concatenate strings while strictly respecting buffer capacity.
     KTEST_ASSERT(ft_strlcat(buf2, "KFS", 10) == 5, "ft_strlcat return value correct");
     KTEST_ASSERT(ft_strcmp(buf2, "42KFS") == 0, "ft_strlcat concatenation successful");
 
-    // Step 4: Validate string and character searching functionality.
     KTEST_ASSERT(ft_strchr("Kocaeli", 'c') != NULL, "ft_strchr finds character");
     KTEST_ASSERT(ft_strchr("Kocaeli", 'z') == NULL, "ft_strchr non-existent character");
     KTEST_ASSERT(ft_strrchr("Kocaeli", 'i') != NULL, "ft_strrchr reverse search");
@@ -123,7 +110,6 @@ static void test_memory(void) {
     char mem1[10] = "123456789";
     char mem2[10] = "000000000";
 
-    // Step 1: Validate block filling operations like memset and bzero.
     ft_memset(mem1, 'A', 3);
     KTEST_ASSERT(ft_strncmp(mem1, "AAA456", 6) == 0, "ft_memset successful");
     
@@ -131,17 +117,14 @@ static void test_memory(void) {
     ft_bzero(mem1, 2);
     KTEST_ASSERT(mem1[0] == 0 && mem1[1] == 0 && mem1[2] == 'A', "ft_bzero successful");
     
-    // Step 2: Validate non-overlapping memory copying.
     ft_memcpy(mem2, "Test", 4);
     KTEST_ASSERT(ft_strncmp(mem2, "Test00", 6) == 0, "ft_memcpy successful");
 
-    // Step 3: Test memory movement with overlapping source and destination regions.
     char move_buf[20] = "123456789";
     // Overlap the region by moving data forward into a space already occupied by the source.
     ft_memmove(move_buf + 2, move_buf, 5); // Forward overlap (121234589)
     KTEST_ASSERT(ft_strncmp(move_buf, "1212345", 7) == 0, "ft_memmove overlapping memory (forward)");
 
-    // Step 4: Test memory comparison and byte searching within bounded regions.
     KTEST_ASSERT(ft_memcmp("abc", "abc", 3) == 0, "ft_memcmp equal");
     KTEST_ASSERT(ft_memcmp("abc", "abz", 3) != 0, "ft_memcmp different");
     KTEST_ASSERT(ft_memchr("42Kocaeli", 'K', 9) != NULL, "ft_memchr finds byte");
@@ -159,11 +142,9 @@ static void test_memory(void) {
 static void test_conversion_and_alloc(void) {
     printk("\n--- Conversion and Dynamic Memory Tests ---\n");
     
-    // Step 1: Test string to integer conversion handling positives, negatives, and whitespace.
     KTEST_ASSERT(ft_atoi("42") == 42, "ft_atoi positive number");
     KTEST_ASSERT(ft_atoi("   -42") == -42, "ft_atoi negative number with spaces");
     
-    // Step 2: Test integer to string conversion, relying on dynamic heap allocation.
     char *itoa_res = ft_itoa(-123);
     if (itoa_res) {
         KTEST_ASSERT(ft_strcmp(itoa_res, "-123") == 0, "ft_itoa works");
@@ -171,7 +152,6 @@ static void test_conversion_and_alloc(void) {
         // kfree(itoa_res); // Should use kheap kfree/free to prevent memory leak
     }
 
-    // Step 3: Test dynamic string duplication and substring extraction.
     char *dup = ft_strdup("Kernel");
     if (dup) {
         KTEST_ASSERT(ft_strcmp(dup, "Kernel") == 0, "ft_strdup works");
@@ -182,7 +162,6 @@ static void test_conversion_and_alloc(void) {
         KTEST_ASSERT(ft_strcmp(sub, "Kocaeli") == 0, "ft_substr successful");
     }
     
-    // Step 4: Test string joining and advanced trimming capabilities.
     char *join = ft_strjoin("42", "KFS");
     if (join) {
         KTEST_ASSERT(ft_strcmp(join, "42KFS") == 0, "ft_strjoin successful");
@@ -193,13 +172,11 @@ static void test_conversion_and_alloc(void) {
         KTEST_ASSERT(ft_strcmp(trim, "42Kocaeli") == 0, "ft_strtrim successful");
     }
 
-    // Step 5: Test splitting strings by a delimiter into an array of substrings.
     char **split = ft_split("a b c", ' ');
     if (split) {
         KTEST_ASSERT(ft_strcmp(split[0], "a") == 0 && ft_strcmp(split[2], "c") == 0, "ft_split successful");
     }
 
-    // Step 6: Test iterating over and mapping string elements via callback functions.
     char *mapi_res = ft_strmapi("abcd", map_to_upper);
     if (mapi_res) {
         KTEST_ASSERT(ft_strcmp(mapi_res, "ABCD") == 0, "ft_strmapi works");

@@ -56,7 +56,7 @@ void sys_exec(arch_regs_t *regs) {
 
     char basename[64];
     int parent_id = vfs_resolve_path(target_path, calling_dir_id, basename);
-    if (parent_id == -1 || basename[0] == '\0') { 
+    if (parent_id < 0 || basename[0] == '\0') { 
         regs->eax = E_NOENT; 
         return; 
     }

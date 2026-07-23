@@ -19,15 +19,27 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     return ret;
 }
 
+/**
+ * @brief Executes file system security tests for critical system files.
+ *
+ * This test ensures that sensitive configuration files like /etc/passwd are 
+ * robustly protected against unauthorized manipulation by unprivileged users.
+ *
+ * Expected behavior:
+ * - The test environment successfully synthesizes the /etc/passwd file under root.
+ * - Standard users MUST NOT be able to delete, overwrite, or rename critical files.
+ * - System calls interacting with protected nodes return negative error codes.
+ *
+ * Edge cases covered:
+ * - Using standard VFS syscalls (RM, CREATE, MV) with non-root UID to bypass protections.
+ */
 void run_passwd_tests(void) {
     printk("\n--- Passwd & Shadow Security Tests ---\n");
     serial_print("\n--- Passwd & Shadow Security Tests ---\n");
 
-    // Preserve original state
     int original_uid = 0;
     if (current_task >= 0) original_uid = tasks[current_task].uid;
 
-    // Map addresses to User-Space to bypass syscall security shield
     char *u_etc = (char *)0x502000;
     char *u_passwd = (char *)0x502100;
     char *u_hacked = (char *)0x502200;
@@ -45,14 +57,14 @@ void run_passwd_tests(void) {
 
     int etc_id = fs_get_entry_idx("etc", 0);
     if (etc_id == -1) {
-        ktest_syscall(26, (int)u_etc, 0, 0); // SYSCALL_MKDIR
+        ktest_syscall(26, (int)u_etc, 0, 0); // SYSCALL_MKDIR: 26
         etc_id = fs_get_entry_idx("etc", 0);
     }
     KTEST_ASSERT(etc_id != -1, "/etc directory exists under root");
 
     int passwd_idx = fs_get_entry_idx("passwd", etc_id);
     if (passwd_idx == -1) {
-        ktest_syscall(8, (int)u_passwd, (int)u_content, etc_id); // SYSCALL_CREATE_FILE
+        ktest_syscall(8, (int)u_passwd, (int)u_content, etc_id); // SYSCALL_CREATE_FILE: 8
     }
     KTEST_ASSERT(fs_get_entry_idx("passwd", etc_id) != -1, "/etc/passwd file protected in VFS");
 
@@ -62,15 +74,12 @@ void run_passwd_tests(void) {
     // =========================================================================
     if (current_task >= 0) tasks[current_task].uid = 1000; // Normal User
 
-    // 1. Removal (RM) Attack
     int rm_res = ktest_syscall(22, (int)u_passwd, etc_id, 0); // SYSCALL_RM_FILE
     KTEST_ASSERT(rm_res < 0, "[STRICT] Normal user CANNOT DELETE /etc/passwd");
 
-    // 2. Overwrite Attack
     int wr_res = ktest_syscall(8, (int)u_passwd, (int)u_content, etc_id); // SYSCALL_CREATE_FILE
     KTEST_ASSERT(wr_res < 0, "[STRICT] Normal user CANNOT OVERWRITE /etc/passwd");
 
-    // 3. Rename (RENAME/BYPASS) Attack
     int mv_res = ktest_syscall(23, (int)u_passwd, (int)u_hacked, etc_id); // SYSCALL_MV_FILE
     KTEST_ASSERT(mv_res < 0, "[STRICT] Normal user CANNOT RENAME /etc/passwd");
 

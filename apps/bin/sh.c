@@ -3,6 +3,15 @@
 
 typedef unsigned int uint32_t;
 
+/**
+ * @brief Performs a system call.
+ * 
+ * @param num System call number.
+ * @param arg1 First argument.
+ * @param arg2 Second argument.
+ * @param arg3 Third argument.
+ * @return Return value of the system call.
+ */
 static inline int syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" 
@@ -12,27 +21,60 @@ static inline int syscall(int num, int arg1, int arg2, int arg3) {
     return ret;
 }
 
+/**
+ * @brief Compares two strings.
+ * 
+ * @param s1 First string.
+ * @param s2 Second string.
+ * @return Difference between first non-matching characters.
+ */
 int ft_strcmp(const char *s1, const char *s2) {
     if (!s1 || !s2) return -1;
     while (*s1 && (*s1 == *s2)) { s1++; s2++; }
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
+/**
+ * @brief Copies a string.
+ * 
+ * @param dest Destination buffer.
+ * @param src Source string.
+ */
 void ft_strcpy(char *dest, const char *src) {
     while(*src) *dest++ = *src++;
     *dest = '\0';
 }
 
+/**
+ * @brief Copies a string up to n characters.
+ * 
+ * @param dest Destination buffer.
+ * @param src Source string.
+ * @param n Maximum characters to copy.
+ */
 void ft_strncpy(char *dest, const char *src, int n) {
     int i;
     for (i = 0; i < n - 1 && src[i] != '\0'; i++) dest[i] = src[i];
     dest[i] = '\0';
 }
 
+/**
+ * @brief Calculates the length of a string.
+ * 
+ * @param s The string.
+ * @return Length of the string.
+ */
 int ft_strlen(const char *s) {
     int i = 0; while(s[i]) i++; return i;
 }
 
+/**
+ * @brief Locates a substring within a string.
+ * 
+ * @param haystack String to search in.
+ * @param needle Substring to search for.
+ * @return Pointer to the beginning of the located substring, or NULL.
+ */
 char *ft_strstr(const char *haystack, const char *needle) {
     if (!*needle) return (char *)haystack;
     for (int i = 0; haystack[i]; i++) {
@@ -45,6 +87,12 @@ char *ft_strstr(const char *haystack, const char *needle) {
     return 0;
 }
 
+/**
+ * @brief Converts an integer to a string.
+ * 
+ * @param n Integer to convert.
+ * @param buf Buffer to store the resulting string.
+ */
 void ft_itoa(int n, char *buf) {
     if (n == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
     char temp[16]; int i = 0;
@@ -54,6 +102,12 @@ void ft_itoa(int n, char *buf) {
     buf[j] = '\0';
 }
 
+/**
+ * @brief Converts a hexadecimal string to an integer.
+ * 
+ * @param hex_str Hexadecimal string.
+ * @return Converted integer value.
+ */
 uint32_t hex_to_int(const char *hex_str) {
     uint32_t val = 0;
     if (hex_str[0] == '0' && (hex_str[1] == 'x' || hex_str[1] == 'X')) hex_str += 2;
@@ -67,6 +121,12 @@ uint32_t hex_to_int(const char *hex_str) {
     return val;
 }
 
+/**
+ * @brief Computes a salted DJB2 hash for a string.
+ * 
+ * @param str String to hash.
+ * @return The computed hash.
+ */
 uint32_t hash_djb2_salted(const char *str) {
     uint32_t hash = 5381;
     while (*str) {
@@ -77,40 +137,164 @@ uint32_t hash_djb2_salted(const char *str) {
     return hash;
 }
 
+/**
+ * @brief Prints a string to standard output.
+ * 
+ * @param str String to print.
+ */
 void print(const char *str) {
     syscall(SYSCALL_WRITE, 1, (int)str, ft_strlen(str)); 
 }
 
+/**
+ * @brief Sets the system DEFCON (security) level.
+ * 
+ * @param level The security level to set.
+ */
 void set_defcon(int level) {
     syscall(SYSCALL_SET_SEC_LEVEL, level, 0, 0);
-    print("\n[!] Sistem Guvenlik Seviyesi Degistirildi!\n");
+    print("\n[!] System Security Level Changed!\n");
 }
 
 
-/* KERNEL */
+/* KERNEL SYSTEM CALL WRAPPERS */
+/**
+ * @brief Prints a string to standard output.
+ * @param str The string to print.
+ */
 void printk(const char *str) { syscall(SYSCALL_WRITE, 1, (int)str, ft_strlen(str)); }
+/**
+ * @brief Reads a single character from the keyboard.
+ * @return The character read.
+ */
 char get_keyboard_char(void) { char c = 0; syscall(SYSCALL_READ, 0, (int)&c, 1); return c;}
+/**
+ * @brief Creates a new file via system call.
+ * @param name File name.
+ * @param content File content.
+ * @param parent_id ID of the parent directory.
+ * @return System call status.
+ */
 int sys_create_file(const char *name, const char *content, int parent_id) { return syscall(8, (int)name, (int)content, parent_id); }
+/**
+ * @brief Deletes a file via system call.
+ * @param name File name.
+ * @param parent_id ID of the parent directory.
+ * @return System call status.
+ */
 int sys_delete_file(const char *name, int parent_id) { return syscall(22, (int)name, parent_id, 0); }
+/**
+ * @brief Reads a file content via system call.
+ * @param name File name.
+ * @param parent_id ID of the parent directory.
+ * @return System call status.
+ */
 int sys_cat_file(const char *name, int parent_id) { return syscall(11, (int)name, parent_id, 0); }
+/**
+ * @brief Reads raw file content via system call.
+ * @param name File name.
+ * @param parent_id ID of the parent directory.
+ * @return System call status.
+ */
 int sys_cat_raw_file(const char *name, int parent_id) { return syscall(34, (int)name, parent_id, 0); } // 34 = SYSCALL_CAT_RAW 
+/**
+ * @brief Renames a file via system call.
+ * @param old_name Current name.
+ * @param new_name New name.
+ * @param parent_id ID of the parent directory.
+ * @return System call status.
+ */
 int sys_rename_file(const char *old_name, const char *new_name, int parent_id) { return syscall(23, (int)old_name, (int)new_name, parent_id); }
+/**
+ * @brief Receives an IPC message.
+ * @param sender Pointer to store sender ID.
+ * @param payload Pointer to store message payload.
+ * @return System call status.
+ */
 int sys_receive_message(uint32_t *sender, uint32_t *payload) { return syscall(SYSCALL_IPC_RECEIVE, (int)sender, (int)payload, 0); }
+/**
+ * @brief Sets process priority.
+ * @param pid Process ID.
+ * @param priority Priority level.
+ */
 void sys_set_priority(int pid, int priority) { syscall(SYSCALL_SET_PRIORITY, pid, priority, 0); }
+/**
+ * @brief Exits the current process.
+ */
 void sys_exit(void) { syscall(SYSCALL_EXIT, 0, 0, 0); while(1); }
+/**
+ * @brief Registers a signal handler.
+ * @param sig_num Signal number.
+ * @param handler Pointer to the handler function.
+ */
 void sys_register_signal(int sig_num, void *handler) { syscall(SYSCALL_SIGNAL_REG, sig_num, (int)handler, 0); }
+/**
+ * @brief Sends a signal to a process.
+ * @param pid Process ID.
+ * @param sig_num Signal number.
+ */
 void sys_kill(int pid, int sig_num) { syscall(SYSCALL_KILL, pid, sig_num, 0); }
+/**
+ * @brief Returns from a signal handler.
+ */
 void sys_sigreturn(void) { syscall(SYSCALL_SIGRETURN, 0, 0, 0); }
+/**
+ * @brief Sets the user ID.
+ * @param uid User ID.
+ * @param password Password for authentication.
+ * @return System call status.
+ */
 int sys_setuid(int uid, const char *password) { return syscall(SYSCALL_SETUID, uid, (int)password, 0); }
+/**
+ * @brief Creates a directory.
+ * @param name Directory name.
+ * @param parent_id ID of the parent directory.
+ * @return System call status.
+ */
 int sys_mkdir(const char *name, int parent_id) { return syscall(26, (int)name, parent_id, 0); }
+/**
+ * @brief Lists directory contents.
+ * @param parent_id ID of the directory to list.
+ */
 void sys_ls_dir(int parent_id) { syscall(28, parent_id, 0, 0); }
+/**
+ * @brief Gets the directory ID.
+ * @param name Directory name.
+ * @param parent_id ID of the parent directory.
+ * @return Directory ID.
+ */
 int sys_get_dir_id(const char *name, int parent_id) { return syscall(29, (int)name, parent_id, 0); }
+/**
+ * @brief Creates a pipe.
+ * @param pipefd Array to store the read and write file descriptors.
+ * @return System call status.
+ */
 int pipe(int pipefd[2]) { return syscall(SYSCALL_PIPE, (int)pipefd, 0, 0); }
+/**
+ * @brief Duplicates a file descriptor.
+ * @param oldfd Old file descriptor.
+ * @param newfd New file descriptor.
+ * @return System call status.
+ */
 int dup2(int oldfd, int newfd) { return syscall(SYSCALL_DUP2, oldfd, newfd, 0); }
+/**
+ * @brief Closes a file descriptor.
+ * @param fd File descriptor to close.
+ * @return System call status.
+ */
 int sys_close(int fd) { return syscall(SYSCALL_CLOSE, fd, 0, 0); }
+/**
+ * @brief Prints the kernel ring buffer.
+ */
 void sys_dmesg(void) { syscall(SYSCALL_DMESG, 0, 0, 0); }
+/**
+ * @brief Opens a file.
+ * @param name File name.
+ * @param parent_id ID of the parent directory.
+ * @return File descriptor.
+ */
 int sys_open(const char *name, int parent_id) { return syscall(SYSCALL_OPEN, (int)name, parent_id, 0); }
-/* --- 4. ORTAM DEĞİŞKENLERİ (ENV) --- */
+/* --- 4. ENVIRONMENT VARIABLES (ENV) --- */
 char env_keys[20][32];
 char env_vals[20][64];
 int env_count = 0;
@@ -120,6 +304,12 @@ char current_path[64] = "/";
 int current_uid = -1;
 char current_username[32];
 
+/**
+ * @brief Sets an environment variable.
+ * 
+ * @param key Variable name.
+ * @param val Variable value.
+ */
 void set_env(const char *key, const char *val) {
     for(int i = 0; i < env_count; i++) {
         if(ft_strcmp(env_keys[i], key) == 0) { ft_strncpy(env_vals[i], val, 64); return; }
@@ -131,6 +321,12 @@ void set_env(const char *key, const char *val) {
     }
 }
 
+/**
+ * @brief Gets the value of an environment variable.
+ * 
+ * @param key Variable name.
+ * @return The value of the variable, or empty string if not found.
+ */
 char* get_env(const char *key) {
     for(int i = 0; i < env_count; i++) {
         if(ft_strcmp(env_keys[i], key) == 0) return env_vals[i];
@@ -138,11 +334,21 @@ char* get_env(const char *key) {
     return ""; 
 }
 
+/**
+ * @brief Custom signal handler for the shell.
+ */
 void my_custom_handler(void) {
-    printk("\n[!!!] MINISHELL KULLANICI SINYALI YAKALADI! [!!!]\n");
+    printk("\n[!!!] MINISHELL CAUGHT USER SIGNAL! [!!!]\n");
     sys_sigreturn();
 }
 
+/**
+ * @brief Reads a line from the user.
+ * 
+ * @param buf Buffer to store the line.
+ * @param hide Whether to hide characters (e.g., for passwords).
+ * @param max_len Maximum length of the buffer.
+ */
 void read_line(char *buf, int hide, int max_len) {
     int idx = 0;
     while (1) {
@@ -157,36 +363,46 @@ void read_line(char *buf, int hide, int max_len) {
     }
 }
 
+/**
+ * @brief Displays the help menu showing available commands.
+ */
 void show_help(void) {
-    printk("Mevcut komutlar:\n");
-    printk("  help       : Bu menuyu gosterir\n");
-    printk("  ls         : Disktekileri listeler\n");
-    printk("  cat [isim] : Dosya icerigini okur\n");
-    printk("  cat_raw [isim]   : VFS sifre cozucusunu atlar, diskin ham (HEX) dokumunu gosterir\n");
-    printk("  write [isim]: Diske yeni dosya yazar\n");
-    printk("  rm [isim]  : Dosyayi diskten kalici olarak siler\n");
-    printk("  mv [eski] [yeni] : Dosyanin adini degistirir\n");
-    printk("  clear      : Ekrani temizler\n");
-    printk("  layout tr  : Klavyeyi Turkce (QWERTY) yapar\n");
-    printk("  layout us  : Klavyeyi Ingilizce (QWERTY) yapar\n");
-    printk("  lockdown   : Sistemi GUVENLI MODA gecirir\n");
-    printk("  stack      : Kernel stack dokumunu (dump) gosterir\n");
-    printk("  meminfo    : RAM bilgisi verir\n");
-    printk("  testmalloc : Heap testi baslatir\n");
-    printk("  hexdump    : Adresdeki verileri dokumunu gosterir\n");
-    printk("  alarm      : CALLBACK testi\n");
-    printk("  panic      : ISR testi\n");
-    printk("  reboot     : Sistemi yeniden baslatir\n");
-    printk("  halt       : Islemciyi durdurur\n");
-    printk("  exec [elf] : Disaridan program calistirir\n");
-    printk("  kill [pid] [sig]: Belirtilen surece sinyal gonderir\n");
+    printk("Available commands:\n");
+    printk("  help       : Shows this menu\n");
+    printk("  ls         : Lists disk contents\n");
+    printk("  cat [name] : Reads file content\n");
+    printk("  cat_raw [name]   : Bypasses VFS decryption, shows raw (HEX) disk dump\n");
+    printk("  write [name]: Writes new file to disk\n");
+    printk("  rm [name]  : Permanently deletes file from disk\n");
+    printk("  mv [old] [new] : Renames a file\n");
+    printk("  clear      : Clears the screen\n");
+    printk("  layout tr  : Sets keyboard to Turkish (QWERTY)\n");
+    printk("  layout us  : Sets keyboard to English (QWERTY)\n");
+    printk("  lockdown   : Switches system to SAFE MODE\n");
+    printk("  stack      : Shows kernel stack dump\n");
+    printk("  meminfo    : Provides RAM info\n");
+    printk("  testmalloc : Starts heap test\n");
+    printk("  hexdump    : Shows data dump at address\n");
+    printk("  alarm      : CALLBACK test\n");
+    printk("  panic      : ISR test\n");
+    printk("  reboot     : Reboots the system\n");
+    printk("  halt       : Halts the processor\n");
+    printk("  exec [elf] : Executes an external program\n");
+    printk("  kill [pid] [sig]: Sends signal to specified process\n");
     printk("  --- 42 Minishell Built-in ---\n");
-    printk("  echo [-n]  : Metni ekrana basar ('>' destekli)\n");
-    printk("  pwd        : Gecerli dizini gosterir\n");
-    printk("  env        : Cevresel degiskenleri gosterir\n");
-    printk("  export     : Yeni degisken tanimlar (Orn: export DEG DEGER)\n");
+    printk("  echo [-n]  : Prints text to screen (supports \'>\')\n");
+    printk("  pwd        : Shows current directory\n");
+    printk("  env        : Shows environment variables\n");
+    printk("  export     : Defines new variable (e.g., export VAR VALUE)\n");
 }
 
+/**
+ * @brief Built-in cat command to display file contents.
+ * 
+ * @param args Array of command-line arguments.
+ * @param current_dir_id ID of the current directory.
+ * @return Exit status of the command.
+ */
 int builtin_cat(char **args, int current_dir_id) {
     int flag_n = 0, flag_b = 0, flag_E = 0, flag_s = 0, flag_T = 0;
     int file_args_start = 1;
@@ -202,7 +418,7 @@ int builtin_cat(char **args, int current_dir_id) {
                 else if (c == 'T') flag_T = 1;
                 else if (c == 'A') { flag_E = 1; flag_T = 1; }
                 else {
-                    printk("cat: Gecersiz secenek -- '"); 
+                    printk("cat: Invalid option -- \'"); 
                     char err[2] = {c, '\0'}; printk(err); printk("'\n");
                     return 1;
                 }
@@ -212,14 +428,14 @@ int builtin_cat(char **args, int current_dir_id) {
     }
 
     if (args[file_args_start] == 0) {
-        printk("cat: Lutfen okunacak bir dosya belirtin.\n");
+        printk("cat: Please specify a file to read.\n");
         return 1;
     }
 
     for (int i = file_args_start; args[i] != 0; i++) {
         int fd = sys_open(args[i], current_dir_id); 
         if (fd < 0) { 
-            printk("cat: "); printk(args[i]); printk(": Boyle bir dosya yok.\n"); 
+            printk("cat: "); printk(args[i]); printk(": No such file or directory.\n"); 
             continue; 
         }
         
@@ -231,7 +447,7 @@ int builtin_cat(char **args, int current_dir_id) {
         int is_new_line = 1;
         int consecutive_empty_lines = 0;
 
-        // [DÜZELTME]: printk artik sadece tek arguman (out_buf) aliyor. "%s" kaldirildi!
+        // [FIX]: printk now only takes a single argument (out_buf). "%s" removed!
         #define FLUSH_OUT() do { \
             if (out_idx > 0) { \
                 out_buf[out_idx] = '\0'; \
@@ -240,7 +456,7 @@ int builtin_cat(char **args, int current_dir_id) {
             } \
         } while(0)
 
-        // VFS'ten okuma dongusu
+        // Read loop from VFS
         while ((bytes_read = syscall(3 /* SYSCALL_READ */, fd, (int)buf, 256)) > 0) {
             for (int k = 0; k < bytes_read; k++) {
                 char c = buf[k];
@@ -257,7 +473,7 @@ int builtin_cat(char **args, int current_dir_id) {
 
                 if (out_idx > 240) { FLUSH_OUT(); }
 
-                // [DÜZELTME]: Numaralandirma satirinda "%s" kullanimi kaldirildi, ayri ayri basiliyor.
+                // [FIX]: Replaced "%s" usage in line numbering with separate prints.
                 if (is_new_line) {
                     if (flag_b) {
                         if (!is_empty_line) {
@@ -298,6 +514,12 @@ int builtin_cat(char **args, int current_dir_id) {
 }
 
 
+/**
+ * @brief Executes a built-in or external command.
+ * 
+ * @param args Array of command-line arguments.
+ * @param redirect_file File to redirect output to (if any).
+ */
 void execute_command(char **args, char *redirect_file) {
     if (!args[0]) return;
 
@@ -311,12 +533,12 @@ void execute_command(char **args, char *redirect_file) {
     }
     else if (ft_strcmp(args[0], "export") == 0) {
         if (args[1] && args[2]) { set_env(args[1], args[2]); last_exit_status = 0; } 
-        else { printk("Hata. Ornek: export DIL TR\n"); last_exit_status = 1; }
+        else { printk("Error. Example: export LANG EN\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "help") == 0) { show_help(); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "ls") == 0) { sys_ls_dir(current_dir_id); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "mkdir") == 0) {
-        if (args[1]) sys_mkdir(args[1], current_dir_id); else printk("Kullanim: mkdir <dizin>\n");
+        if (args[1]) sys_mkdir(args[1], current_dir_id); else printk("Usage: mkdir <directory>\n");
     }
     else if (ft_strcmp(args[0], "cd") == 0) {
         char *target = args[1];
@@ -337,7 +559,7 @@ void execute_command(char **args, char *redirect_file) {
         }
 
         if (invalid_path) {
-            printk("minishell: cd: "); printk(target); printk(": Boyle bir dosya ya da dizin yok\n");
+            printk("minishell: cd: "); printk(target); printk(": No such file or directory\n");
             last_exit_status = 1;
             return;
         }
@@ -371,7 +593,7 @@ void execute_command(char **args, char *redirect_file) {
             last_exit_status = 0;
         } 
         else { 
-            printk("cd: Boyle bir dizin yok: "); printk(target); printk("\n"); 
+            printk("cd: No such directory: "); printk(target); printk("\n"); 
             last_exit_status = 1; 
         }
     }
@@ -380,14 +602,14 @@ void execute_command(char **args, char *redirect_file) {
             char *content = args[2];
             for(int i = 2; args[i] != 0; i++) { if (args[i+1] != 0) args[i][ft_strlen(args[i])] = ' '; }
             int res = sys_create_file(args[1], content, current_dir_id);
-            if (res == E_OK) printk("Dosya yazildi!\n");
-        } else { printk("Kullanim: write <dosya> <icerik>\n"); }
+            if (res == E_OK) printk("File written successfully!\n");
+        } else { printk("Usage: write <file> <content>\n"); }
     }
     else if (ft_strcmp(args[0], "rm") == 0) {
-        if (args[1]) sys_delete_file(args[1], current_dir_id); else printk("Kullanim: rm <dosya>\n");
+        if (args[1]) sys_delete_file(args[1], current_dir_id); else printk("Usage: rm <file>\n");
     }
     else if (ft_strcmp(args[0], "mv") == 0) {
-        if (args[1] && args[2]) sys_rename_file(args[1], args[2], current_dir_id); else printk("Kullanim: mv <eski> <yeni>\n");
+        if (args[1] && args[2]) sys_rename_file(args[1], args[2], current_dir_id); else printk("Usage: mv <old> <new>\n");
     }
     else if (ft_strcmp(args[0], "layout") == 0) {
         if (args[1] && ft_strcmp(args[1], "tr") == 0) syscall(12, 1, 0, 0);
@@ -405,7 +627,7 @@ void execute_command(char **args, char *redirect_file) {
             char chunk[16];
             int bytes_read;
             int total_offset = 0;
-            printk("[BILGI] Klavye okuma modu. Cikmak icin ESC'ye basin...\n");
+            printk("[INFO] Keyboard read mode. Press ESC to exit...\n");
 
             while ((bytes_read = syscall(3, 0, (int)chunk, 16)) > 0) {
                 if (chunk[0] == 27 || chunk[0] == 4) {
@@ -454,7 +676,7 @@ void execute_command(char **args, char *redirect_file) {
     else if (ft_strcmp(args[0], "exec") == 0) { if (args[1]) syscall(5, (int)args[1], current_dir_id, 0); }
     else if (ft_strcmp(args[0], "exit") == 0) { printk("exit\n"); syscall(1, 0, 0, 0); while(1); }
     else if (ft_strcmp(args[0], "cat_raw") == 0) {
-        if (args[1]) sys_cat_raw_file(args[1], current_dir_id); else printk("Kullanim: cat_raw <dosya>\n");
+        if (args[1]) sys_cat_raw_file(args[1], current_dir_id); else printk("Usage: cat_raw <file>\n");
     }
     else if (ft_strcmp(args[0], "kill") == 0) {
         if (args[1] && args[2]) sys_kill(hex_to_int(args[1]), hex_to_int(args[2]));
@@ -467,7 +689,7 @@ void execute_command(char **args, char *redirect_file) {
             set_env("USER", "root"); 
             current_uid = 0;
             ft_strcpy(current_username, "root");
-            printk("\n[SISTEM] Yetkiler ROOT olarak yukseltildi!\n");
+            printk("\n[SYSTEM] Privileges elevated to ROOT!\n");
         }
     }
     else if (ft_strcmp(args[0], "dmesg") == 0) {
@@ -475,7 +697,7 @@ void execute_command(char **args, char *redirect_file) {
     }
     else {
         if (ft_strlen(args[0]) > 58) {
-            printk("minishell: komut adi cok uzun (max 58 karakter)\n");
+            printk("minishell: command name too long (max 58 characters)\n");
             last_exit_status = 127;
             return;
         }
@@ -509,6 +731,11 @@ void execute_command(char **args, char *redirect_file) {
     }
 }
 
+/**
+ * @brief Main entry point for the shell process.
+ * 
+ * Sets up environment, registers signals, and runs the command loop.
+ */
 void main(void) {
     char cmd_buf[256];
     char *args[32];
@@ -551,7 +778,7 @@ void main(void) {
         else printk(" $ ");
 
         int idx = 0;
-        while (1) {
+    while (1) {
             char c = get_keyboard_char();
             if (c == '\n' || c == '\r') { cmd_buf[idx] = '\0'; printk("\n"); break; } 
             else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } } 
@@ -626,7 +853,7 @@ void main(void) {
                             sys_close(pfd[1]);
                             dup2(pfd[0], 0); execute_command(pipe_args, 0); dup2(11, 0);
                             sys_close(pfd[0]);
-                        } else printk("Hata: Pipe olusturulamadi!\n");
+                        } else printk("Error: Failed to create pipe!\n");
                     } else {
                         execute_command(args, redirect_file);
                     }
@@ -646,6 +873,9 @@ void main(void) {
     }
 }
 
+/**
+ * @brief Initialization routine for the shell.
+ */
 void _start(void) {
     main();
     sys_exit();

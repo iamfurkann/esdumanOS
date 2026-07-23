@@ -5,6 +5,7 @@
 #include "stdio.h"
 #include "klog.h"
 #include "devfs.h"
+#include "errno.h"
 
 extern process_t tasks[];
 extern disk_file_entry_t dir_table[];
@@ -37,7 +38,7 @@ void print_hexdump(uint32_t addr, int lenght) {
 }
 
 int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
-    if (!path || !path[0]) return -1;
+    if (!path || !path[0]) return E_INVAL;
     
     int current_id = start_dir_id;
     int i = 0;
@@ -78,9 +79,15 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
                 else {
                     extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
                     int idx = fs_get_entry_idx(token, current_id);
-                    if (idx == -1) return -1; // Klasör yok!
+                    if (idx == -1) {
+                        klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Directory not found");
+                        return E_NOENT;
+                    }
                     
-                    if (dir_table[idx].file_type != 1) return -1;
+                    if (dir_table[idx].file_type != 1) {
+                        klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Path component is not a directory");
+                        return E_NOTDIR;
+                    }
                     current_id = dir_table[idx].entry_id;
                 }
             }
@@ -90,7 +97,8 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
         }
         i++;
     }
-    return -1;
+    klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Unknown error");
+    return E_NOENT;
 }
 
 int check_vfs_access(int entry_id, int needs_write) {

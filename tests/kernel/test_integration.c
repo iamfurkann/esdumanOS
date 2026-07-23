@@ -23,31 +23,46 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     return ret;
 }
 
+/**
+ * @brief Executes integration tests across multiple kernel components.
+ *
+ * This test suite verifies that separate, independently tested kernel subsystems 
+ * (like the Virtual File System, Process Loader, and ATA Disk Driver) interact 
+ * correctly when chained together in real-world workflows.
+ *
+ * Expected behavior:
+ * - File creation, deletion, and recreation sequences maintain VFS/disk consistency.
+ * - The Process Loader (ELF) can successfully parse and map binary files pulled 
+ *   directly from the VFS.
+ *
+ * Edge cases covered:
+ * - Executing VFS logic while the scheduler is explicitly paused.
+ * - Index fragmentation issues when recreating files with identical names.
+ */
 void run_integration_tests(void) {
     printk("\n--- Cross-Component Integration Tests ---\n");
     serial_print("\n--- Cross-Component Integration Tests ---\n");
 
-    // [CRITICAL FIX]: Since we bypassed Syscall, hardware interrupts remained disabled.
-    // We manually enable interrupts here for ATA disk and Timer to work!
     asm volatile("sti");
 
     extern int multitasking_enabled;
-    multitasking_enabled = 0; // Stop the Scheduler so it doesn't interrupt tests
+    multitasking_enabled = 0; 
 
     int old_sec_level = current_sec_level;
     current_sec_level = 0; 
 
-    // VFS CLEANUP (Delete only the files we created)
     fs_delete("int_test.txt", 0);
     fs_delete("dummy.elf", 0);
 
-    // Stack variables (Safe memory)
     char u_file[] = "int_test.txt";
     char u_data[] = "Integration Test Data";
     char u_elf_name[] = "dummy.elf";
     uint8_t u_elf_data[64];
 
-    // Direct Kernel VFS functions are used
+    // =========================================================================
+    // VFS-INT: Disk Writing, Deletion, and Recreation Integration
+    // =========================================================================
+    
     int res1 = fs_create_file(u_file, (uint8_t *)u_data, ft_strlen(u_data), 0); 
     KTEST_ASSERT(res1 >= 0, "[STRICT] VFS-INT: File written to disk successfully for the first time");
 
@@ -60,11 +75,12 @@ void run_integration_tests(void) {
     // =========================================================================
     // PROC-INT: Process Loader (ELF) and VFS Integration
     // =========================================================================
+    
     for (int i = 0; i < 64; i++) u_elf_data[i] = 0;
-    u_elf_data[0] = 0x7F; u_elf_data[1] = 'E'; u_elf_data[2] = 'L'; u_elf_data[3] = 'F'; 
-    u_elf_data[4] = 1;   
-    u_elf_data[16] = 2;  
-    u_elf_data[18] = 3;  
+    u_elf_data[0] = 0x7F; u_elf_data[1] = 'E'; u_elf_data[2] = 'L'; u_elf_data[3] = 'F'; // ELF Magic Bytes
+    u_elf_data[4] = 1;   // 32-bit architecture flag
+    u_elf_data[16] = 2;  // Executable file type
+    u_elf_data[18] = 3;  // Target machine (x86)
     
     int res4 = fs_create_file(u_elf_name, u_elf_data, 64, 0);
     KTEST_ASSERT(res4 >= 0, "[STRICT] PROC-INT: Valid minimal ELF written to disk for testing");
@@ -72,16 +88,14 @@ void run_integration_tests(void) {
     int p_idx = load_and_exec_elf(u_elf_name, 0);
     KTEST_ASSERT(p_idx >= 0, "[STRICT] PROC-INT: load_and_exec_elf read from disk and returned valid Array Index");
     
-    // [FIXED]: The following old ktest_syscall deletions were also updated with fs_delete
     fs_delete(u_file, 0);
     fs_delete(u_elf_name, 0);
     
-    // Destroy the fake (dummy) task
     extern process_t tasks[];
     if (p_idx >= 0 && p_idx < 16) { 
-        tasks[p_idx].state = 0;     // 0 = TASK_EMPTY
+        tasks[p_idx].state = 0;     // Force state back to TASK_EMPTY.
     }
 
     current_sec_level = old_sec_level;
-    multitasking_enabled = 1; // Restore system to normal
+    multitasking_enabled = 1; 
 }

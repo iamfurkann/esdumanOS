@@ -1,21 +1,37 @@
 // apps/hello.c
+/**
+ * @brief Performs a system call.
+ * 
+ * This function triggers a software interrupt (0x80) to switch to kernel mode
+ * and execute a system call.
+ * 
+ * @param num The system call number.
+ * @param arg1 The first argument for the system call.
+ * @param arg2 The second argument for the system call.
+ * @param arg3 The third argument for the system call.
+ * @return The result of the system call.
+ */
 int syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
     return ret;
 }
 
-// [DÜZELTME]: _start yerine main yapıldı!
+// [FIX]: Changed _start to main!
+/**
+ * @brief Main entry point for the hello process.
+ * 
+ * Demonstrates basic system call usage to print a message to standard output
+ * and gracefully terminate execution.
+ */
 void main(void) {
-    char *msg = "Merhaba! Ben /bin altindan calisan bagimsiz bir ELF programiyim!\n";
+    char *msg = "Hello! I am an independent ELF program running under /bin!\n";
     
     int len = 0;
     while(msg[len]) len++;
     
-    // Ekrana yaz (SYSCALL_WRITE)
     syscall(4, 1, (int)msg, len);
     
-    // Programi guvenlice kapat (SYSCALL_EXIT)
     syscall(1, 0, 0, 0);
     
     while(1);

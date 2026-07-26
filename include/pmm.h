@@ -12,16 +12,7 @@
 #define PAGE_SIZE 4096
 #endif
 
-/**
- * @brief Maximum number of frames that can be managed by the PMM.
- */
-#define PMM_FRAMES_COUNT   32768
 
-/**
- * @brief Size of the bitmap array in 32-bit words.
- * 32768 frames / 32 bits per word = 1024 words.
- */
-#define BITMAP_SIZE        1024
 
 /**
  * @brief Total physical memory assumption (128 MB).

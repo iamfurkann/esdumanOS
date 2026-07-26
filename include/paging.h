@@ -85,4 +85,10 @@ extern void load_page_directory(uint32_t* dir);
  */
 extern void enable_paging(void);
 
+
+// --- Added by Refactor Script ---
+extern uint32_t *page_directory;
+extern uint32_t clone_page_directory(void);
+extern void cleanup_process_memory(uint32_t cr3);
+
 #endif

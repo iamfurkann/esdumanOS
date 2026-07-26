@@ -541,59 +541,80 @@ void execute_command(char **args, char *redirect_file) {
         if (args[1]) sys_mkdir(args[1], current_dir_id); else printk("Usage: mkdir <directory>\n");
     }
     else if (ft_strcmp(args[0], "cd") == 0) {
+        static char old_path[256] = {0};
         char *target = args[1];
-        if (!target) target = "~";
-
-        int invalid_path = 0;
-        char *ptr = target;
-        while (*ptr) {
-            if (*ptr == '/' && *(ptr + 1) == '/') {
-                char *check = ptr;
-                while (*check == '/') check++; 
-                if (*check != '\0') {
-                    invalid_path = 1;
-                    break;
-                }
+        
+        // Handle cd without arguments or cd ~
+        if (!target || ft_strcmp(target, "~") == 0) {
+            target = get_env("HOME");
+            if (!target) target = "/";
+        }
+        // Handle cd -
+        else if (ft_strcmp(target, "-") == 0) {
+            if (old_path[0] == '\0') {
+                printk("minishell: cd: OLDPWD not set\n");
+                last_exit_status = 1;
+                return;
             }
-            ptr++;
+            target = old_path;
+            printk(target); printk("\n");
         }
 
-        if (invalid_path) {
-            printk("minishell: cd: "); printk(target); printk(": No such file or directory\n");
-            last_exit_status = 1;
-            return;
+        // 1. Construct raw absolute path
+        char raw_path[512];
+        if (target[0] == '/') {
+            ft_strcpy(raw_path, target);
+        } else {
+            ft_strcpy(raw_path, current_path);
+            if (ft_strcmp(current_path, "/") != 0) {
+                ft_strcpy(&raw_path[ft_strlen(raw_path)], "/");
+            }
+            ft_strcpy(&raw_path[ft_strlen(raw_path)], target);
         }
 
-        int new_id = sys_get_dir_id(target, current_dir_id);
-        if (new_id != -1) { 
-            current_dir_id = new_id;
+        // 2. Canonicalize the raw path (resolve . and .. and //)
+        char tokens[32][64];
+        int token_count = 0;
+        
+        int i = 0;
+        while (raw_path[i]) {
+            if (raw_path[i] == '/') { i++; continue; }
+            int j = 0;
+            while (raw_path[i] && raw_path[i] != '/') {
+                if (j < 63) tokens[token_count][j++] = raw_path[i];
+                i++;
+            }
+            tokens[token_count][j] = '\0';
             
-            if (target[0] == '/') {
-                ft_strcpy(current_path, target);
-            } else if (ft_strcmp(target, "~") == 0) {
-                ft_strcpy(current_path, get_env("HOME"));
-            } else if (ft_strcmp(target, "..") == 0) {
-                int len = ft_strlen(current_path);
-                while(len > 1 && current_path[len-1] != '/') len--;
-                if (len > 1) current_path[len-1] = '\0';
-                else current_path[1] = '\0'; // root
-            } else if (ft_strcmp(target, ".") != 0) {
-                if (ft_strcmp(current_path, "/") != 0) ft_strcpy(&current_path[ft_strlen(current_path)], "/");
-                ft_strcpy(&current_path[ft_strlen(current_path)], target);
+            if (ft_strcmp(tokens[token_count], ".") == 0) {
+                // skip .
+            } else if (ft_strcmp(tokens[token_count], "..") == 0) {
+                if (token_count > 0) token_count--; // pop
+            } else {
+                token_count++; // push
             }
+        }
 
-            int r = 0, w = 0;
-            while (current_path[r]) {
-                if (current_path[r] == '/' && current_path[r+1] == '/') { r++; continue; }
-                current_path[w++] = current_path[r++];
+        // Reconstruct canonical path
+        char canon_path[256];
+        canon_path[0] = '/';
+        canon_path[1] = '\0';
+        for (int k = 0; k < token_count; k++) {
+            if (k > 0 || canon_path[1] != '\0') {
+                ft_strcpy(&canon_path[ft_strlen(canon_path)], "/");
             }
-            current_path[w] = '\0';
-            if (w > 1 && current_path[w-1] == '/') current_path[w-1] = '\0';
+            ft_strcpy(&canon_path[ft_strlen(canon_path)], tokens[k]);
+        }
 
+        // 3. Try to change directory in kernel using the canonical path
+        int new_id = sys_get_dir_id(canon_path, 0); // use absolute path from root
+        if (new_id >= 0) { 
+            ft_strcpy(old_path, current_path); // Save current to OLDPWD
+            current_dir_id = new_id;
+            ft_strcpy(current_path, canon_path);
             last_exit_status = 0;
-        } 
-        else { 
-            printk("cd: No such directory: "); printk(target); printk("\n"); 
+        } else { 
+            printk("minishell: cd: "); printk(args[1] ? args[1] : "~"); printk(": No such file or directory\n"); 
             last_exit_status = 1; 
         }
     }
@@ -702,31 +723,27 @@ void execute_command(char **args, char *redirect_file) {
             return;
         }
 
-        char bin_path[64] = "/bin/";
-        ft_strcpy(&bin_path[5], args[0]);
+        // Try to execute it as an ELF from /bin/
+        char exec_path[64];
+        ft_strcpy(exec_path, "/bin/");
+        ft_strcpy(&exec_path[5], args[0]);
 
-        char full_cmd[128];
-        int idx = 0;
-        for (int i = 0; args[i] != 0; i++) {
-            int j = 0;
-            while (args[i][j]) { 
-                if (idx < 126) full_cmd[idx++] = args[i][j++]; 
-                else break;
-            }
-            if (args[i+1] != 0 && idx < 126) full_cmd[idx++] = ' ';
+        char arg_str[256];
+        for(int k=0; k<256; k++) arg_str[k] = '\0';
+        
+        ft_strcpy(arg_str, current_path); // Pass CWD as first implicit argument
+
+        for(int i = 1; args[i] != 0; i++) {
+            ft_strcpy(&arg_str[ft_strlen(arg_str)], " ");
+            ft_strcpy(&arg_str[ft_strlen(arg_str)], args[i]);
         }
-        full_cmd[idx] = '\0';
 
-        int fd = sys_open(bin_path, current_dir_id);
-        if (fd >= 0) {
-            sys_close(fd); 
-            int res = syscall(5, (int)bin_path, current_dir_id, (int)full_cmd); 
-            if (res == -1) last_exit_status = 126; 
-            else last_exit_status = 0; 
-        } 
-        else {
+        int exec_res = syscall(5, (int)exec_path, current_dir_id, (int)arg_str); // SYSCALL_EXEC
+        if (exec_res < 0) {
             printk("minishell: command not found: "); printk(args[0]); printk("\n");
             last_exit_status = 127;
+        } else {
+            last_exit_status = 0;
         }
     }
 }

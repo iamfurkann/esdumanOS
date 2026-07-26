@@ -5,11 +5,11 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "types.h"
+#include <stdio.h>
 
 // Declare printf externally to print logs to the Ubuntu terminal:
-extern int printf(const char *format, ...);
-
 // =========================================================================
+extern int printf(const char *format, ...);
 // MOCKING: Custom Assert Macro
 // Custom assertion to avoid dependency on the host's <assert.h>.
 // =========================================================================

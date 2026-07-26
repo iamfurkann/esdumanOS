@@ -1,15 +1,22 @@
+/*
+ * File: syscall.c
+ * Purpose: Contains system calls and related utilities.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "types.h"
+#include "errno.h"
 #include "arch.h"
 #include "registers.h"
 #include "stdio.h"
 #include "syscall.h"
 #include "syscalls_internal.h"
-
-extern void terminal_initialize(void);
-extern void restore_signal_context(arch_regs_t *regs);
-extern void check_and_deliver_signals(arch_regs_t *regs);
-
-
+#include "process.h"
+#include "tty.h"
+#include "signal.h"
+/**
+ * @brief Function syscall_handler
+ */
 void syscall_handler(arch_regs_t *regs) {
     asm volatile("sti");
     
@@ -73,8 +80,8 @@ void syscall_handler(arch_regs_t *regs) {
             break;
 
         default:
-            printk("Bilinmeyen Syscall Numarasi: %d\n", syscall_num);
-            regs->eax = -1;
+            printk("Unknown Syscall Number: %d\n", syscall_num);
+            regs->eax = E_NOSYS;
             break;
     }
     check_and_deliver_signals(regs);

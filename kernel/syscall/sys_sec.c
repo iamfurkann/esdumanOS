@@ -1,3 +1,9 @@
+/*
+ * File: sys_sec.c
+ * Purpose: Contains system calls and related utilities.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "syscalls_internal.h"
 #include "types.h"
 #include "arch.h"
@@ -9,31 +15,25 @@
 #include "errno.h"
 #include "klog.h"
 #include "keyboard.h"
+#include "bcache.h"
+#include "kernel.h"
+#include "rtc.h"
 
-extern process_t tasks[];
-extern security_level_t current_sec_level; 
-extern int current_layout;
-
-extern void set_security_level(security_level_t level);
-extern void dump_klog(void);
-extern uint32_t timer_get_ticks(void);
-extern int verify_user_password(const char *username, const char *password);
-extern void bcache_flush(void);
-
-uint32_t auth_fail_ticks[16] = {0};
-
+/**
+ * @brief Function sys_auth
+ */
 void sys_auth(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, 64) || 
-        !validate_string_pointer((const char *)regs->ecx, 64)) { 
-        regs->eax = -1; 
+    if (!validate_string_pointer((const char *)regs->ebx, MAX_FILENAME) || 
+        !validate_string_pointer((const char *)regs->ecx, MAX_FILENAME)) { 
+        regs->eax = E_FAULT; 
         return; 
     }
 
     uint32_t current_ticks = timer_get_ticks();
 
-    if (auth_fail_ticks[current_task] != 0 && (current_ticks - auth_fail_ticks[current_task]) < 300) {
-        klog(LOG_LEVEL_WARN, "AUTH", "Brute-force tespit edildi! Yeni deneme icin bekleyin.");
-        regs->eax = -1; 
+    if (current_task->auth_fail_ticks != 0 && (current_ticks - current_task->auth_fail_ticks) < 300) {
+        klog(LOG_LEVEL_WARN, "AUTH", "Brute-force detected! Wait before trying again.");
+        regs->eax = E_FAULT; 
         return;
     }
 
@@ -50,22 +50,25 @@ void sys_auth(arch_regs_t *regs) {
     int auth_res = verify_user_password(user, pass);
     
     if (auth_res >= 0) {
-        auth_fail_ticks[current_task] = 0;
+        current_task->auth_fail_ticks = 0;
         regs->eax = auth_res;
     } else {
-        auth_fail_ticks[current_task] = timer_get_ticks();
-        regs->eax = -1;
+        current_task->auth_fail_ticks = timer_get_ticks();
+        regs->eax = E_FAULT;
     }
 }
 
+/**
+ * @brief Function sys_setuid_call
+ */
 void sys_setuid_call(arch_regs_t *regs) {
     uint32_t requested_uid = (uint32_t)regs->ebx;
     char *provided_password = (char *)regs->ecx;
 
-    if (tasks[current_task].uid == 0) {
-        tasks[current_task].uid = requested_uid;
+    if (current_task->uid == 0) {
+        current_task->uid = requested_uid;
         regs->eax = E_OK; 
-        klog_int(LOG_LEVEL_INFO, "AUTH", "SUDO: Yetki degistirildi. Yeni UID", requested_uid);
+        klog_int(LOG_LEVEL_INFO, "AUTH", "SUDO: Privilege changed. New UID", requested_uid);
         return;
     }
 
@@ -77,8 +80,8 @@ void sys_setuid_call(arch_regs_t *regs) {
 
         uint32_t current_ticks = timer_get_ticks();
         
-        if (auth_fail_ticks[current_task] != 0 && (current_ticks - auth_fail_ticks[current_task]) < 300) {
-            klog(LOG_LEVEL_WARN, "AUTH", "SUDO Brute-force korumasi! Lutfen 3 saniye bekleyin.");
+        if (current_task->auth_fail_ticks != 0 && (current_ticks - current_task->auth_fail_ticks) < 300) {
+            klog(LOG_LEVEL_WARN, "AUTH", "SUDO Brute-force protection! Please wait 3 seconds.");
             regs->eax = E_ACCES; 
             return;
         }
@@ -92,13 +95,13 @@ void sys_setuid_call(arch_regs_t *regs) {
         int auth_uid = verify_user_password("root", provided_password);
 
         if (auth_uid == 0) { 
-            tasks[current_task].uid = 0; 
-            auth_fail_ticks[current_task] = 0;
+            current_task->uid = 0; 
+            current_task->auth_fail_ticks = 0;
             regs->eax = E_OK;
-            klog_int(LOG_LEVEL_INFO, "AUTH", "Parola dogrulandi. ROOT yetkisine yukseltildi. PID", current_task);
+            klog_int(LOG_LEVEL_INFO, "AUTH", "Password verified. Escalated to ROOT privilege. PID", current_task->pid);
         } else {
-            auth_fail_ticks[current_task] = timer_get_ticks(); 
-            klog(LOG_LEVEL_WARN, "AUTH", "Yanlis ROOT parolasi!");
+            current_task->auth_fail_ticks = timer_get_ticks(); 
+            klog(LOG_LEVEL_WARN, "AUTH", "Incorrect ROOT password!");
             regs->eax = E_ACCES;
         }
         return;
@@ -107,9 +110,12 @@ void sys_setuid_call(arch_regs_t *regs) {
     regs->eax = E_PERM; 
 }
 
+/**
+ * @brief Function sys_set_layout
+ */
 void sys_set_layout(arch_regs_t *regs) {
-    if (tasks[current_task].uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: Klavye duzeni icin ROOT yetkisi gereklidir.");
+    if (current_task->uid != 0) { 
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for keyboard layout.");
         regs->eax = E_PERM; 
         return; 
     }
@@ -117,9 +123,12 @@ void sys_set_layout(arch_regs_t *regs) {
     regs->eax = 0;
 }
 
+/**
+ * @brief Function sys_set_sec_level
+ */
 void sys_set_sec_level(arch_regs_t *regs) {
-    if (tasks[current_task].uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: Guvenlik seviyesi icin ROOT yetkisi gereklidir.");
+    if (current_task->uid != 0) { 
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for security level.");
         regs->eax = E_PERM; 
         return; 
     }
@@ -127,27 +136,33 @@ void sys_set_sec_level(arch_regs_t *regs) {
     regs->eax = 0;
 }
 
+/**
+ * @brief Function sys_lockdown
+ */
 void sys_lockdown(arch_regs_t *regs) {
-    if (tasks[current_task].uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: Lockdown icin ROOT yetkisi gereklidir.");
+    if (current_task->uid != 0) { 
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for lockdown.");
         regs->eax = E_PERM; 
         return; 
     }
     
     if (current_sec_level >= SEC_LEVEL_LOCKDOWN) {
-        printk("Sistem zaten SECURE MODE altinda!\n");
+        printk("System is already in SECURE MODE!\n");
     } else {
         set_security_level(SEC_LEVEL_LOCKDOWN);
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-        printk("\n[DIKKAT] KERNEL KILITLENDI (SECURE MODE AKTIF)!\n\n");
+        printk("\n[WARNING] KERNEL LOCKED (SECURE MODE ACTIVE)!\n\n");
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     }
     regs->eax = 0;
 }
 
+/**
+ * @brief Function sys_panic
+ */
 void sys_panic(arch_regs_t *regs) {
-    if (tasks[current_task].uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: Kernel Panic tetiklemek icin ROOT yetkisi gereklidir.");
+    if (current_task->uid != 0) { 
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to trigger Kernel Panic.");
         regs->eax = E_PERM; 
         return; 
     }
@@ -155,9 +170,12 @@ void sys_panic(arch_regs_t *regs) {
     regs->eax = 0;
 }
 
+/**
+ * @brief Function sys_reboot
+ */
 void sys_reboot(arch_regs_t *regs) {
-    if (tasks[current_task].uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: Yeniden baslatma icin ROOT yetkisi gereklidir.");
+    if (current_task->uid != 0) { 
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to reboot.");
         regs->eax = E_PERM; 
         return; 
     }
@@ -167,25 +185,31 @@ void sys_reboot(arch_regs_t *regs) {
     regs->eax = 0;
 }
 
+/**
+ * @brief Function sys_halt
+ */
 void sys_halt(arch_regs_t *regs) {
-    if (tasks[current_task].uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: Sistemi durdurmak icin ROOT yetkisi gereklidir.");
+    if (current_task->uid != 0) { 
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to halt system.");
         regs->eax = E_PERM; 
         return; 
     }
     bcache_flush(); 
     
-    printk("Sistem guvenli bir sekilde durduruldu.\n"); 
+    printk("System halted safely.\n"); 
     asm volatile("cli; hlt");
     regs->eax = 0;
 }
 
+/**
+ * @brief Function sys_dmesg
+ */
 void sys_dmesg(arch_regs_t *regs) {
-    if (current_task >= 0 && tasks[current_task].uid == 0) {
+    if (current_task != 0 && current_task->uid == 0) {
         dump_klog();
         regs->eax = 0;
     } else {
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Erisim Engellendi: DMESG okumak icin ROOT yetkisi gereklidir.");
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to read DMESG.");
         regs->eax = E_PERM; 
     }
 }

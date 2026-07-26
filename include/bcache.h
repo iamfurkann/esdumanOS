@@ -48,4 +48,8 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer);
  */
 void bcache_flush(void);
 
+
+// --- Added by Refactor Script 2 ---
+extern uint32_t fs_max_sectors;
+
 #endif // BCACHE_H

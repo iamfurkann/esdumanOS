@@ -1,12 +1,12 @@
 ifndef ESDUMAN_KEY
-$(warning DIKKAT: ESDUMAN_KEY ortam degiskeni tanimli degil! Varsayilan, guvensiz test anahtari kullanilacak.)
-ESDUMAN_KEY ?= TEST_KEY_123456789012345678901234
+$(error DIKKAT: ESDUMAN_KEY ortam degiskeni tanimli degil! Guvenlik sebebiyle derleme durduruldu.)
 endif
 
 ARCH ?= x86
 
 CORE_OBJS = kernel/core/kernel.o \
 			kernel/core/klog.o \
+			kernel/core/uaccess.o \
             kernel/proc/signal.o \
             kernel/proc/process.o \
 			kernel/proc/pipe.o \
@@ -19,11 +19,22 @@ CORE_OBJS = kernel/core/kernel.o \
 			kernel/syscall/sys_utils.o \
 			kernel/security/passwd.o \
 			kernel/security/security.o \
+			kernel/security/stack_protect.o \
             src/resources/init_elf_data.o \
             src/resources/hello_elf_data.o \
             src/resources/clear_elf_data.o \
             src/resources/echo_elf_data.o \
 			src/resources/sh_elf_data.o \
+			src/resources/touch_elf_data.o \
+			src/resources/rm_elf_data.o \
+			src/resources/mv_elf_data.o \
+			src/resources/cp_elf_data.o \
+			src/resources/free_elf_data.o \
+			src/resources/whoami_elf_data.o \
+			src/resources/kill_elf_data.o \
+			src/resources/grep_elf_data.o \
+			src/resources/head_elf_data.o \
+			src/resources/date_elf_data.o \
 			fs/bcache.o \
             fs/vfs.o \
             fs/crypto_fs.o \
@@ -36,7 +47,9 @@ CORE_OBJS = kernel/core/kernel.o \
 			lib/utils.o \
 			lib/utils2.o \
             crypto/aes.o \
-			crypto/sha256.o
+			crypto/sha256.o \
+			crypto/hmac.o \
+			crypto/chacha20.o
 
 TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_string.o \
@@ -65,7 +78,7 @@ ifeq ($(ARCH), x86)
     LD = ld
     AR = ar
 
-    CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-stack-protector -Wall -Wextra -I include -I src/libc -c -DARCH_X86 -MMD -MP
+    CFLAGS = -m32 -nostdlib -nodefaultlibs -fno-builtin -fno-exceptions -fno-pic -fno-pie -Wall -Wextra -Iinclude -O2 -I src/libc -c -DARCH_X86 -MMD -MP -DKERNEL_SALT=\"$(ESDUMAN_KEY)\"
     ASFLAGS = -f elf32
     LDFLAGS = -m elf_i386 -T arch/x86/linker.ld -z noexecstack
 
@@ -98,7 +111,7 @@ else ifeq ($(ARCH), riscv64)
     LD = riscv64-unknown-elf-ld
     AR = riscv64-unknown-elf-ar
 
-    CFLAGS = -march=rv64imac -mabi=lp64 -mcmodel=medany -nostdlib -nodefaultlibs -fno-builtin -Wall -Wextra -I include -I src/libc -c -DARCH_RISCV64
+    CFLAGS = -march=rv64imac -mabi=lp64 -mcmodel=medany -nostdlib -nodefaultlibs -fno-builtin -Wall -Wextra -I include -I src/libc -c -DARCH_RISCV64 -DKERNEL_SALT=\"$(ESDUMAN_KEY)\"
     ASFLAGS = -march=rv64imac -mabi=lp64
     LDFLAGS = -T arch/riscv/linker.ld
 
@@ -129,8 +142,12 @@ LIBC = lib/libc.a
 
 all: $(ISO)
 
-$(LIBC):
+.PHONY: force_libc
+
+$(LIBC): force_libc
 	$(MAKE) -C lib
+
+force_libc:
 
 %.o: %.asm
 	$(AS) $(ASFLAGS) $< -o $@
@@ -169,11 +186,42 @@ apps/bin/echo.elf: apps/bin/echo.c
 apps/bin/sh.elf: apps/bin/sh.c
 	$(CC) $(USER_CFLAGS) apps/bin/sh.c -o apps/bin/sh.elf
 
+apps/bin/touch.elf: apps/bin/touch.c
+	$(CC) $(USER_CFLAGS) apps/bin/touch.c -o apps/bin/touch.elf
+
+apps/bin/rm.elf: apps/bin/rm.c
+	$(CC) $(USER_CFLAGS) apps/bin/rm.c -o apps/bin/rm.elf
+
+apps/bin/mv.elf: apps/bin/mv.c
+	$(CC) $(USER_CFLAGS) apps/bin/mv.c -o apps/bin/mv.elf
+
+apps/bin/cp.elf: apps/bin/cp.c
+	$(CC) $(USER_CFLAGS) apps/bin/cp.c -o apps/bin/cp.elf
+
+apps/bin/free.elf: apps/bin/free.c
+	$(CC) $(USER_CFLAGS) apps/bin/free.c -o apps/bin/free.elf
+
+apps/bin/whoami.elf: apps/bin/whoami.c
+	$(CC) $(USER_CFLAGS) apps/bin/whoami.c -o apps/bin/whoami.elf
+
+apps/bin/kill.elf: apps/bin/kill.c
+	$(CC) $(USER_CFLAGS) apps/bin/kill.c -o apps/bin/kill.elf
+
+apps/bin/grep.elf: apps/bin/grep.c
+	$(CC) $(USER_CFLAGS) apps/bin/grep.c -o apps/bin/grep.elf
+
+apps/bin/head.elf: apps/bin/head.c
+	$(CC) $(USER_CFLAGS) apps/bin/head.c -o apps/bin/head.elf
+
+apps/bin/date.elf: apps/bin/date.c
+	$(CC) $(USER_CFLAGS) apps/bin/date.c -o apps/bin/date.elf
+
+
 tools/encrypt_tool: tools/encrypt_tool.c
 	gcc tools/encrypt_tool.c -o tools/encrypt_tool -lcrypto
 
 apps/init_encrypted.elf: apps/init.elf tools/encrypt_tool
-	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_KEY)
+	./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf 1234 $(ESDUMAN_KEY)
 
 src/resources/init_elf_data.c: apps/init_encrypted.elf
 	@mkdir -p src/resources
@@ -182,27 +230,88 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 
 src/resources/hello_elf_data.c: hello.elf
 	@mkdir -p src/resources
-	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@xxd -i apps/hello_encrypted.elf | \
 	sed 's/apps_hello_encrypted_elf/hello_elf/g' > src/resources/hello_elf_data.c
 
 src/resources/clear_elf_data.c: apps/bin/clear.elf tools/encrypt_tool
 	@mkdir -p src/resources
-	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@xxd -i apps/bin/clear_encrypted.elf | \
 	sed 's/apps_bin_clear_encrypted_elf/clear_elf/g' > src/resources/clear_elf_data.c
 
 src/resources/echo_elf_data.c: apps/bin/echo.elf tools/encrypt_tool
 	@mkdir -p src/resources
-	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@xxd -i apps/bin/echo_encrypted.elf | \
 	sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
 
 src/resources/sh_elf_data.c: apps/bin/sh.elf tools/encrypt_tool
 	@mkdir -p src/resources
-	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@xxd -i apps/bin/sh_encrypted.elf | \
 	sed 's/apps_bin_sh_encrypted_elf/sh_elf/g' > src/resources/sh_elf_data.c
+
+src/resources/touch_elf_data.c: apps/bin/touch.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/touch.elf apps/bin/touch_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/touch_encrypted.elf | \
+	sed 's/apps_bin_touch_encrypted_elf/touch_elf/g' > src/resources/touch_elf_data.c
+
+src/resources/rm_elf_data.c: apps/bin/rm.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/rm.elf apps/bin/rm_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/rm_encrypted.elf | \
+	sed 's/apps_bin_rm_encrypted_elf/rm_elf/g' > src/resources/rm_elf_data.c
+
+src/resources/mv_elf_data.c: apps/bin/mv.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/mv.elf apps/bin/mv_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/mv_encrypted.elf | \
+	sed 's/apps_bin_mv_encrypted_elf/mv_elf/g' > src/resources/mv_elf_data.c
+
+src/resources/cp_elf_data.c: apps/bin/cp.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/cp.elf apps/bin/cp_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/cp_encrypted.elf | \
+	sed 's/apps_bin_cp_encrypted_elf/cp_elf/g' > src/resources/cp_elf_data.c
+
+src/resources/free_elf_data.c: apps/bin/free.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/free.elf apps/bin/free_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/free_encrypted.elf | \
+	sed 's/apps_bin_free_encrypted_elf/free_elf/g' > src/resources/free_elf_data.c
+
+src/resources/whoami_elf_data.c: apps/bin/whoami.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/whoami.elf apps/bin/whoami_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/whoami_encrypted.elf | \
+	sed 's/apps_bin_whoami_encrypted_elf/whoami_elf/g' > src/resources/whoami_elf_data.c
+
+src/resources/kill_elf_data.c: apps/bin/kill.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/kill.elf apps/bin/kill_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/kill_encrypted.elf | \
+	sed 's/apps_bin_kill_encrypted_elf/kill_elf/g' > src/resources/kill_elf_data.c
+
+src/resources/grep_elf_data.c: apps/bin/grep.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/grep.elf apps/bin/grep_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/grep_encrypted.elf | \
+	sed 's/apps_bin_grep_encrypted_elf/grep_elf/g' > src/resources/grep_elf_data.c
+
+src/resources/head_elf_data.c: apps/bin/head.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/head.elf apps/bin/head_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/head_encrypted.elf | \
+	sed 's/apps_bin_head_encrypted_elf/head_elf/g' > src/resources/head_elf_data.c
+
+src/resources/date_elf_data.c: apps/bin/date.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/date.elf apps/bin/date_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@xxd -i apps/bin/date_encrypted.elf | \
+	sed 's/apps_bin_date_encrypted_elf/date_elf/g' > src/resources/date_elf_data.c
+
 
 test:
 	@echo "--- Host Unit Tests Calistiriliyor ---"
@@ -228,6 +337,7 @@ test_kernel: $(TEST_BIN) hello.elf
 	@if $(QEMU) -kernel $(TEST_BIN) -append "kernel_pass=selftest" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-d int,cpu_reset -D qemu.log \
 		-serial stdio -display none; then \
 		echo "HATA: QEMU beklenmedik sekilde kapandi!"; exit 1; \
 	else \
@@ -250,11 +360,11 @@ fuzz:
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
 	@echo "--- [1/4] ELF dosyalari sifreli pakete donusturuluyor..."
-	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_KEY)
-	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_KEY)
-	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf $(ESDUMAN_KEY)
-	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf $(ESDUMAN_KEY)
-	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf 1234 $(ESDUMAN_KEY)
+	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf 1234 $(ESDUMAN_KEY)
 
 	@echo "--- [2/4] C veri dosyalari uretiliyor..."
 	@mkdir -p src/resources

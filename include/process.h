@@ -49,7 +49,7 @@ typedef struct {
 /**
  * @brief Maximum number of file descriptors a single task can have open.
  */
-#define MAX_FD_PER_TASK 16
+#define MAX_FD_PER_TASK 32
 
 /**
  * @brief Macros defining different types of file descriptors.
@@ -74,12 +74,13 @@ typedef struct {
  * @brief Process Control Block (PCB) structure.
  * Contains all the necessary context, state, and resources for a task.
  */
-typedef struct {
+typedef struct process_s {
     int pid;
     int parent_pid;
     uint32_t uid;
     task_state_t state;
     wait_reason_t wait_reason;
+    mutex_t *wait_mutex;
     arch_regs_t regs;
     arch_paddr_t page_directory;
     uint8_t base_priority; 
@@ -97,12 +98,16 @@ typedef struct {
 
     uint8_t kstack[4096] __attribute__((aligned(16)));
     mutex_t *held_mutex;
-    file_descriptor_t fd_table[MAX_FD_PER_TASK];
+    file_descriptor_t *fd_table;
+    uint32_t fd_table_size;
 
     char cmd_args[128];
 
     uint8_t fpu_state[512] __attribute__((aligned(16)));
     int fpu_initialized;
+    uint32_t auth_fail_ticks;
+    struct process_s *next;
+    struct process_s *prev;
 } process_t;
 
 /**
@@ -115,7 +120,7 @@ typedef struct {
  */
 typedef struct {
     int cpu_id;               // Core's hardware ID (Local APIC ID)
-    int active_task;         // Task currently running on this processor
+    process_t *active_task;         // Task currently running on this processor
     int is_bsp;               // Is this processor the Boot Strap Processor (Main Processor)?
     uint32_t local_tss_addr;  // Each core must have its own TSS
 } cpu_state_t;
@@ -136,7 +141,8 @@ static inline int get_current_cpu_id(void) {
  */
 #define current_task (cpus[get_current_cpu_id()].active_task)
 
-extern process_t tasks[MAX_TASKS];
+extern process_t *task_list_head;
+extern process_t *task_list_tail;
 extern int multitasking_enabled;
 extern int foreground_task;
 
@@ -217,5 +223,29 @@ void init_multitasking(void);
  * @param regs Pointer to the saved registers of the current task.
  */
 void check_and_deliver_signals(arch_regs_t *regs);
+
+
+// --- Added by Refactor Script ---
+extern void process_pending_kernel_timers(void);
+extern void sleep_current_task(arch_regs_t *regs, int reason);
+extern void wakeup_tasks(int reason);
+extern int check_free_task_slot(void);
+extern void exit_current_process(arch_regs_t *regs);
+extern void set_task_priority(int pid, uint8_t priority);
+extern int send_message(int to_pid, uint32_t payload);
+extern int receive_message(uint32_t *sender_out, uint32_t *payload_out);
+extern int schedule_kernel_timer(int ticks, int pid);
+
+typedef struct {
+    int readers;
+    int writer_active;
+    mutex_t mutex;
+} rwlock_t;
+
+void rwlock_init(rwlock_t *lock);
+void rwlock_acquire_read(rwlock_t *lock, arch_regs_t *regs);
+void rwlock_release_read(rwlock_t *lock);
+void rwlock_acquire_write(rwlock_t *lock, arch_regs_t *regs);
+void rwlock_release_write(rwlock_t *lock);
 
 #endif

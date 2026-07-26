@@ -12,4 +12,11 @@ extern unsigned char init_elf[];
  */
 extern unsigned int init_elf_len;
 
+
+// --- Added by Refactor Script ---
+extern uint8_t sh_elf[];
+extern uint8_t hello_elf[];
+extern uint8_t clear_elf[];
+extern uint8_t echo_elf[];
+
 #endif

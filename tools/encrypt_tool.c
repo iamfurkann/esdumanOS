@@ -1,3 +1,9 @@
+/*
+ * File: encrypt_tool.c
+ * Purpose: Tool for encrypting ELF files using AES-256 and SHA-256.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,10 +11,13 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
-// [GÜVENLİK YAMASI]: Kernel tarafındaki ile aynı "Ham (Binary)" SHA-256 fonksiyonu eklendi
+#include <openssl/hmac.h>
+
+/**
+ * @brief Computes the raw (binary) SHA-256 hash of the given input.
+ */
 void sha256_binary_local(const unsigned char *input, size_t input_len, unsigned char *output_binary) {
     unsigned int lengthOfHash = 0;
-    
     EVP_MD_CTX *context = EVP_MD_CTX_new();
     EVP_DigestInit_ex(context, EVP_sha256(), NULL);
     EVP_DigestUpdate(context, input, input_len);
@@ -16,16 +25,32 @@ void sha256_binary_local(const unsigned char *input, size_t input_len, unsigned 
     EVP_MD_CTX_free(context);
 }
 
+/**
+ * @brief Computes the HMAC-SHA256 hash of the given input to match the kernel side.
+ */
+void hmac_sha256_local(const unsigned char *key, size_t key_len, const unsigned char *input, size_t input_len, unsigned char *output_binary) {
+    unsigned int lengthOfHash = 0;
+    HMAC(EVP_sha256(), key, key_len, input, input_len, output_binary, &lengthOfHash);
+}
+
+/**
+ * @brief Main function of the encrypt tool.
+ * 
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @return 0 on success, 1 on error.
+ */
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        printf("Kullanim: %s <giris_elf> <cikis_sifreli_elf> <passphrase>\n", argv[0]);
+    if (argc < 5) {
+        printf("Usage: %s <input_elf> <output_encrypted_elf> <passphrase> <salt>\n", argv[0]);
         return 1;
     }
     
     char *passphrase = argv[3];
+    char *host_salt = argv[4];
 
     FILE *fin = fopen(argv[1], "rb");
-    if (!fin) { perror("Giris dosyasi acilamadi"); return 1; }
+    if (!fin) { perror("Failed to open input file"); return 1; }
     fseek(fin, 0, SEEK_END);
     long file_size = ftell(fin);
     fseek(fin, 0, SEEK_SET);
@@ -34,29 +59,29 @@ int main(int argc, char **argv) {
     fread(file_data, 1, file_size, fin);
     fclose(fin);
 
-    const char *host_salt = "esdumanOS_Super_Secret_Salt_42!";
+
     char buffer[128] = {0};
     int idx = 0;
 
-    // Şifre ve Tuzu Birleştir
+    // Combine Password and Salt
     while(passphrase[idx] && idx < 64) { buffer[idx] = passphrase[idx]; idx++; }
     int s_idx = 0;
     while(host_salt[s_idx] && idx < 127) { buffer[idx++] = host_salt[s_idx++]; }
     buffer[idx] = '\0';
 
-    // [GÜVENLİK YAMASI]: KDF Mantığı Kernel ile Birebir Aynı (Raw Binary Entropy)
+    // [SECURITY PATCH]: KDF logic is exactly the same as the kernel (Raw Binary Entropy)
     uint8_t raw_hash[32];
     uint32_t buf_len = strlen(buffer);
     
-    // 1. İlk Tur (Şifre + Tuz)
+    // 1. First round (Password + Salt)
     sha256_binary_local((const unsigned char*)buffer, buf_len, raw_hash);
     
-    // 2. KDF İterasyonları (5000 Tur - Hex'e çevirmeden doğrudan binary hash)
+    // 2. KDF iterations (5000 rounds - direct binary hash without hex conversion)
     for(int round = 0; round < 5000; round++) {
         sha256_binary_local(raw_hash, 32, raw_hash);
     }
 
-    // 3. Üretilen anahtarı AES Master Key olarak ata
+    // 3. Assign the generated key as AES Master Key
     uint8_t master_key[32];
     for(int i = 0; i < 32; i++) {
         master_key[i] = raw_hash[i];
@@ -70,14 +95,14 @@ int main(int argc, char **argv) {
     hdr[0] = 0x53414645; // "SAFE" Magic Number
     hdr[1] = (uint32_t)file_size;
     
-    sha256_binary_local(file_data, file_size, (unsigned char *)&hdr[2]);
+    hmac_sha256_local(master_key, 32, file_data, file_size, (unsigned char *)&hdr[2]);
 
     memcpy(padded_data + 40, file_data, file_size);
     free(file_data);
 
     uint8_t iv[16];
     if (!RAND_bytes(iv, 16)) {
-        printf("HATA: Kriptografik olarak guvenli rastgele IV uretilemedi!\n");
+        printf("ERROR: Failed to generate cryptographically secure random IV!\n");
         free(padded_data);
         return 1;
     }
@@ -101,6 +126,6 @@ int main(int argc, char **argv) {
     free(padded_data);
     free(encrypted_data);
 
-    printf("[+] %s basariyla AES-256 ile (5000-Round Binary SHA256 KDF) sifrelendi.\n", argv[1]);
+    printf("[+] %s successfully encrypted with AES-256 (5000-Round Binary SHA256 KDF).\n", argv[1]);
     return 0;
 }

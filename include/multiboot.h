@@ -17,10 +17,9 @@ typedef struct multiboot_info {
     uint32_t num;
     uint32_t size;
     uint32_t addr; 
-    uint32_t reserved1;
-    uint32_t reserved2;
-    uint32_t mmap_length; 
-    uint32_t mmap_addr;   
+    uint32_t shndx;       // Offset 40
+    uint32_t mmap_length; // Offset 44
+    uint32_t mmap_addr;   // Offset 48
 } __attribute__((packed)) multiboot_info_t;
 
 /**

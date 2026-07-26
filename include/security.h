@@ -3,6 +3,11 @@
 
 #include "types.h"
 
+// Define the default kernel password hash (SHA-256 of "1234")
+#ifndef KERNEL_PASSWORD_HASH
+#define KERNEL_PASSWORD_HASH "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"
+#endif
+
 /**
  * @brief Enumeration of system security levels.
  * Controls the global security behavior of the kernel.
@@ -27,5 +32,16 @@ void set_security_level(security_level_t level);
  * @param password The null-terminated password string.
  */
 void derive_master_key(const char *password);
+
+
+// --- Added by Refactor Script ---
+extern uint8_t kernel_master_key[32];
+extern int validate_user_pointer(const void *ptr, size_t size);
+extern void init_security(void *mboot_ptr);
+extern int verify_user_password(const char *username, const char *password);
+
+
+// --- Added by Refactor Script 2 ---
+extern uint32_t auth_fail_ticks[16];
 
 #endif // SECURITY_H

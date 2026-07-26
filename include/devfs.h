@@ -47,4 +47,9 @@ extern device_node_t dev_table[];
  */
 int get_device_idx(const char *name);
 
+
+// --- Added by Refactor Script 2 ---
+extern int dev_null_read(uint8_t *buf, int size);
+extern int dev_random_read(uint8_t *buf, int size);
+
 #endif // DEVFS_H

@@ -1,17 +1,27 @@
+/*
+ * File: keyboard.c
+ * Purpose: PS/2 Keyboard driver implementation.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "keyboard.h"
 #include "io.h"
 #include "tty.h"
 #include "process.h"
 
-// 0: US, 1: TR
+// 0: US layout, 1: TR layout
 int current_layout = 0; 
 
-/*RING BUFFER IMPLEMENTATION*/
+/* RING BUFFER IMPLEMENTATION */
 #define KBD_BUFFER_SIZE 256
 volatile char kbd_buffer[KBD_BUFFER_SIZE];
 volatile int kbd_head = 0; 
 volatile int kbd_tail = 0; 
 
+/**
+ * @brief Retrieves the next character from the keyboard ring buffer.
+ * @return The next character, or 0 if the buffer is empty.
+ */
 char get_keyboard_char(void) {
     char temp = 0;
     if (kbd_head != kbd_tail) {
@@ -21,7 +31,7 @@ char get_keyboard_char(void) {
     return temp;
 }
 
-/*LAYOUTS)*/
+/* LAYOUTS */
 const char kbd_US[128] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
   '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',    
@@ -67,12 +77,15 @@ const char kbd_TR_altgr[128] = {
     0,   0,   0, '-',  0,   0,   0, '+',  0,   0,   0,   0,   0,   0,   0, '|'
 };
 
-/*(IRQ1 HANDLER)*/
+/* IRQ1 HANDLER */
 static int shift_pressed = 0;
 static int caps_lock = 0;
 static int altgr_pressed = 0;
 static int e0_mode = 0;
 
+/**
+ * @brief Handles the keyboard interrupt request (IRQ1).
+ */
 void keyboard_interrupt_handler(void) {
     uint8_t scancode = inb(0x60);
 
@@ -93,7 +106,7 @@ void keyboard_interrupt_handler(void) {
     if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
     if (scancode == 0x3A) { caps_lock = !caps_lock; return; }
     
-    // F tuşları ve Scrollback
+    // F-keys and Scrollback
     if (scancode == 0x3B) { terminal_switch(0); return; }
     if (scancode == 0x3C) { terminal_switch(1); return; }
     if (scancode == 0x3D) { terminal_switch(2); return; }
@@ -119,8 +132,7 @@ void keyboard_interrupt_handler(void) {
         if (next_head != kbd_tail) {
             kbd_buffer[kbd_head] = c;
             kbd_head = next_head;
-            extern void wakeup_tasks(int reason);
-            wakeup_tasks(1); // WAIT_KBD
+wakeup_tasks(1); // WAIT_KBD
         }
     }
 }

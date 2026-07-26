@@ -8,9 +8,7 @@
 #include "pipe.h"
 #include "errno.h"
 #include "syscall.h" // For int 0x80 numbers
-
-extern void ft_strcpy(char *dest, const char *src);
-
+#include "libft.h"
 // =========================================================
 // Kernel Internal (Ring 0) Syscall Trigger Bridge
 // =========================================================
@@ -61,14 +59,14 @@ void run_pipe_tests(void) {
     // ---------------------------------------------------------
     
     // Prepare memory addresses simulating user-space pointers.
-    int *u_fds = (int *)0x500700;
+    volatile int *u_fds = (volatile int *)0x500700;
     char *u_write_buf = (char *)0x500800;
     char *u_read_buf = (char *)0x500900;
     ft_strcpy(u_write_buf, "42KFS");
 
     int pipe_sys = ktest_syscall(SYSCALL_PIPE, (int)u_fds, 0, 0);
     KTEST_ASSERT(pipe_sys == 0, "[STRICT] SYSCALL_PIPE executed successfully (res == 0)");
-    KTEST_ASSERT(u_fds[0] >= 3 && u_fds[1] >= 3, "[STRICT] SYSCALL_PIPE returned valid FDs (FD >= 3)");
+    if (!(u_fds[0] >= 3 && u_fds[1] >= 3)) { printk("u_fds: %d, %d\n", u_fds[0], u_fds[1]); } KTEST_ASSERT(u_fds[0] >= 3 && u_fds[1] >= 3, "[STRICT] SYSCALL_PIPE returned valid FDs (FD >= 3)");
 
     int w_res = ktest_syscall(SYSCALL_WRITE, u_fds[1], (int)u_write_buf, 5);
     KTEST_ASSERT(w_res == 5, "[STRICT] SYSCALL_WRITE wrote 5 bytes to pipe from User-Space buffer");

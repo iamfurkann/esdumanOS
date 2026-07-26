@@ -126,6 +126,64 @@ int main() {
     run_static_test("apps/bin/clear.c", "syscall(1", 
                     "clear.c -> Uses SYSCALL_EXIT (1) for safe termination", &fail_count);
 
+    // ---------------------------------------------------------
+    // 3. NEW COMMANDS STATIC BEHAVIOR TESTS
+    // ---------------------------------------------------------
+    
+    // touch.c tests
+    run_static_test("apps/bin/touch.c", "syscall(8,", "touch.c -> Uses SYSCALL_CREATE_FILE (8)", &fail_count);
+    run_static_test("apps/bin/touch.c", "syscall(1,", "touch.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // rm.c tests
+    run_static_test("apps/bin/rm.c", "syscall(22,", "rm.c -> Uses SYSCALL_RM_FILE (22)", &fail_count);
+    run_static_test("apps/bin/rm.c", "syscall(1,", "rm.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // mv.c tests
+    run_static_test("apps/bin/mv.c", "syscall(23,", "mv.c -> Uses SYSCALL_MV_FILE (23)", &fail_count);
+    run_static_test("apps/bin/mv.c", "syscall(1,", "mv.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // cp.c tests
+    run_static_test("apps/bin/cp.c", "syscall(40,", "cp.c -> Uses SYSCALL_OPEN (40)", &fail_count);
+    run_static_test("apps/bin/cp.c", "syscall(8,", "cp.c -> Uses SYSCALL_CREATE_FILE (8)", &fail_count);
+    run_static_test("apps/bin/cp.c", "syscall(3,", "cp.c -> Uses SYSCALL_READ (3)", &fail_count);
+    run_static_test("apps/bin/cp.c", "syscall(4,", "cp.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/cp.c", "syscall(38,", "cp.c -> Uses SYSCALL_CLOSE (38)", &fail_count);
+    run_static_test("apps/bin/cp.c", "syscall(1,", "cp.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // free.c tests
+    run_static_test("apps/bin/free.c", "syscall(15,", "free.c -> Uses SYSCALL_MEMINFO (15)", &fail_count);
+    run_static_test("apps/bin/free.c", "syscall(1,", "free.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // whoami.c tests
+    run_static_test("apps/bin/whoami.c", "syscall(43,", "whoami.c -> Uses SYSCALL_GETUID (43)", &fail_count);
+    run_static_test("apps/bin/whoami.c", "syscall(1,", "whoami.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // kill.c tests
+    run_static_test("apps/bin/kill.c", "syscall(25,", "kill.c -> Uses SYSCALL_KILL (25)", &fail_count);
+    run_static_test("apps/bin/kill.c", "syscall(1,", "kill.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // grep.c tests
+    run_static_test("apps/bin/grep.c", "syscall(40,", "grep.c -> Uses SYSCALL_OPEN (40)", &fail_count);
+    run_static_test("apps/bin/grep.c", "syscall(3,", "grep.c -> Uses SYSCALL_READ (3)", &fail_count);
+    run_static_test("apps/bin/grep.c", "syscall(38,", "grep.c -> Uses SYSCALL_CLOSE (38)", &fail_count);
+    run_static_test("apps/bin/grep.c", "syscall(1,", "grep.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // head.c tests
+    run_static_test("apps/bin/head.c", "syscall(40,", "head.c -> Uses SYSCALL_OPEN (40)", &fail_count);
+    run_static_test("apps/bin/head.c", "syscall(3,", "head.c -> Uses SYSCALL_READ (3)", &fail_count);
+    run_static_test("apps/bin/head.c", "syscall(38,", "head.c -> Uses SYSCALL_CLOSE (38)", &fail_count);
+    run_static_test("apps/bin/head.c", "syscall(1,", "head.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // date.c tests
+    run_static_test("apps/bin/date.c", "syscall(4,", "date.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/date.c", "syscall(1,", "date.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // sh.c tests
+    run_static_test("apps/bin/sh.c", "syscall(5,", "sh.c -> Uses SYSCALL_EXEC (5) for external apps", &fail_count);
+    run_static_test("apps/bin/sh.c", "SYSCALL_OPEN", "sh.c -> Uses SYSCALL_OPEN (40)", &fail_count);
+    run_static_test("apps/bin/sh.c", "SYSCALL_READ", "sh.c -> Uses SYSCALL_READ (3)", &fail_count);
+    run_static_test("apps/bin/sh.c", "SYSCALL_WRITE", "sh.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+
     printf("======================================================\n");
     // Assess the final results of the static analysis to determine suite success.
     if (fail_count == 0) {

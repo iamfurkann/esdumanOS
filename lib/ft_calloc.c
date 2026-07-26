@@ -16,6 +16,8 @@ void	*ft_calloc(size_t nmemb, size_t size)
 {
 	void	*new_value;
 
+	if (nmemb != 0 && size > (size_t)-1 / nmemb)
+		return (NULL);
 	new_value = kmalloc(size * nmemb);
 	if (!new_value)
 		return (NULL);

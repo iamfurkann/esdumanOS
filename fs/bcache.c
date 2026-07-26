@@ -1,3 +1,9 @@
+/*
+ * File: bcache.c
+ * Purpose: Block cache system implementation (Write-Back) for disk sector caching.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "bcache.h"
 #include "ata.h"
 #include "libft.h"
@@ -7,6 +13,9 @@
 static bcache_node_t cache[BCACHE_SIZE];
 static uint32_t bcache_ticks = 0;
 
+/**
+ * @brief Initialize the block cache system.
+ */
 void bcache_init(void) {
     for (int i = 0; i < BCACHE_SIZE; i++) {
         cache[i].is_valid = 0;
@@ -15,9 +24,13 @@ void bcache_init(void) {
         cache[i].sector = 0;
         ft_memset(cache[i].data, 0, 512);
     }
-    printk("[BCACHE] Blok Onbellek Sistemi (Write-Back) 32KB ile baslatildi.\n");
+    printk("[BCACHE] Block Cache System (Write-Back) initialized with 32KB.\n");
 }
 
+/**
+ * @brief Get the least recently used cache slot.
+ * @return The index of the available or LRU cache slot.
+ */
 static int bcache_get_lru_slot(void) {
     int oldest_idx = 0;
     uint32_t oldest_time = 0xFFFFFFFF;
@@ -40,6 +53,11 @@ static int bcache_get_lru_slot(void) {
     return oldest_idx;
 }
 
+/**
+ * @brief Read a sector from the block cache or disk.
+ * @param sector The sector number to read.
+ * @param buffer The buffer to store the sector data.
+ */
 void bcache_read_sector(uint32_t sector, uint8_t *buffer) {
     bcache_ticks++;
     for (int i = 0; i < BCACHE_SIZE; i++) {
@@ -61,6 +79,11 @@ void bcache_read_sector(uint32_t sector, uint8_t *buffer) {
     ft_memcpy(buffer, cache[slot].data, 512);
 }
 
+/**
+ * @brief Write a sector to the block cache.
+ * @param sector The sector number to write.
+ * @param buffer The buffer containing the sector data.
+ */
 void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
     bcache_ticks++;
 
@@ -83,6 +106,9 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
     ft_memcpy(cache[slot].data, buffer, 512);
 }
 
+/**
+ * @brief Flush all dirty cache slots to disk.
+ */
 void bcache_flush(void) {
     int flushed = 0;
     for (int i = 0; i < BCACHE_SIZE; i++) {
@@ -93,6 +119,6 @@ void bcache_flush(void) {
         }
     }
     if (flushed > 0) {
-        klog_int(LOG_LEVEL_INFO, "BCACHE", "Kirli onbellekler diske senkronize edildi (Flush)", flushed);
+        klog_int(LOG_LEVEL_INFO, "BCACHE", "Dirty caches synchronized to disk (Flush)", flushed);
     }
 }

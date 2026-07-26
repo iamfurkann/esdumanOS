@@ -73,4 +73,8 @@ int ata_read_sector(uint32_t lba, uint8_t *buffer);
  */
 int ata_write_sector(uint32_t lba, uint8_t *buffer);
 
+
+// --- Added by Refactor Script ---
+extern uint32_t ata_identify(void);
+
 #endif

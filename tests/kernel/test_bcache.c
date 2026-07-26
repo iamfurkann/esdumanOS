@@ -6,12 +6,7 @@
  */
 #include "ktest.h"
 #include "types.h"
-
-extern void bcache_init(void);
-extern void bcache_read_sector(uint32_t sector, uint8_t *buffer);
-extern void bcache_write_sector(uint32_t sector, const uint8_t *buffer);
-extern void bcache_flush(void);
-
+#include "bcache.h"
 /**
  * @brief Tests the Block Cache (bcache) write, read, and flush mechanisms.
  *

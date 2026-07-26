@@ -9,12 +9,9 @@
 #include "process.h" // for tasks table
 #include "fs.h"      // for vfs structure
 #include "libft.h"
-
-extern void *kmalloc(uint32_t size);
-extern void kfree(void *ptr);
-extern process_t tasks[];
-extern uint32_t fs_max_sectors;
-
+#include "kheap.h"
+#include "ata.h"
+#include "bcache.h"
 /**
  * @brief Regression tests to prevent the recurrence of historically patched kernel bugs.
  *
@@ -54,27 +51,15 @@ void run_regression_tests(void) {
     // Past Bug Description: The kernel scheduler occasionally confused the hardcoded index 
     // of the task in the `tasks[]` array (e.g., 0, 1, 2) with the dynamically assigned PID 
     // (e.g., 1005). This resulted in terminating the wrong tasks.
-    int test_slot = -1;
-    for (int i = 0; i < 16; i++) { // Assuming MAX_TASKS is 16.
-        if (tasks[i].state == 0) { test_slot = i; break; }
-    }
-    
-    if (test_slot >= 0) {
-        tasks[test_slot].pid = test_slot + 1000; 
-        tasks[test_slot].state = 1; // Mark slot as occupied so search routines see it.
-        
-        int found_slot = -1;
-        for (int i = 0; i < 16; i++) {
-            if (tasks[i].pid == (test_slot + 1000) && tasks[i].state != 0) { 
-                found_slot = i; 
-                break; 
-            }
+    int dummy_pid = create_process(0,0,0);
+    KTEST_ASSERT(dummy_pid > 0, "[STRICT] REG-02: Process created successfully");
+    if (dummy_pid > 0) {
+        process_t *found = 0;
+        for (process_t *p = task_list_head; p != 0; p = p->next) {
+            if (p->pid == dummy_pid) { found = p; break; }
         }
-        
-        // The search logic must correctly map the large PID back to the smaller array index.
-        KTEST_ASSERT(found_slot == test_slot, "[STRICT] REG-02: PID and Slot (Index) confusion prevented");
-        
-        tasks[test_slot].state = 0; 
+        KTEST_ASSERT(found != 0 && found->pid == dummy_pid, "[STRICT] REG-02: PID and Slot (Index) confusion prevented");
+        if (found) found->state = TASK_EMPTY;
     }
 
     // =========================================================
@@ -99,8 +84,7 @@ void run_regression_tests(void) {
     // Past Bug Description: `ata_identify()` used an unbound `while(1)` loop waiting for hardware 
     // status flags. If the real disk controller failed to raise DRQ/ERR flags, the CPU hung forever.
     // The patch introduced a timeout-based escape mechanism.
-    extern uint32_t ata_identify(void);
-    uint32_t identified_sectors = ata_identify();
+uint32_t identified_sectors = ata_identify();
     
     // If the thread of execution reaches this line, the timeout patch worked successfully.
     KTEST_ASSERT(identified_sectors >= 4096, 

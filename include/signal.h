@@ -2,6 +2,7 @@
 #define SIGNAL_H
 
 #include "types.h"
+#include "registers.h"
 
 /**
  * @brief Maximum number of supported signals in the system.
@@ -52,5 +53,9 @@ void signal_tick_handler(void);
  * @brief Demo callback function to test the alarm signal.
  */
 void alarm_demo_callback(void);
+
+
+// --- Added by Refactor Script ---
+extern void restore_signal_context(arch_regs_t *regs);
 
 #endif

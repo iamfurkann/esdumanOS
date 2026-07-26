@@ -1,39 +1,82 @@
+/*
+ * File: paging.c
+ * Purpose: Virtual Memory Manager and paging initialization.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "paging.h"
 #include "pmm.h"
 #include "stdio.h"
 #include "klog.h"
 #include "errno.h"
-
-extern uint32_t __bss_end;
-
+#include "kernel.h"
+#include "serial.h"
 uint32_t *page_directory;
 
+/**
+ * @brief Initializes the paging system.
+ */
 void init_paging(void) {
-    klog(LOG_LEVEL_INFO, "VMM", "Sanal Bellek Yoneticisi (Paging) baslatiliyor...");
-    page_directory = (uint32_t *)pmm_alloc_frame();
-    if ((uint32_t)page_directory == 0xFFFFFFFF) {
-        kernel_panic("Paging initialization failed: OOM");
-    }
+    klog(LOG_LEVEL_INFO, "VMM", "Virtual Memory Manager (Paging) starting...");
+    serial_print("[PAGING-DBG] Step 1: Allocating PD frame...\n");
+    
+    uint32_t pd_phys = pmm_alloc_frame();
+    if (pd_phys == 0xFFFFFFFF) kernel_panic("Paging initialization failed: OOM");
+    serial_print("[PAGING-DBG] Step 2: PD frame allocated. Clearing...\n");
+    
+    // We access the new directory via the higher-half mapping established by boot.asm
+    volatile uint32_t *pd_virt = (volatile uint32_t *)(pd_phys + 0xC0000000);
 
     for (int i = 0; i < 1024; i++) {
-        page_directory[i] = PAGE_NOT_PRESENT;
+        pd_virt[i] = PAGE_NOT_PRESENT;
     }
+    serial_print("[PAGING-DBG] Step 3: PD cleared. Building page tables...\n");
     
-    for (int i = 0; i < 4; i++) {
-        uint32_t *page_table = (uint32_t *)pmm_alloc_frame();
+    // Pre-allocate ALL page tables for the Kernel Space (3GB - 4GB)
+    // Indices 768 to 1022 (1023 is recursive mapping)
+    for (int i = 0; i < (1023 - 768); i++) {
+        uint32_t pt_phys = pmm_alloc_frame();
+        if (pt_phys == 0xFFFFFFFF) kernel_panic("OOM while pre-allocating kernel PTs");
+        volatile uint32_t *pt_virt = (volatile uint32_t *)(pt_phys + 0xC0000000);
+        
         for (int j = 0; j < 1024; j++) {
-            uint32_t phys_addr = (i * 0x400000) + (j * PAGE_SIZE);
-            page_table[j] = phys_addr | PAGE_KERNEL_ONLY; 
+            if (i < 4) {
+                // Identity map the first 16MB of kernel space to 0-16MB physical
+                uint32_t phys_addr = (i * 0x400000) + (j * PAGE_SIZE);
+                if (phys_addr == 0) {
+                    pt_virt[j] = PAGE_NOT_PRESENT;
+                } else {
+                    pt_virt[j] = phys_addr | PAGE_KERNEL_ONLY; 
+                }
+            } else {
+                pt_virt[j] = PAGE_NOT_PRESENT;
+            }
         }
-        page_directory[i] = ((uint32_t)page_table) | PAGE_KERNEL_ONLY;
+        pd_virt[768 + i] = pt_phys | PAGE_KERNEL_ONLY;
     }
+    serial_print("[PAGING-DBG] Step 4: Page tables built. Setting recursive mapping...\n");
     
-    page_directory[1023] = ((uint32_t)page_directory) | PAGE_KERNEL_ONLY;
+    // Recursive mapping at 1023
+    pd_virt[1023] = pd_phys | PAGE_KERNEL_ONLY;
 
-    load_page_directory((uint32_t *)page_directory);
-    enable_paging();
+    serial_print("[PAGING-DBG] Step 5: Loading new page directory...\n");
+    // Load the new page directory (requires physical address)
+    page_directory = (uint32_t *)pd_phys;
+    load_page_directory((uint32_t *)pd_phys);
+    
+    serial_print("[PAGING-DBG] Step 6: Page directory loaded! Returning...\n");
+    // Note: Identity mapping (0-16MB) is intentionally omitted in this new directory.
+    // The previous identity mapping from boot.asm is now flushed out.
 }
 
+/**
+ * @brief Maps a physical address to a virtual address.
+ * 
+ * @param virtual_addr The virtual address to map.
+ * @param physical_addr The physical address to map to.
+ * @param flags The paging flags for the mapped page.
+ * @return E_OK on success, or a negative errno on failure.
+ */
 int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
     uint32_t pd_index = virtual_addr >> 22;
     uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
@@ -44,10 +87,9 @@ int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
     if ((pd_virt[pd_index] & 1) == 0) {
         uint32_t new_table_phys = pmm_alloc_frame();
         if (new_table_phys == 0xFFFFFFFF) { 
-            klog(LOG_LEVEL_ERROR, "VMM", "Page table olusturulamadi: RAM tukendi.");
+            klog(LOG_LEVEL_ERROR, "VMM", "Failed to create page table: Out of memory.");
             return E_NOMEM;
         }
-        
         pd_virt[pd_index] = new_table_phys | PAGE_USER_ACCESS;
         asm volatile("invlpg (%0)" ::"r"(pt_virt) : "memory");
         for (int i = 0; i < 1024; i++) pt_virt[i] = 0;
@@ -57,16 +99,21 @@ int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
         uint32_t old_phys = pt_virt[pt_index] & 0xFFFFF000;
         uint32_t new_phys = physical_addr & 0xFFFFF000;
         if (old_phys != new_phys) {
-            klog(LOG_LEVEL_ERROR, "PMM", "Sanal bellek cakismasi tespit edildi.");
+            klog(LOG_LEVEL_ERROR, "PMM", "Virtual memory conflict detected.");
             return E_BUSY;
         }
     }
 
     pt_virt[pt_index] = (physical_addr & 0xFFFFF000) | (flags & 0xFFF);
     asm volatile("invlpg (%0)" ::"r"(virtual_addr) : "memory");
-    return E_OK;
+    return 0; // E_OK
 }
 
+/**
+ * @brief Unmaps a mapped virtual address.
+ * 
+ * @param virtual_addr The virtual address to unmap.
+ */
 void unmap_page(uint32_t virtual_addr) {
     uint32_t pd_index = virtual_addr >> 22;
     uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
@@ -80,11 +127,16 @@ void unmap_page(uint32_t virtual_addr) {
     }
 }
 
+/**
+ * @brief Clones the current page directory for a new process.
+ * 
+ * @return The physical address of the new page directory.
+ */
 uint32_t clone_page_directory(void) {
-    klog(LOG_LEVEL_DEBUG, "VMM", "Yeni surec (Process) icin Page Directory klonlaniyor.");
+    klog(LOG_LEVEL_DEBUG, "VMM", "Cloning Page Directory for the new process.");
     uint32_t new_pd_phys = pmm_alloc_frame();
     if (new_pd_phys == 0xFFFFFFFF) {
-        klog(LOG_LEVEL_ERROR, "PMM", "PD klonlanamadi: RAM tukendi.");
+        klog(LOG_LEVEL_ERROR, "PMM", "Failed to clone PD: Out of memory.");
         return E_NOMEM;
     }
 
@@ -93,19 +145,18 @@ uint32_t clone_page_directory(void) {
     asm volatile("cli");
 
     int res = map_page(TEMP_MAP_VADDR, new_pd_phys, PAGE_KERNEL_ONLY);
-    if (res != E_OK) {
-        klog(LOG_LEVEL_ERROR, "PMM", "Klonlama sirasinda gecici esleme basarisiz.");
+    if (res != 0) { // E_OK is assumed to be 0
+        klog(LOG_LEVEL_ERROR, "PMM", "Temporary mapping failed during cloning.");
         
-        // [GÜVENLİK YAMASI 1]: Interrupt Sızıntısı Düzeltildi
-        // Çıkış yapmadan önce, kesmeler önceden açıksa mutlaka geri aç!
+        // [SECURITY PATCH 1]: Interrupt Leak Fixed
+        // Before exiting, restore interrupts if they were previously enabled!
         if (eflags & 0x200) {
             asm volatile("sti");
         }
         
-        // [GÜVENLİK YAMASI 2]: Memory Leak (Bellek Sızıntısı) Düzeltildi
-        // İşlem iptal edildiği için ayrılan fiziksel sayfayı geri ver.
-        extern void pmm_free_frame(uint32_t);
-        pmm_free_frame(new_pd_phys);
+        // [SECURITY PATCH 2]: Memory Leak Fixed
+        // Since the operation is aborted, free the allocated physical page.
+pmm_free_frame(new_pd_phys);
         
         return E_NOMEM;
     }

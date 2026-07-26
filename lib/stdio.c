@@ -1,17 +1,29 @@
+/*
+ * File: stdio.c
+ * Purpose: Standard I/O library functions (printk, kvsnprintf).
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "stdio.h"
 #include "tty.h"
 #include "process.h"
-
-extern void klog_write_char(char c);
-extern void serial_write_char(char c);
-
+#include "kernel.h"
+#include "serial.h"
 mutex_t vga_mutex;
 int vga_mutex_initialized = 0;
 int kernel_panic_mode = 0;
 
 // =========================================================================
-// YARDIMCI: TAMPON (BUFFER) YAZICI
+// HELPER: BUFFER WRITER
 // =========================================================================
+/**
+ * @brief Helper function to write a character to a buffer.
+ * 
+ * @param buf The buffer to write to.
+ * @param offset Pointer to the current offset in the buffer.
+ * @param max Maximum size of the buffer.
+ * @param c The character to write.
+ */
 static void buf_putc(char *buf, uint32_t *offset, uint32_t max, char c) {
     if (*offset < max - 1) {
         buf[*offset] = c;
@@ -20,8 +32,22 @@ static void buf_putc(char *buf, uint32_t *offset, uint32_t max, char c) {
 }
 
 // =========================================================================
-// ÇEKİRDEK: EVRENSEL SAYI BİÇİMLENDİRİCİ
+// CORE: UNIVERSAL NUMBER FORMATTER
 // =========================================================================
+/**
+ * @brief Formats and prints a number into the buffer.
+ * 
+ * @param buf The buffer to write to.
+ * @param offset Pointer to the current offset in the buffer.
+ * @param max Maximum size of the buffer.
+ * @param num The number to print.
+ * @param base The base (radix) of the number.
+ * @param is_signed Whether the number is signed.
+ * @param width Minimum width for formatting.
+ * @param pad_zero Whether to pad with zeros instead of spaces.
+ * @param uppercase Whether to use uppercase characters for hex digits.
+ * @param left_justify Whether to left-justify the output.
+ */
 static void print_number(char *buf, uint32_t *offset, uint32_t max,
                          unsigned long num, int base, int is_signed,
                          int width, int pad_zero, int uppercase, int left_justify) 
@@ -53,28 +79,37 @@ static void print_number(char *buf, uint32_t *offset, uint32_t max,
         is_negative = 0; 
     }
 
-    // Sağa yaslama (Normal): Sayıdan önce boşluk/sıfır bas
+    // Right-justify (Normal): Print spaces/zeros before the number
     if (!left_justify) {
         while (pad_len > 0) { buf_putc(buf, offset, max, pad_char); pad_len--; }
     }
 
     if (is_negative) buf_putc(buf, offset, max, '-');
 
-    // Sayıyı ters çevirerek bas
+    // Print the number in reverse
     while (i > 0) {
         i--;
         buf_putc(buf, offset, max, temp[i]);
     }
 
-    // Sola yaslama (-): Sayıdan sonra boşluk bas
+    // Left-justify (-): Print spaces after the number
     if (left_justify) {
         while (pad_len > 0) { buf_putc(buf, offset, max, ' '); pad_len--; }
     }
 }
 
 // =========================================================================
-// LİBC STANDARTLARINDA KVSNPRINTF (TAM ÖZELLİKLİ)
+// LIBC STANDARD KVSNPRINTF (FULL FEATURED)
 // =========================================================================
+/**
+ * @brief Formats a string and writes it to a buffer.
+ * 
+ * @param buf The buffer to write the formatted string to.
+ * @param size Maximum size of the buffer.
+ * @param format The format string.
+ * @param args Variable arguments list.
+ * @return The number of characters written, excluding the null terminator.
+ */
 int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args) {
     uint32_t offset = 0;
     int i = 0;
@@ -89,20 +124,20 @@ int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args) {
             int width = 0;
             int is_long = 0, is_long_long = 0, is_size_t = 0;
 
-            // 1. ADIM: Bayraklar (Flags) -> '-' veya '0'
+            // Flags -> '-' or '0'
             while (format[i] == '-' || format[i] == '0') {
                 if (format[i] == '-') left_justify = 1;
                 if (format[i] == '0') pad_zero = 1;
                 i++;
             }
 
-            // 2. ADIM: Genişlik (Width) -> '5', '10' vb.
+            // Width -> '5', '10', etc.
             while (format[i] >= '0' && format[i] <= '9') {
                 width = width * 10 + (format[i] - '0');
                 i++;
             }
 
-            // 3. ADIM: Uzunluk Belirteçleri -> 'l', 'll', 'z', 'h' (VARARG DESYNC KORUMASI)
+            // Length modifiers -> 'l', 'll', 'z', 'h' (VARARG DESYNC PROTECTION)
             while (format[i] == 'l' || format[i] == 'h' || format[i] == 'z') {
                 if (format[i] == 'l') {
                     if (is_long) is_long_long = 1;
@@ -113,7 +148,7 @@ int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args) {
                 i++;
             }
 
-            // 4. ADIM: Tip Belirleyici (Specifier)
+            // Type specifier
             switch (format[i]) {
                 case 'c':
                     if (!left_justify) while(width-- > 1) buf_putc(buf, &offset, size, ' ');
@@ -136,9 +171,9 @@ int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args) {
                 case 'i': {
                     long val;
                     if (is_long_long) {
-                        // Vararg diziliminin kaymasını önlemek için 64-bit (8 byte) tüket
+                        // Consume 64-bit (8 byte) to prevent vararg alignment issues
                         long long llval = va_arg(args, long long);
-                        val = (long)llval; // x86-32bit udivdi3 hatasını önlemek için basarken 32-bit'e düşür
+                        val = (long)llval; // Downcast to 32-bit when printing to avoid x86-32bit udivdi3 error
                     } else {
                         val = va_arg(args, int);
                     }
@@ -190,13 +225,20 @@ int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args) {
 }
 
 // =========================================================================
-// KERNEL LOG FONKSİYONU
+// KERNEL LOG FUNCTION
 // =========================================================================
-#define PRINTK_BUF_SIZE 256 // Stack koruması: 1024 -> 256 Byte'a indirildi!
+#define PRINTK_BUF_SIZE 256 // Stack protection: reduced from 1024 to 256 Bytes!
 
+/**
+ * @brief Prints formatted output to the kernel logs, terminal, and serial port.
+ * 
+ * @param format The format string.
+ * @param ... Variable arguments.
+ * @return The number of characters printed.
+ */
 int printk(const char *format, ...) {
-    // 256 Byte'lık tampon 4KB'lık yığının (Stack) sadece %6'sını kullanır.
-    // Kesme (Interrupt) anlarında stack taşmasını büyük ölçüde engeller.
+    // 256 Byte buffer uses only 6% of the 4KB stack.
+    // Greatly prevents stack overflow during interrupts.
     char print_buffer[PRINTK_BUF_SIZE]; 
     va_list args;
 
@@ -212,7 +254,7 @@ int printk(const char *format, ...) {
     if (!kernel_panic_mode) mutex_lock(&vga_mutex, 0);
 
     for (int i = 0; i < len; i++) {
-        klog_write_char(print_buffer[i]); // Dmesg Kaydı (Açmak istersen kullanabilirsin)
+        klog_write_char(print_buffer[i]); // Dmesg Logging (can be enabled if needed)
         terminal_putchar(print_buffer[i]); 
         serial_write_char(print_buffer[i]);
     }

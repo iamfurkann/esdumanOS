@@ -6,11 +6,7 @@
  */
 #include "ktest.h"
 #include "types.h"
-
-extern uint32_t pmm_alloc_frame(void);
-extern void pmm_free_frame(uint32_t phys_addr);
-extern uint32_t pmm_get_free_memory(void);
-
+#include "pmm.h"
 /**
  * @brief Tests the kernel's Physical Memory Manager (PMM).
  *

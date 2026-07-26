@@ -103,7 +103,7 @@ int sys_setuid(int uid, const char *password) {
  * @param buf The buffer to store the read line.
  * @param hide If non-zero, characters are echoed as '*' (useful for passwords).
  */
-void read_line(char *buf, int hide) {
+void read_line(char *buf, int hide, int max_len) {
     int idx = 0;
     while (1) {
         char c = get_keyboard_char();
@@ -118,7 +118,7 @@ void read_line(char *buf, int hide) {
                 printk("\b \b"); 
             } 
         } 
-        else if (c >= 32 && c <= 126 && idx < 254) {
+        else if (c >= 32 && c <= 126 && idx < max_len - 1) {
             char str[2] = { hide ? '*' : c, '\0' }; 
             printk(str); 
             buf[idx++] = c;
@@ -147,10 +147,10 @@ void main(void) {
     int login_success = 0;
     while (!login_success) {
         printk("login: ");
-        read_line(user_buf, 0); 
+        read_line(user_buf, 0, 32); 
 
         printk("password: ");
-        read_line(pass_buf, 1);
+        read_line(pass_buf, 1, 32);
 
         int uid = syscall(SYSCALL_AUTH, (int)user_buf, (int)pass_buf, 0);
 
@@ -174,10 +174,10 @@ void main(void) {
     int bin_id = syscall(29, (int)"bin", 0, 0); 
     
     // If the Shell is executable, this function will never return; the Shell takes over.
-    int res = syscall(5, (int)"sh.elf", bin_id, (int)user_buf);
+    int res = syscall(5, (int)"sh", bin_id, (int)user_buf);
     
     if (res == -1) {
-        printk("\n[CRITICAL ERROR] /bin/sh.elf could not be found or executed!\n");
+        printk("\n[CRITICAL ERROR] /bin/sh could not be found or executed!\n");
         printk("System halted.\n");
     }
 }

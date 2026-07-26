@@ -1,12 +1,23 @@
+/*
+ * File: passwd.c
+ * Purpose: User password verification and shadow file management.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "types.h"
 #include "fs.h"
 #include "stdio.h"
 #include "errno.h"
 #include "klog.h"
-
-extern disk_file_entry_t dir_table[];
-extern void sha256_to_hex(const char *input, char *output_hex);
-
+#include "crypto.h"
+#include "libft.h"
+/**
+ * @brief Performs a constant-time comparison of two strings.
+ *
+ * @param s1 The first string to compare.
+ * @param s2 The second string to compare.
+ * @return 0 if the strings are identical, non-zero otherwise.
+ */
 static int constant_time_cmp(const char *s1, const char *s2) {
     int diff = 0;
     for (int i = 0; i < 64; i++) {
@@ -15,9 +26,15 @@ static int constant_time_cmp(const char *s1, const char *s2) {
     return diff;
 }
 
+/**
+ * @brief Verifies a user's password against the /etc/shadow file.
+ *
+ * @param username The name of the user.
+ * @param password The provided password to verify.
+ * @return The user ID (UID) on successful verification, or a negative error code.
+ */
 int verify_user_password(const char *username, const char *password) {
-    extern int fs_get_entry_idx(const char *, uint8_t);
-    int etc_idx = fs_get_entry_idx("etc", 0);
+int etc_idx = fs_get_entry_idx("etc", 0);
     if (etc_idx == -1) {
         klog(LOG_LEVEL_ERROR, "PASSWD", "/etc directory not found!");
         return E_NOENT;
@@ -25,16 +42,13 @@ int verify_user_password(const char *username, const char *password) {
 
     int etc_id = dir_table[etc_idx].entry_id;
     vfs_file_t p_file;
-    extern int fs_open(const char *, uint8_t, vfs_file_t *);
-
-    if (fs_open("shadow", etc_id, &p_file) != 0) {
+if (fs_open("shadow", etc_id, &p_file) != 0) {
         klog(LOG_LEVEL_ERROR, "PASSWD", "/etc/shadow file missing or inaccessible!");
         return E_NOENT; 
     }
 
     char buf[1024];
-    extern int fs_read(vfs_file_t *, uint8_t *, uint32_t);
-    int bytes = fs_read(&p_file, (uint8_t *)buf, 1023);
+int bytes = fs_read(&p_file, (uint8_t *)buf, 1023);
 
     if (bytes < 0) {
         klog(LOG_LEVEL_ERROR, "PASSWD", "Failed to read /etc/shadow file!");
@@ -57,17 +71,15 @@ int verify_user_password(const char *username, const char *password) {
                 else if (colon == 1 && k < 69) db_hash[k++] = buf[j];
                 else if (colon == 2 && k < 15) db_uid[k++] = buf[j];
             }
-
-            extern int ft_strcmp(const char *s1, const char *s2);
-            if (ft_strcmp(username, db_user) == 0) {
+if (ft_strcmp(username, db_user) == 0) {
                 char computed_hash[65];
                 char salted_pass[256];
                 
                 int sp_idx = 0;
                 
-                // [DÜZELTME]: Rastgele sistem tuzu KALDIRILDI. 
-                // Çünkü rastgele tuz, önceden oluşturulmuş hash'lerle uyuşmaz.
-                // Sadece kullanıcı adını (username) tuz olarak kullanıyoruz.
+                // [FIX]: Random system salt has been REMOVED.
+                // Random salt does not match previously generated hashes.
+                // We only use the username as the salt.
                 for(int u = 0; username[u] && sp_idx < 95; u++) 
                     salted_pass[sp_idx++] = username[u];
                     
@@ -78,10 +90,10 @@ int verify_user_password(const char *username, const char *password) {
                     
                 salted_pass[sp_idx] = '\0';
 
-                // KDF İterasyon Düzeltmesi: Tıpkı master key gibi, kullanıcı şifrelerini de
-                // zorlaştırmak (Brute-force'u engellemek) için döngü eklemeliyiz. Ancak
-                // senin kernel.c'deki hash'lerin tek turlu sha256. Eğer kernel.c'deki hash'leri 
-                // değiştirmek istemiyorsan burası sadece 1 tur kalmalı.
+                // KDF Iteration Fix: Similar to the master key, user passwords should
+                // be hashed repeatedly to prevent brute-force attacks. However,
+                // the hashes in kernel.c use single-round SHA256. If you do not want
+                // to change the hashes in kernel.c, this should remain a single round.
                 sha256_to_hex(salted_pass, computed_hash);
                 
                 if (constant_time_cmp(db_hash, computed_hash) == 0) {
@@ -103,16 +115,19 @@ int verify_user_password(const char *username, const char *password) {
     return E_NOENT;
 }
 
+/**
+ * @brief Updates the /etc/passwd file with new content.
+ *
+ * @param new_passwd_content The new content to write to the passwd file.
+ * @param size The size of the new content in bytes.
+ * @return 0 on success, or a negative error code on failure.
+ */
 int update_passwd_file(const char *new_passwd_content, uint32_t size) {
-    extern int fs_get_entry_idx(const char *, uint8_t);
-    int etc_idx = fs_get_entry_idx("etc", 0);
+int etc_idx = fs_get_entry_idx("etc", 0);
     if (etc_idx == -1) {
         klog(LOG_LEVEL_ERROR, "PASSWD", "/etc directory not found for updating passwd");
         return E_NOENT;
     }
-
-    extern disk_file_entry_t dir_table[];
-    int etc_id = dir_table[etc_idx].entry_id;
-    extern int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
-    return fs_atomic_update("passwd", (const uint8_t *)new_passwd_content, size, etc_id);
+int etc_id = dir_table[etc_idx].entry_id;
+return fs_atomic_update("passwd", (const uint8_t *)new_passwd_content, size, etc_id);
 }

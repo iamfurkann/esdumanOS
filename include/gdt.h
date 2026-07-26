@@ -55,4 +55,10 @@ void init_gdt(void);
  */
 void gdt_set_gate(int32_t num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran);
 
+
+// --- Added by Refactor Script 2 ---
+extern void gdt_flush(uint32_t ptr);
+extern void tss_flush(void);
+extern uint32_t kernel_stack_ring0[1024];
+
 #endif

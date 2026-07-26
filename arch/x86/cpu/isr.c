@@ -8,10 +8,7 @@
 #include "syscall.h"
 #include "registers.h"
 #include "security.h"
-
-extern security_level_t current_sec_level;
-extern void set_security_level(security_level_t level);
-
+#include "keyboard.h"
 #define PIC1_COMMAND 0x20
 #define PIC2_COMMAND 0xA0
 #define PIC_EOI      0x20
@@ -19,12 +16,6 @@ extern void set_security_level(security_level_t level);
 #define IRQ0_TIMER  32
 #define IRQ1_KEYBOARD 33
 #define ISR_SYSCALL 128
-
-extern void keyboard_interrupt_handler(void);
-extern void timer_interrupt_handler(void);
-extern void syscall_handler(arch_regs_t *regs);
-extern void ata_irq_handler(void);
-
 const char *exception_messages[] = {
     "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
     "Into Detected Overflow", "Out of Bounds", "Invalid Opcode", "No Coprocessor",
@@ -83,11 +74,19 @@ void page_fault_handler(arch_regs_t *regs) {
 
     if (is_user) {
         printk("\n[SEGFAULT] Violation (PID: %d)! Unauthorized memory access: 0x%x\n", 
-               tasks[current_task].pid, faulting_address);
+               current_task ? current_task->pid : -1, faulting_address);
         
-        tasks[current_task].state = TASK_DEAD; 
+        if (current_task) current_task->state = TASK_DEAD; 
         schedule(regs);
     } else {
+        extern uint32_t current_fault_handler;
+        if (current_fault_handler != 0) {
+            regs->eip = current_fault_handler;
+            return;
+        }
+
+        extern int kernel_panic_mode;
+        kernel_panic_mode = 1;
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
         printk("\n[KERNEL PANIC] Kernel generated Page Fault: 0x%x\n", faulting_address);
         printk("Error Code: %d\n", regs->err_code);
@@ -108,6 +107,8 @@ void isr_handler(arch_regs_t *regs) {
             page_fault_handler(regs);
             return;
         }
+        extern int kernel_panic_mode;
+        kernel_panic_mode = 1;
         multitasking_enabled = 0;
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
 
@@ -140,14 +141,17 @@ void isr_handler(arch_regs_t *regs) {
         
         if (regs->int_no == IRQ0_TIMER) {
             timer_interrupt_handler();
-            schedule(regs);
+            if ((regs->cs & 3) == 3) {
+                schedule(regs);
+            }
         }
         else if (regs->int_no == IRQ1_KEYBOARD) {
             keyboard_interrupt_handler();
         }
 
         //IRQ14 (PRIMARY ATA)
-        else if (regs->int_no == 46) {
+        #define IRQ14_ATA 46
+        else if (regs->int_no == IRQ14_ATA) {
             ata_irq_handler();
         }
 

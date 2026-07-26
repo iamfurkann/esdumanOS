@@ -1,10 +1,18 @@
+/*
+ * File: pmm.c
+ * Purpose: Physical Memory Manager implementation with dynamic bitmap.
+ */
 #include "pmm.h"
 #include "stdio.h"
 #include "kernel.h"
 #include "klog.h"
 #include "errno.h"
 
-uint32_t pmm_bitmap[BITMAP_SIZE];
+extern uint32_t _kernel_end;
+
+uint32_t *pmm_bitmap = 0;
+uint32_t pmm_bitmap_size_words = 0;
+uint32_t pmm_frames_count = 0;
 uint32_t used_memory = 0;
 uint32_t actual_total_memory = 0; 
 
@@ -12,7 +20,7 @@ spinlock_t pmm_lock;
 static uint32_t lowest_free_idx = 0;
 
 static uint32_t pmm_find_first_free(void) {
-    for (uint32_t i = lowest_free_idx; i < BITMAP_SIZE; i++) {
+    for (uint32_t i = lowest_free_idx; i < pmm_bitmap_size_words; i++) {
         if (pmm_bitmap[i] != 0xFFFFFFFF) {
             for (int j = 0; j < 32; j++) {
                 if (!(pmm_bitmap[i] & (1U << j))) {
@@ -27,125 +35,122 @@ static uint32_t pmm_find_first_free(void) {
 
 void init_pmm(multiboot_info_t *mboot_info) {
     spinlock_init(&pmm_lock);
-    lowest_free_idx = 0; // Sistemi sıfırla
-    
-    for (int i = 0; i < BITMAP_SIZE; i++) {
-        pmm_bitmap[i] = 0xFFFFFFFF;
-    }
-
-    int memory_map_found = 0;
+    lowest_free_idx = 0; 
     actual_total_memory = 0;
+    int memory_map_found = 0;
 
     if (mboot_info != 0) {
-        klog_hex(LOG_LEVEL_INFO, "PMM", "Multiboot Flags Tespit Edildi", mboot_info->flags);
         if (mboot_info->flags & (1 << 6)) {
             multiboot_memory_map_t *mmap = (multiboot_memory_map_t *)mboot_info->mmap_addr;
-            
+            uint32_t highest_addr = 0;
             while ((uint32_t)mmap < mboot_info->mmap_addr + mboot_info->mmap_length) {
                 if (mmap->type == 1) {
-                    uint32_t start_addr = mmap->addr_low;
-                    uint32_t length = mmap->len_low;
-                    
-                    for (uint32_t i = 0; i < length; i += PAGE_SIZE) {
-                        uint32_t frame = (start_addr + i) / PAGE_SIZE;
-                        if (frame < PMM_FRAMES_COUNT) {
-                            pmm_bitmap[frame / 32] &= ~(1U << (frame % 32));
-                            actual_total_memory += PAGE_SIZE;
-                        }
-                    }
-                    memory_map_found = 1;
+                    uint32_t end_addr = mmap->addr_low + mmap->len_low;
+                    if (end_addr > highest_addr) highest_addr = end_addr;
                 }
                 mmap = (multiboot_memory_map_t *)((uint32_t)mmap + mmap->size + sizeof(mmap->size));
             }
-            if (memory_map_found) {
-                klog(LOG_LEVEL_INFO, "PMM", "RAM haritasi basariyla MMAP (Bit 6) uzerinden okundu.");
+            if (highest_addr > 0) {
+                actual_total_memory = highest_addr;
+                memory_map_found = 1;
             }
         }
-
         if (!memory_map_found && (mboot_info->flags & (1 << 0))) {
             actual_total_memory = (mboot_info->mem_upper * 1024) + (1024 * 1024);
-            
-            uint32_t frames_to_free = actual_total_memory / PAGE_SIZE;
-            for (uint32_t i = 0; i < frames_to_free; i++) {
-                if (i < PMM_FRAMES_COUNT) {
-                    pmm_bitmap[i / 32] &= ~(1U << (i % 32));
-                }
-            }
             memory_map_found = 1;
-            klog(LOG_LEVEL_INFO, "PMM", "RAM haritasi MEM_UPPER (Bit 0) uzerinden okundu.");
         }
     }
 
-    if (!memory_map_found) {
-        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        klog(LOG_LEVEL_WARN, "PMM", "Multiboot RAM verisi yok! Guvenlik icin RAM 16MB varsayiliyor.");
-        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        
+    if (!memory_map_found || actual_total_memory == 0) {
         actual_total_memory = PMM_FALLBACK_MEMORY;
-        uint32_t frames_to_free = actual_total_memory / PAGE_SIZE;
-        for (uint32_t i = 0; i < frames_to_free; i++) {
-            if (i < PMM_FRAMES_COUNT) {
-                pmm_bitmap[i / 32] &= ~(1U << (i % 32));
+    }
+
+    pmm_frames_count = actual_total_memory / PAGE_SIZE;
+    pmm_bitmap_size_words = (pmm_frames_count + 31) / 32;
+
+    // Place pmm_bitmap 1MB after _kernel_end to absolutely ensure we do not overwrite any
+    // Multiboot structures (like the memory map) that GRUB places right after the kernel.
+    pmm_bitmap = (uint32_t *)((uint32_t)&_kernel_end + 0x100000);
+
+    for (uint32_t i = 0; i < pmm_bitmap_size_words; i++) {
+        pmm_bitmap[i] = 0xFFFFFFFF;
+    }
+
+    if (memory_map_found && (mboot_info->flags & (1 << 6))) {
+        multiboot_memory_map_t *mmap = (multiboot_memory_map_t *)mboot_info->mmap_addr;
+        while ((uint32_t)mmap < mboot_info->mmap_addr + mboot_info->mmap_length) {
+            if (mmap->type == 1) {
+                uint32_t start_addr = mmap->addr_low;
+                uint32_t length = mmap->len_low;
+                for (uint32_t i = 0; i < length; i += PAGE_SIZE) {
+                    uint32_t frame = (start_addr + i) / PAGE_SIZE;
+                    if (frame < pmm_frames_count) {
+                        pmm_bitmap[frame / 32] &= ~(1U << (frame % 32));
+                    }
+                }
             }
+            mmap = (multiboot_memory_map_t *)((uint32_t)mmap + mmap->size + sizeof(mmap->size));
         }
+    } else {
+        for (uint32_t i = 0; i < pmm_frames_count; i++) {
+            pmm_bitmap[i / 32] &= ~(1U << (i % 32));
+        }
+    }
+
+    uint32_t kernel_start_frame = 0;
+    // Calculate physical end including the 1MB margin!
+    uint32_t kernel_end_phys = ((uint32_t)&_kernel_end - 0xC0000000) + 0x100000 + (pmm_bitmap_size_words * 4);
+    uint32_t kernel_end_frame = (kernel_end_phys + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    for (uint32_t i = kernel_start_frame; i < kernel_end_frame; i++) {
+        pmm_bitmap[i / 32] |= (1U << (i % 32));
     }
 
     used_memory = 0;
-    for (int i = 0; i < 1024; i++) { 
-        pmm_bitmap[i / 32] |= (1U << (i % 32));
-    }
-    lowest_free_idx = 1024 / 32;
-
-    for (uint32_t i = 0; i < actual_total_memory / PAGE_SIZE; i++) {
+    for (uint32_t i = 0; i < pmm_frames_count; i++) {
         if (pmm_bitmap[i / 32] & (1U << (i % 32))) {
             used_memory += PAGE_SIZE;
         }
     }
+    
+    lowest_free_idx = kernel_end_frame / 32;
+    
+    klog_hex(LOG_LEVEL_INFO, "PMM", "Initialized dynamic bitmap at VADDR", (uint32_t)pmm_bitmap);
+    klog_int(LOG_LEVEL_INFO, "PMM", "Total Memory (MB)", actual_total_memory / (1024 * 1024));
 }
 
 uint32_t pmm_alloc_frame(void) {
     spinlock_acquire(&pmm_lock);
-
     uint32_t frame = pmm_find_first_free();
-    
-    if (frame == 0xFFFFFFFF) {
+    if (frame == 0xFFFFFFFF || frame >= pmm_frames_count) {
         spinlock_release(&pmm_lock);
-        klog(LOG_LEVEL_ERROR, "PMM", "Fiziksel bellek tukendi (OOM)!");
-        return 0xFFFFFFFF; 
+        return 0xFFFFFFFF; // Out of memory
     }
-
     pmm_bitmap[frame / 32] |= (1U << (frame % 32));
     used_memory += PAGE_SIZE;
-    
     spinlock_release(&pmm_lock);
-
     return frame * PAGE_SIZE;
 }
 
 void pmm_free_frame(uint32_t addr) {
     uint32_t frame = addr / PAGE_SIZE;
-
-    if (frame < 1024) {
-        klog_int(LOG_LEVEL_WARN, "PMM", "Kritik Kernel alanini serbest birakma reddedildi", frame);
+    if (frame < 256) { 
         return; 
     }
+    if (frame >= pmm_frames_count) return;
     
     spinlock_acquire(&pmm_lock);
-
+    if ((pmm_bitmap[frame / 32] & (1U << (frame % 32))) == 0) {
+        spinlock_release(&pmm_lock);
+        return;
+    }
     pmm_bitmap[frame / 32] &= ~(1U << (frame % 32));
     used_memory -= PAGE_SIZE;
-    
-    if ((frame / 32) < lowest_free_idx) {
-        lowest_free_idx = frame / 32;
-    }
-    
+    if ((frame / 32) < lowest_free_idx) lowest_free_idx = frame / 32;
     spinlock_release(&pmm_lock);
 }
 
-uint32_t pmm_get_total_memory(void) {
-    return actual_total_memory; 
-}
-
+uint32_t pmm_get_total_memory(void) { return actual_total_memory; }
 uint32_t pmm_get_free_memory(void) {
     if (used_memory > actual_total_memory) return 0;
     return actual_total_memory - used_memory;

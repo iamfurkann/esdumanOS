@@ -1,16 +1,24 @@
+/*
+ * File: crypto_fs.c
+ * Purpose: Cryptographic file system functions using AES and SHA-256.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "aes.h"
 #include "fs.h"
 #include "crypto.h"
 #include "security.h"
 #include "errno.h"
 #include "stdio.h"
-
-extern void *kmalloc(uint32_t size);
-extern void kfree(void *ptr);
-extern uint32_t timer_ticks;
-
+#include "kheap.h"
+#include "rtc.h"
+#include "hmac.h"
 static int rdrand_supported = -1;
 
+/**
+ * @brief Check if the CPU supports the RDRAND instruction.
+ * @return 1 if supported, 0 otherwise.
+ */
 static int check_rdrand_support(void) {
     uint32_t ecx;
     asm volatile(
@@ -23,6 +31,10 @@ static int check_rdrand_support(void) {
     return (ecx & (1 << 30)) != 0;
 }
 
+/**
+ * @brief Get a random number using hardware TRNG.
+ * @return Random 32-bit integer.
+ */
 static uint32_t get_hardware_rand(void) {
     uint32_t val;
     uint8_t ok;
@@ -33,6 +45,15 @@ static uint32_t get_hardware_rand(void) {
     return timer_ticks;
 }
 
+/**
+ * @brief Create an encrypted file on the file system.
+ * @param name The name of the file.
+ * @param data The plaintext data to write.
+ * @param len Length of the data.
+ * @param key The 32-byte AES key.
+ * @param parent_id The ID of the parent directory.
+ * @return Status code (e.g., E_OK or error).
+ */
 int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, const uint8_t key[32], uint8_t parent_id) {
     uint32_t payload_len = 40 + len;
     uint32_t padded_len = (payload_len + 15) & ~15; 
@@ -44,9 +65,9 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
     if (rdrand_supported == -1) {
         rdrand_supported = check_rdrand_support();
         if (rdrand_supported) {
-            printk("[CRYPTO] TRNG (RDRAND) tespit edildi! Kriptografik IV uretimi aktif.\n");
+            printk("[CRYPTO] TRNG (RDRAND) detected! Cryptographic IV generation active.\n");
         } else {
-            printk("[CRYPTO] RDRAND destegi yok. Yazilimsal PRNG (LCG) kullaniliyor.\n");
+            printk("[CRYPTO] No RDRAND support. Software PRNG (LCG) in use.\n");
         }
     }
 
@@ -78,9 +99,7 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
     uint32_t *hdr = (uint32_t *)(enc_buffer + 16); 
     hdr[0] = 0x53414645; // "SAFE"
     hdr[1] = len;        
-
-    extern void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary);
-    sha256_binary(data, len, (uint8_t *)&hdr[2]);
+    hmac_sha256(key, 32, data, len, (uint8_t *)&hdr[2]);
 
     for(uint32_t i = 0; i < len; i++) {
         enc_buffer[56 + i] = data[i];
@@ -99,6 +118,14 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
     return ret;
 }
 
+/**
+ * @brief Read an encrypted file from the file system.
+ * @param file The file entry pointer.
+ * @param buffer Buffer to store the decrypted data.
+ * @param size Number of bytes to read.
+ * @param key The 32-byte AES key.
+ * @return Number of bytes read.
+ */
 int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const uint8_t key[32]) {
     if (file->file_size <= 56) return 0; 
 
@@ -127,22 +154,21 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
     uint8_t *stored_hash = (uint8_t *)&hdr[2];
 
     if (magic != 0x53414645) {
-        printk("[CRYPTO HATA] Magic Number uyumsuzlugu! Parola yanlis veya veri bozuk.\n");
+        printk("[CRYPTO ERROR] Magic Number mismatch! Incorrect password or corrupted data.\n");
         kfree(temp_buf);
         return 0;
     }
 
     uint32_t max_possible_len = cipher_len - 40;
     if (orig_len > max_possible_len) {
-        printk("[CRYPTO KRITIK HATA] Başlıkta belirtilen dosya boyutu veriden büyük!\n");
+        printk("[CRYPTO CRITICAL ERROR] File size specified in header is larger than data!\n");
         kfree(temp_buf);
         return 0;
     }
 
     uint8_t *plaintext = temp_buf + 56;
     uint8_t calc_hash[32];
-    extern void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary);
-    sha256_binary(plaintext, orig_len, calc_hash);
+    hmac_sha256(key, 32, plaintext, orig_len, calc_hash);
 
     int hash_ok = 1;
     for (int i = 0; i < 32; i++) {
@@ -151,8 +177,8 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
 
     if (!hash_ok) {
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-        printk("\n[CRYPTO KRITIK HATA] BÜTÜNLÜK (INTEGRITY) İHLALİ!\n");
-        printk("Dosya uzerinde oynanmis veya SHA-256 Hash'i uyusmuyor!\n");
+        printk("\n[CRYPTO CRITICAL ERROR] INTEGRITY VIOLATION!\n");
+        printk("File has been tampered with or SHA-256 Hash mismatch!\n");
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         kfree(temp_buf);
         return 0;

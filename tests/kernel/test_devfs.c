@@ -8,10 +8,7 @@
 #include "ktest.h"
 #include "errno.h"
 #include "types.h"
-
-extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-extern int get_device_idx(const char *name);
-
+#include "fs.h"
 /**
  * @brief Tests Device File System (DevFS) functionality, registration, and I/O.
  *
@@ -45,9 +42,7 @@ void run_devfs_tests(void) {
 
     int fake_idx = get_device_idx("fakedevice");
     KTEST_ASSERT(fake_idx == E_NOENT, "Invalid device access request blocked (E_NOENT)");
-
-    extern int dev_null_read(uint8_t *buf, int size);
-    extern int dev_null_write(const uint8_t *buf, int size);
+extern int dev_null_write(const uint8_t *buf, int size);
     
     uint8_t dummy_buf[10];
     // Attempt to read from /dev/null. Expected behavior is returning 0 (EOF immediately).
@@ -57,9 +52,7 @@ void run_devfs_tests(void) {
     // Attempt to write to /dev/null. Expected behavior is accepting the write and returning the exact length.
     int null_w = dev_null_write(dummy_buf, 10);
     KTEST_ASSERT(null_w == 10, "[STRICT] /dev/null write consumes data and returns size");
-
-    extern int dev_random_read(uint8_t *buf, int size);
-    extern int dev_random_write(const uint8_t *buf, int size);
+extern int dev_random_write(const uint8_t *buf, int size);
     
     uint8_t rand_buf1[4] = {0};
     uint8_t rand_buf2[4] = {0};

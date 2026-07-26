@@ -28,16 +28,16 @@ void run_signal_tests(void) {
     serial_print("\n--- Signal Handling Tests ---\n");
 
     register_user_signal(9, 0x80000000); // SIGKILL simulation handler
-    KTEST_ASSERT(tasks[current_task].signal_handlers[9] == 0x80000000, 
+    KTEST_ASSERT(current_task->signal_handlers[9] == 0x80000000, 
                  "Signals: User signal handler successfully registered");
 
-    int my_pid = tasks[current_task].pid;
+    int my_pid = current_task->pid;
     send_user_signal(my_pid, 9);
     
     // Verify the signal successfully tripped the pending state flag.
-    KTEST_ASSERT((tasks[current_task].pending_signals & (1 << 9)) != 0, 
+    KTEST_ASSERT((current_task->pending_signals & (1 << 9)) != 0, 
                  "Signals: pending_signals bitmask updated after signal dispatch");
                  
-    tasks[current_task].pending_signals &= ~(1 << 9);
-    tasks[current_task].signal_handlers[9] = 0;
+    current_task->pending_signals &= ~(1 << 9);
+    current_task->signal_handlers[9] = 0;
 }

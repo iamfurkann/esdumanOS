@@ -12,17 +12,17 @@
 /**
  * @brief Maximum length of a filename and maximum number of files per directory.
  */
-#define MAX_FILENAME 24
-#define MAX_FILES_IN_DIR 32
+#define MAX_FILENAME 256
+#define MAX_FILES_IN_DIR 256
 
 /**
  * @brief Disk Layout Constants.
  * Define the physical sector boundaries for different file system regions.
  */
 #define FS_DIR_START_SECTOR 1
-#define FS_DIR_SECTOR_COUNT 4
-#define FS_FAT_START_SECTOR 5
-#define FS_DATA_START_SECTOR 37
+#define FS_DIR_SECTOR_COUNT 136
+#define FS_FAT_START_SECTOR 137
+#define FS_DATA_START_SECTOR 200
 
 /**
  * @brief File Type Definitions.
@@ -57,6 +57,7 @@ typedef struct {
     uint32_t current_offset;         /**< Current read/write offset within the file. */
     uint32_t start_sector;           /**< Starting sector on the disk. */
     int      ref_count;              /**< Reference count to prevent Use-After-Free vulnerabilities! [SECURITY PATCH ADDED] */
+    int      inode_idx;              /**< Index in the dir_table for locking */
 } vfs_file_t;
 
 /**
@@ -185,5 +186,11 @@ void fs_list_dir(uint8_t parent_id);
  * @return 0 on success, or a negative error code.
  */
 int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
+
+
+// --- Added by Refactor Script ---
+extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
+extern disk_file_entry_t dir_table[];
+extern void init_fs(void);
 
 #endif // FS_H

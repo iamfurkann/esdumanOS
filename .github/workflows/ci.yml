@@ -9,6 +9,8 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      ESDUMAN_KEY: "github_actions_dummy_key"
 
     steps:
       - name: Kodlari Cek

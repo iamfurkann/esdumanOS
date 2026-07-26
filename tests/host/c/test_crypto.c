@@ -8,11 +8,11 @@
 // We only use our own Kernel types now to avoid conflicts.
 #include "types.h"
 #include "aes.h"
+#include <stdio.h>
 
 // Externally declaring printf from Ubuntu's libc just to print to the screen
-extern int printf(const char *format, ...);
-
 // =========================================================================
+extern int printf(const char *format, ...);
 // MOCKING LAYER: 
 // Mocking the kernel memory functions required by aes.c for testing.
 // =========================================================================

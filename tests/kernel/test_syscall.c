@@ -7,9 +7,7 @@
 #include "ktest.h"
 #include "syscall.h"
 #include "registers.h"
-
-extern void syscall_handler(arch_regs_t *regs);
-
+#include "isr.h"
 /**
  * @brief Tests the kernel's system call dispatching logic and argument boundary validation.
  *

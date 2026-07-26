@@ -8,12 +8,7 @@
 #include "syscall.h" 
 #include "fs.h"
 #include "errno.h"
-
-extern void ft_strcpy(char *dest, const char *src);
-extern int fs_mkdir(const char *name, uint8_t parent_id);
-extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-extern disk_file_entry_t dir_table[];
-
+#include "libft.h"
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");

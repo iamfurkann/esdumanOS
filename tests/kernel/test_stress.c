@@ -8,6 +8,8 @@
 #include "syscall.h"
 #include "process.h"
 #include "fs.h"
+#include "elf.h"
+#include "kheap.h"
 
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
@@ -40,17 +42,15 @@ void run_stress_tests(void) {
     // 1. FD EXHAUSTION TEST
     // =========================================================================
     int u_fds = 0x500A00;
-    int pipes_created = 0;
     int res = 0;
     
-    for (int i = 0; i < 50; i++) {
-        res = ktest_syscall(SYSCALL_PIPE, u_fds, 0, 0);
-        if (res == 0) pipes_created++;
-        else break; // Stop as soon as the kernel correctly rejects a request.
+    for(int i=0; i<6; i++) {
+        res = ktest_syscall(SYSCALL_PIPE, (int)u_fds, 0, 0);
+        KTEST_ASSERT(res == 0, "[STRICT] Pipe opened successfully");
     }
-    
-    KTEST_ASSERT(res < 0 && pipes_created == 6, 
-                 "[STRICT] FD Exhaustion: Exactly 6 pipes (12 FDs) opened and 7th attempt successfully REJECTED");
+
+    int res7 = ktest_syscall(SYSCALL_PIPE, (int)u_fds, 0, 0);
+    KTEST_ASSERT(res7 < 0, "[STRICT] FD Exhaustion: Exactly 6 pipes (12 FDs) opened and 7th attempt successfully REJECTED");
 
     // =========================================================================
     // 2. VFS LONG NAME (Buffer Overflow) TEST
@@ -69,12 +69,7 @@ void run_stress_tests(void) {
     // =========================================================================
     // 3. DEEP DIRECTORY NESTING STRESS TEST
     // =========================================================================
-    extern int fs_mkdir(const char *name, uint8_t parent_id);
-    extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-    extern int fs_delete(const char *name, uint8_t parent_id);
-    extern disk_file_entry_t dir_table[];
-
-    int current_parent = 0; // Root directory is ID 0.
+int current_parent = 0; // Root directory is ID 0.
     int depth = 0;
     char dir_name[10] = "d0";
     
@@ -95,10 +90,7 @@ void run_stress_tests(void) {
     // =========================================================================
     // 4. PROCESS/TASK LIMIT EXHAUSTION STRESS TEST
     // =========================================================================
-    extern int load_and_exec_elf(const char *filename, uint8_t parent_id);
-    extern process_t tasks[];
-    
-    asm volatile("cli");
+asm volatile("cli");
     
     int task_limit_hit = 0;
     int loaded_count = 0;
@@ -117,16 +109,10 @@ void run_stress_tests(void) {
     
     // Validate the kernel hit the ceiling and threw an error instead of corrupting the task array.
     KTEST_ASSERT(task_limit_hit == 1, "[STRICT] Process Table: Rejected when maximum task (MAX_TASKS) limit reached");
-    
-    extern void kfree(void *);
-    for(int i = 0; i < 16; i++) { // MAX_TASKS is usually 16 in this build configuration.
-        // Identify valid dummy tasks (not empty, not our current task, and not kernel init).
-        if (tasks[i].state != TASK_EMPTY && i != current_task && tasks[i].pid > 1) {
-            if (tasks[i].page_directory) {
-                // Free the slot by marking the state as empty. 
-                // In a true environment we'd free the heap here too, but for testing
-                // we tolerate minor unmapped page leaks as long as the OS doesn't OOM.
-                tasks[i].state = TASK_EMPTY;
+    for(process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->state != TASK_EMPTY && p != current_task && p->pid > 1) {
+            if (p->page_directory) {
+                p->state = TASK_EMPTY;
             }
         }
     }

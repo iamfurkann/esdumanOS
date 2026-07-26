@@ -2,26 +2,13 @@
 #include "stdio.h"
 #include "errno.h"
 #include "klog.h"
-
+#include "process.h"
+#include "libft.h"
 #define MAX_SYSTEM_PIPES 16
 static pipe_t pipe_pool[MAX_SYSTEM_PIPES];
 static int pipe_active[MAX_SYSTEM_PIPES] = {0};
 
 static char pipe_names[MAX_SYSTEM_PIPES][32] = {0};
-static int ft_strcmp(const char *s1, const char *s2) {
-    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
-
-static void safe_strcpy(char *dest, const char *src, int max_len) {
-    if (max_len <= 0) return;
-    int i = 0;
-    while (i < max_len - 1 && src[i] != '\0') {
-        dest[i] = src[i];
-        i++;
-    }
-    dest[i] = '\0'; // Her zaman null ile bitir
-}
 
 pipe_t* create_pipe(void) {
     for (int i = 0; i < MAX_SYSTEM_PIPES; i++) {
@@ -50,7 +37,7 @@ pipe_t* get_or_create_named_pipe(const char *name) {
     if (p) {
         for (int i = 0; i < MAX_SYSTEM_PIPES; i++) {
             if (&pipe_pool[i] == p) {
-                safe_strcpy(pipe_names[i], name, 32);
+                ft_strlcpy(pipe_names[i], name, 32);
                 break;
             }
         }
@@ -84,9 +71,7 @@ int pipe_read(pipe_t *p, uint8_t *buf, int size) {
         buf[bytes_read++] = p->buffer[p->head % PIPE_SIZE];
         p->head++;
     }
-    
-    extern void wakeup_tasks(int reason);
-    wakeup_tasks(2); // 2 = WAIT_IPC
+wakeup_tasks(2); // 2 = WAIT_IPC
     
     return bytes_read;
 }
@@ -107,9 +92,7 @@ int pipe_write(pipe_t *p, const uint8_t *buf, int size) {
         p->buffer[p->tail % PIPE_SIZE] = buf[bytes_written++];
         p->tail++;
     }
-
-    extern void wakeup_tasks(int reason);
-    wakeup_tasks(2); // 2 = WAIT_IPC
+wakeup_tasks(2); // 2 = WAIT_IPC
     
     return bytes_written;
 }

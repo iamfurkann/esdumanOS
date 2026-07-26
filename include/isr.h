@@ -43,4 +43,27 @@ void clean_registers(void);
  */
 void save_stack_before_panic(void);
 
+
+// --- Added by Refactor Script ---
+extern void isr12(void);
+extern void isr16(void);
+extern void isr20(void);
+extern void isr24(void);
+extern void isr28(void);
+extern void isr32(void);
+extern void isr34(void);
+extern void isr38(void);
+extern void isr42(void);
+extern void isr46(void);
+extern void isr128(void);
+
+
+// --- Added by Refactor Script 2 ---
+extern void isr0(void);
+extern void isr4(void);
+extern void isr8(void);
+extern void timer_interrupt_handler(void);
+extern void syscall_handler(arch_regs_t *regs);
+extern void ata_irq_handler(void);
+
 #endif

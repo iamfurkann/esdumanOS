@@ -8,15 +8,9 @@
 #include "syscall.h"
 #include "fs.h"
 #include "process.h"
-
-extern void ft_strcpy(char *dest, const char *src);
-extern int load_and_exec_elf(const char *name, uint8_t parent_id);
-extern int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
-extern int fs_delete(const char *name, uint8_t parent_id); 
-extern int ft_strlen(const char *s);
-extern int current_sec_level;
-extern disk_file_entry_t dir_table[];
-
+#include "elf.h"
+#include "libft.h"
+#include "security.h"
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
@@ -44,9 +38,7 @@ void run_integration_tests(void) {
     serial_print("\n--- Cross-Component Integration Tests ---\n");
 
     asm volatile("sti");
-
-    extern int multitasking_enabled;
-    multitasking_enabled = 0; 
+multitasking_enabled = 0; 
 
     int old_sec_level = current_sec_level;
     current_sec_level = 0; 
@@ -90,10 +82,13 @@ void run_integration_tests(void) {
     
     fs_delete(u_file, 0);
     fs_delete(u_elf_name, 0);
-    
-    extern process_t tasks[];
-    if (p_idx >= 0 && p_idx < 16) { 
-        tasks[p_idx].state = 0;     // Force state back to TASK_EMPTY.
+if (p_idx >= 0) { 
+        for (process_t *p = task_list_head; p != 0; p = p->next) {
+            if (p->pid == p_idx) {
+                p->state = TASK_EMPTY;
+                break;
+            }
+        }
     }
 
     current_sec_level = old_sec_level;

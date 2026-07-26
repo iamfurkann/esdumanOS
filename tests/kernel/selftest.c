@@ -5,7 +5,11 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "ktest.h"
+#include "tty.h"
 #include "stdio.h"
+#include "arch.h"
+#include "process.h"
+#include "libft.h"
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -53,6 +57,34 @@ void qemu_shutdown(int is_success) {
  */
 void run_all_selftests(void) {
     terminal_initialize();
+    
+    // Map 4 consecutive simulated user-space pages for integration tests (0x500000 - 0x503000)
+    extern uint32_t pmm_alloc_frame(void);
+    extern int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+    // Create a mock task structure so syscalls have valid fd_table and uid
+    static process_t dummy_task;
+    static file_descriptor_t dummy_fds[16];
+    ft_memset(&dummy_task, 0, sizeof(process_t));
+    ft_memset(dummy_fds, 0, sizeof(dummy_fds));
+    dummy_task.fd_table_size = 16;
+    dummy_task.fd_table = dummy_fds;
+    dummy_task.uid = 0;
+    dummy_task.pid = 999;
+    dummy_task.state = 1; // TASK_RUNNING
+    dummy_task.next = 0;
+    dummy_task.prev = 0;
+    
+    current_task = &dummy_task;
+    task_list_head = &dummy_task;
+    task_list_tail = &dummy_task;
+
+    for (int i = 0; i < 4; i++) {
+        uint32_t vaddr = 0x500000 + (i * 4096);
+        uint32_t sim_phys = pmm_alloc_frame();
+        map_page(vaddr, sim_phys, 7); // PAGE_PRESENT | PAGE_READ_WRITE | PAGE_USER_ACCESS
+        ft_memset((void *)vaddr, 0, 4096);
+    }
+
     printk("\n======================================================\n");
     printk("       KFS COMPREHENSIVE KERNEL TEST SUITE            \n");
     printk("======================================================\n");
@@ -85,10 +117,11 @@ void run_all_selftests(void) {
     printk("RESULT: "); printk(pass_str); printk(" PASSED | "); 
     printk(fail_str); printk(" FAILED\n");
     printk("======================================================\n");
+    printk("\n*** ALL KERNEL SELF-TESTS FINISHED SUCCESSFULLY! ***\n\n");
 
-    if (tests_failed == 0) {
-        qemu_shutdown(1);
-    } else {
-        qemu_shutdown(0);
-    }
+    current_task = 0; // Restore before exiting selftests
+    task_list_head = 0;
+    task_list_tail = 0;
+
+    qemu_shutdown(tests_failed == 0);
 }

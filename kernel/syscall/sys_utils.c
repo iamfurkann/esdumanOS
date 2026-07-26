@@ -1,3 +1,9 @@
+/*
+ * File: sys_utils.c
+ * Purpose: Contains system calls and related utilities.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "syscalls_internal.h"
 #include "types.h"
 #include "fs.h"
@@ -6,18 +12,18 @@
 #include "klog.h"
 #include "devfs.h"
 #include "errno.h"
-
-extern process_t tasks[];
-extern disk_file_entry_t dir_table[];
-
-void print_hexdump(uint32_t addr, int lenght) {
+#include "kernel.h"
+/**
+ * @brief Function print_hexdump
+ */
+void print_hexdump(uint32_t addr, int length) {
   uint8_t *ptr = (uint8_t *)addr;
   const char hex_chars[] = "0123456789ABCDEF";
 
-  for (int i = 0; i < lenght; i += 16) {
+  for (int i = 0; i < length; i += 16) {
     printk("0x%x: ", (uint32_t)(ptr + i));
     for (int j = 0; j < 16; j++) {
-      if (i + j < lenght) {
+      if (i + j < length) {
         uint8_t byte = ptr[i + j];
         printk("%c%c ", hex_chars[byte >> 4], hex_chars[byte & 0x0F]);
       } else {
@@ -27,7 +33,7 @@ void print_hexdump(uint32_t addr, int lenght) {
     }
     printk(" |");
     for (int j = 0; j < 16; j++) {
-      if (i + j < lenght) {
+      if (i + j < length) {
         uint8_t byte = ptr[i + j];
         if (byte >= 32 && byte <= 126) printk("%c", byte);
         else printk(".");
@@ -37,6 +43,9 @@ void print_hexdump(uint32_t addr, int lenght) {
   }
 }
 
+/**
+ * @brief Function vfs_resolve_path
+ */
 int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
     if (!path || !path[0]) return E_INVAL;
     
@@ -48,8 +57,8 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
         i++;
     }
     
-    char token[64];
-    for (int k = 0; k < 64; k++) { token[k] = '\0'; basename[k] = '\0'; }
+    char token[MAX_FILENAME];
+    for (int k = 0; k < MAX_FILENAME; k++) { token[k] = '\0'; basename[k] = '\0'; }
     int t_idx = 0;
     
     while (1) {
@@ -58,7 +67,7 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
             
             if (path[i] == '\0') {
                 int j = 0;
-                while (token[j] && j < 63) { basename[j] = token[j]; j++; }
+                while (token[j] && j < MAX_FILENAME - 1) { basename[j] = token[j]; j++; }
                 basename[j] = '\0';
                 return current_id;
             }
@@ -77,8 +86,7 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
                     }
                 }
                 else {
-                    extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-                    int idx = fs_get_entry_idx(token, current_id);
+int idx = fs_get_entry_idx(token, current_id);
                     if (idx == -1) {
                         klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Directory not found");
                         return E_NOENT;
@@ -93,7 +101,7 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
             }
             t_idx = 0;
         } else {
-            if (t_idx < 63) token[t_idx++] = path[i];
+            if (t_idx < MAX_FILENAME - 1) token[t_idx++] = path[i];
         }
         i++;
     }
@@ -101,9 +109,12 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
     return E_NOENT;
 }
 
+/**
+ * @brief Function check_vfs_access
+ */
 int check_vfs_access(int entry_id, int needs_write) {
-    if (current_task < 0) return 1; 
-    uint32_t my_uid = tasks[current_task].uid;
+    if (current_task == 0) return 1; 
+    uint32_t my_uid = current_task->uid;
     if (my_uid == 0) return 1;
 
     int curr = entry_id;
@@ -157,6 +168,9 @@ int check_vfs_access(int entry_id, int needs_write) {
     return 1;
 }
 
+/**
+ * @brief Function validate_user_pointer
+ */
 int validate_user_pointer(const void *ptr, size_t size) {
     uint32_t start_addr = (uint32_t)ptr;
     uint32_t end_addr = start_addr + size;
@@ -179,9 +193,7 @@ int validate_user_pointer(const void *ptr, size_t size) {
         }
 
         uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (pd_index * 0x1000));
-        
-        extern int is_test_mode;
-        if ((pt_virt[pt_index] & 0x05) != 0x05) {
+if ((pt_virt[pt_index] & 0x05) != 0x05) {
             if (!(is_test_mode && (pt_virt[pt_index] & 0x01))) {
                 return 0;
             }
@@ -191,6 +203,9 @@ int validate_user_pointer(const void *ptr, size_t size) {
     return 1;
 }
 
+/**
+ * @brief Function validate_string_pointer
+ */
 int validate_string_pointer(const char *str, size_t max_len) {
     if (!str) return 0;
     uint32_t curr_addr = (uint32_t)str;
@@ -206,8 +221,7 @@ int validate_string_pointer(const char *str, size_t max_len) {
             if (!(pd_virt[pd_index] & 1)) return 0;
             
             uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (pd_index * 0x1000));
-            extern int is_test_mode;
-            if ((pt_virt[pt_index] & 0x05) != 0x05) {
+if ((pt_virt[pt_index] & 0x05) != 0x05) {
                 if (!(is_test_mode && (pt_virt[pt_index] & 0x01))) {
                     return 0; 
                 }
@@ -220,13 +234,19 @@ int validate_string_pointer(const char *str, size_t max_len) {
     return 0;
 }
 
+/**
+ * @brief Function validate_fd
+ */
 int validate_fd(int fd) {
-    if (fd < 0 || fd >= MAX_FD_PER_TASK) {
+    if (current_task == 0 || fd < 0 || (uint32_t)fd >= current_task->fd_table_size) {
         return 0;
     }
     return 1;
 }
 
+/**
+ * @brief Function hash_djb2_salted
+ */
 uint32_t hash_djb2_salted(const char *str) {
     uint32_t hash = 5381;
     while (*str) {

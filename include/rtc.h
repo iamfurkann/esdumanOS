@@ -32,3 +32,7 @@ void get_time_string(char *buf);
 uint8_t get_rtc_second(void);
 
 # endif
+// --- Added by Refactor Script ---
+extern uint32_t timer_get_ticks(void);
+extern uint32_t timer_ticks;
+

@@ -102,4 +102,32 @@ void klog_write_char(char c);
  * @brief Dumps the kernel log to the console or serial output
  */
 void dump_klog(void);
+
+// --- Added by Refactor Script ---
+extern void init_timer(uint32_t freq);
+extern void init_kernel_timers(void);
+extern void __attribute__((weak)) run_all_selftests(void);
+extern int is_test_mode;
+extern uint32_t __bss_end;
+extern uint32_t _bss_start;
+extern uint32_t _bss_end;
+
+extern int kernel_panic_mode;
+extern void init_stack_protect(void);
+extern void register_kernel_timer(int sig_num, void (*handler)(void));
+extern const uint32_t sh_elf_len;
+extern const uint32_t hello_elf_len;
+extern const uint32_t clear_elf_len;
+extern const uint32_t echo_elf_len;
+extern unsigned char touch_elf[]; extern unsigned int touch_elf_len;
+extern unsigned char rm_elf[]; extern unsigned int rm_elf_len;
+extern unsigned char mv_elf[]; extern unsigned int mv_elf_len;
+extern unsigned char cp_elf[]; extern unsigned int cp_elf_len;
+extern unsigned char free_elf[]; extern unsigned int free_elf_len;
+extern unsigned char whoami_elf[]; extern unsigned int whoami_elf_len;
+extern unsigned char kill_elf[]; extern unsigned int kill_elf_len;
+extern unsigned char grep_elf[]; extern unsigned int grep_elf_len;
+extern unsigned char head_elf[]; extern unsigned int head_elf_len;
+extern unsigned char date_elf[]; extern unsigned int date_elf_len;
+
 #endif //KERNEL_H

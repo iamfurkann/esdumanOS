@@ -6,10 +6,11 @@
  */
 #include "ktest.h"
 #include "syscall.h"
+#include "paging.h"
+#include "pmm.h"
+#include "security.h"
 
 // Import the Kernel's internal security firewall function externally
-extern int validate_user_pointer(const void *ptr, size_t size);
-
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
@@ -61,15 +62,13 @@ void run_adversarial_tests(void) {
     // and avoid Page Faults (CR2), we test the internal security function DIRECTLY!
     // =========================================================================
 
+    uint32_t dummy_frame_lower = pmm_alloc_frame();
+    map_page(0x400000, dummy_frame_lower, 7);
     int res_lower_bound = validate_user_pointer((const void *)0x400000, 1);
     KTEST_ASSERT(res_lower_bound == 1, "[STRICT] Security: User Space Lower Bound (0x400000) successfully ACCEPTED");
-
-    extern int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
-    extern uint32_t pmm_alloc_frame(void);
-    extern void pmm_free_frame(uint32_t addr);
-    extern void unmap_page(uint32_t virtual_addr);
-    
-    // Allocate and map a dummy frame to the upper bound page (0xBFFFF000 is the base page of 0xBFFFFFFF).
+    unmap_page(0x400000);
+    pmm_free_frame(dummy_frame_lower);
+// Allocate and map a dummy frame to the upper bound page (0xBFFFF000 is the base page of 0xBFFFFFFF).
     // Using flags = 7 (Present, R/W, User privilege).
     uint32_t dummy_frame = pmm_alloc_frame();
     map_page(0xBFFFF000, dummy_frame, 7);

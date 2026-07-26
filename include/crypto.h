@@ -90,4 +90,8 @@ void sha256_to_hex(const char *input, char *output_hex);
     void aes256_decrypt_hw(aes256_ctx_t *ctx, const uint8_t *in, uint8_t *out);
 #endif
 
+
+// --- Added by Refactor Script ---
+extern void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary);
+
 #endif

@@ -12,7 +12,6 @@ void print_hex_byte(uint8_t value)
 void print_kernel_stack(void)
 {
     uint32_t esp;
-
     asm volatile("mov %%esp, %0" : "=r"(esp));
 
     unsigned char *stack = (unsigned char *)esp;

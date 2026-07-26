@@ -39,6 +39,7 @@
 #define E_MLINK         -31   /**< Too many links */
 #define E_PIPE          -32   /**< Broken pipe */
 #define E_NAMETOOLONG   -36   /**< File name too long */
+#define E_NOSYS         -38   /**< Function not implemented (Invalid syscall) */
 
 /**
  * @brief Global error number variable.

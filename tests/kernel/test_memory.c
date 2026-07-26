@@ -6,12 +6,7 @@
  */
 #include "ktest.h"
 #include "types.h"
-
-extern void *kmalloc(uint32_t size);
-extern void kfree(void *ptr);
-extern void *krealloc(void *ptr, size_t new_size);
-extern size_t kmalloc_size(void *ptr);
-
+#include "kheap.h"
 /**
  * @brief Executes a comprehensive testing suite for the kernel memory allocator (KHeap).
  *

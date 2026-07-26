@@ -1,3 +1,9 @@
+/*
+ * File: vfs.c
+ * Purpose: Virtual File System implementation handling file operations and FAT.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 #include "fs.h"
 #include "ata.h"
 #include "libft.h"
@@ -8,16 +14,19 @@
 #include "crypto.h"
 #include "process.h"
 #include "bcache.h"
-
-extern uint8_t kernel_master_key[32];
-extern uint32_t ata_identify(void);
-
 disk_file_entry_t dir_table[MAX_FILES_IN_DIR];
 uint32_t fs_max_sectors = 4096;
 uint32_t file_allocation_table[4096];
 
 int fs_get_entry_idx(const char *name, uint8_t parent_id);
 
+/**
+ * @brief safe_strcpy
+ * @param dest
+ * @param src
+ * @param max_len
+ * @return static void
+ */
 static void safe_strcpy(char *dest, const char *src, size_t max_len) {
     if (max_len == 0) return;
     size_t i;
@@ -26,12 +35,17 @@ static void safe_strcpy(char *dest, const char *src, size_t max_len) {
 }
 
 static mutex_t vfs_mutex;
+rwlock_t inode_locks[MAX_FILES_IN_DIR];
 static int vfs_lock_owner = -1;
 static int vfs_lock_count = 0;
 
+/**
+ * @brief vfs_lock
+ * @return static void
+ */
 static void vfs_lock(void) {
-    if (!multitasking_enabled || current_task == -1) return;
-    int my_pid = tasks[current_task].pid;
+    if (!multitasking_enabled || current_task == 0) return;
+    int my_pid = current_task->pid;
     if (vfs_lock_owner == my_pid) {
         vfs_lock_count++;
         return;
@@ -41,9 +55,13 @@ static void vfs_lock(void) {
     vfs_lock_count = 1;
 }
 
+/**
+ * @brief vfs_unlock
+ * @return static void
+ */
 static void vfs_unlock(void) {
-    if (!multitasking_enabled || current_task == -1) return;
-    int my_pid = tasks[current_task].pid;
+    if (!multitasking_enabled || current_task == 0) return;
+    int my_pid = current_task->pid;
     if (vfs_lock_owner == my_pid) {
         vfs_lock_count--;
         if (vfs_lock_count == 0) {
@@ -53,8 +71,12 @@ static void vfs_unlock(void) {
     }
 }
 
-/* --- FAT (FILE ALLOCATION TABLE) YÖNETİMİ --- */
+/* --- FAT (FILE ALLOCATION TABLE) MANAGEMENT --- */
 
+/**
+ * @brief save_fat_to_disk
+ * @return static void
+ */
 static void save_fat_to_disk(void) {
     uint8_t *fat_ptr = (uint8_t *)file_allocation_table;
     uint32_t total_bytes = fs_max_sectors * sizeof(uint32_t);
@@ -65,6 +87,11 @@ static void save_fat_to_disk(void) {
     }
 }
 
+/**
+ * @brief allocate_fat_chain
+ * @param count
+ * @return static uint32_t
+ */
 static uint32_t allocate_fat_chain(uint32_t count) {
     if (count == 0) return FAT_EOF;
 
@@ -100,6 +127,10 @@ static uint32_t allocate_fat_chain(uint32_t count) {
     return start_sector;
 }
 
+/**
+ * @brief save_directory_to_disk
+ * @return static void
+ */
 static void save_directory_to_disk(void) {
     uint8_t *dir_ptr = (uint8_t *)dir_table;
     uint32_t total_bytes = sizeof(disk_file_entry_t) * MAX_FILES_IN_DIR;
@@ -121,10 +152,16 @@ static void save_directory_to_disk(void) {
     }
 }
 
-/* --- DOSYA SİSTEMİ BAŞLATMA --- */
+/* --- FILE SYSTEM INITIALIZATION --- */
 
+/**
+ * @brief init_fs
+ */
 void init_fs(void) {
     mutex_init(&vfs_mutex);
+    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        rwlock_init(&inode_locks[i]);
+    }
     bcache_init();
     fs_max_sectors = ata_identify();
 
@@ -165,28 +202,43 @@ void init_fs(void) {
     save_fat_to_disk();
 }
 
-/* --- VFS API (OKUMA / YAZMA / SİLME) --- */
+/* --- VFS API (READ / WRITE / DELETE) --- */
 
+/**
+ * @brief fs_list_files
+ */
 void fs_list_files(void) {
     vfs_lock();
-    printk("Dosya Listesi:\n");
+    printk("File List:\n");
     printk("----------------------------------------\n");
     int found = 0;
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1) {
-            printk("    %s \t\t Boyut: %d Byte \t Sektor: %d\n",
+            printk("    %s \t\t Size: %d Byte \t Sector: %d\n",
             dir_table[i].filename, dir_table[i].file_size, dir_table[i].start_sector);
             found = 1;
         }
     }
-    if (!found) printk(" (Dosya sistemi bos veya dizin bulunumadi)\n");
+    if (!found) printk(" (File system is empty or directory not found)\n");
     printk("----------------------------------------\n");
     vfs_unlock();
 }
 
+/**
+ * @brief fs_read_raw
+ * @param file
+ * @param buffer
+ * @param size
+ * @return int
+ */
 int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
-    vfs_lock();
-    if (file->current_offset >= file->file_size) { vfs_unlock(); return 0; }
+    if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) {
+        rwlock_acquire_read(&inode_locks[file->inode_idx], current_task ? &current_task->regs : 0);
+    }
+    if (file->current_offset >= file->file_size) { 
+        if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) rwlock_release_read(&inode_locks[file->inode_idx]); 
+        return 0; 
+    }
 
     if (file->current_offset + size > file->file_size)
         size = file->file_size - file->current_offset;
@@ -196,13 +248,14 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     uint32_t sectors_to_skip = file->current_offset / 512;
     
     for (uint32_t i = 0; i < sectors_to_skip; i++) {
-        if (current_sector == FAT_EOF) { vfs_unlock(); return 0; }
+        if (current_sector == FAT_EOF || current_sector >= 4096) { vfs_unlock(); return 0; }
         current_sector = file_allocation_table[current_sector];
     }
 
     uint32_t offset_in_sector = file->current_offset % 512;
 
     while (bytes_read < size && current_sector != FAT_EOF) {
+        if (current_sector >= 4096) { break; }
         uint8_t sector_buf[512];
         bcache_read_sector(current_sector, sector_buf);
 
@@ -220,10 +273,19 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
         current_sector = file_allocation_table[current_sector];
         offset_in_sector = 0;
     }
-    vfs_unlock();
+    if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) {
+        rwlock_release_read(&inode_locks[file->inode_idx]);
+    }
     return bytes_read;
 }
 
+/**
+ * @brief fs_read
+ * @param file
+ * @param buffer
+ * @param size
+ * @return int
+ */
 int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
         return fs_read_encrypted(file, buffer, size, kernel_master_key);
@@ -231,13 +293,20 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     return fs_read_raw(file, buffer, size);
 }
 
+/**
+ * @brief fs_create_file_raw
+ * @param name
+ * @param content
+ * @param size
+ * @param parent_id
+ * @return int
+ */
 int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
     vfs_lock();
-    extern process_t tasks[];
-    uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
     
     if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
-        klog_int(LOG_LEVEL_WARN, "VFS", "Erisim Engellendi: Sadece ROOT 'passwd' dosyasini degistirebilir. UID", c_uid);
+        klog_int(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can modify 'passwd'. UID", c_uid);
         vfs_unlock(); return E_ACCES;
     }
 
@@ -254,7 +323,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
 
     if (existing_idx != -1) { vfs_unlock(); return E_EXIST; }
     if (free_idx == -1) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Dosya sistemi (Dizin tablosu) dolu!");
+        klog(LOG_LEVEL_ERROR, "VFS", "File system (Directory table) full!");
         vfs_unlock(); return E_NFILE;
     }
 
@@ -262,7 +331,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
     uint32_t new_sector = allocate_fat_chain(sectors_needed);
     
     if (new_sector == FAT_FREE) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Disk tamamen dolu veya yeterli alan yok!");
+        klog(LOG_LEVEL_ERROR, "VFS", "Disk is completely full or not enough space!");
         vfs_unlock(); return E_NOSPC;
     }
 
@@ -286,6 +355,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
         bcache_write_sector(current_sec_to_write, sector_buf);
         bytes_written += chunk_size;
         
+        if (current_sec_to_write >= 4096) { break; }
         current_sec_to_write = file_allocation_table[current_sec_to_write];
     }
 
@@ -301,23 +371,37 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
     dir_table[free_idx].owner_uid = c_uid;
 
     save_directory_to_disk();
-    klog(LOG_LEVEL_INFO, "VFS", "Yeni dosya olusturuldu ve diske yazildi.");
+    klog(LOG_LEVEL_INFO, "VFS", "New file created and written to disk.");
     vfs_unlock();
     return E_OK;
 }
 
+/**
+ * @brief fs_create_file
+ * @param name
+ * @param content
+ * @param size
+ * @param parent_id
+ * @return int
+ */
 int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Sistem Immutable modda. Dosya olusturma engellendi!");
+        klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File creation blocked!");
         return E_ROFS;
     }
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
-        extern int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, const uint8_t key[32], uint8_t parent_id);
-        return fs_create_encrypted(name, content, size, kernel_master_key, parent_id);
+return fs_create_encrypted(name, content, size, kernel_master_key, parent_id);
     }
     return fs_create_file_raw(name, content, size, parent_id);
 }
 
+/**
+ * @brief fs_open
+ * @param name
+ * @param parent_id
+ * @param file
+ * @return int
+ */
 int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file) {
     vfs_lock();
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
@@ -329,6 +413,7 @@ int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file) {
             file->file_size = dir_table[i].file_size;
             file->current_offset = 0;
             file->ref_count = 1;
+            file->inode_idx = i;
             vfs_unlock();
             return E_OK;
         }
@@ -337,18 +422,22 @@ int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file) {
     return E_NOENT;
 }
 
+/**
+ * @brief fs_delete
+ * @param name
+ * @param parent_id
+ * @return int
+ */
 int fs_delete(const char *name, uint8_t parent_id) {
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Sistem Immutable modda. Dosya silme engellendi!");
+        klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File deletion blocked!");
         vfs_unlock(); return E_ROFS;
     }
-
-    extern process_t tasks[];
-    uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
     
     if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
-        klog(LOG_LEVEL_WARN, "VFS", "Erisim Engellendi: Sadece ROOT 'passwd' dosyasini silebilir!");
+        klog(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can delete 'passwd'!");
         vfs_unlock(); return E_ACCES;
     }
 
@@ -366,7 +455,7 @@ int fs_delete(const char *name, uint8_t parent_id) {
             dir_table[i].is_used = 0; 
             ft_memset(dir_table[i].filename, 0, MAX_FILENAME);
             save_directory_to_disk();
-            klog(LOG_LEVEL_INFO, "VFS", "Dosya basariyla diskten silindi.");
+            klog(LOG_LEVEL_INFO, "VFS", "File successfully deleted from disk.");
             vfs_unlock(); return E_OK;
         }
     }
@@ -374,24 +463,29 @@ int fs_delete(const char *name, uint8_t parent_id) {
     return E_NOENT;
 }
 
+/**
+ * @brief fs_rename
+ * @param old_name
+ * @param new_name
+ * @param parent_id
+ * @return int
+ */
 int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Sistem Immutable modda. Dosya adi degistirilemez!");
+        klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File renaming blocked!");
         vfs_unlock(); return E_ROFS;
     }
-
-    extern process_t tasks[];
-    uint32_t c_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
     
     if ((ft_strcmp(old_name, "passwd") == 0 || ft_strcmp(new_name, "passwd") == 0) && c_uid != 0) {
-        klog(LOG_LEVEL_WARN, "VFS", "Erisim Engellendi: Sadece ROOT 'passwd' dosyasini adlandirabilir!");
+        klog(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can rename 'passwd'!");
         vfs_unlock(); return E_ACCES;
     }
 
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1 && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, new_name) == 0) {
-            klog(LOG_LEVEL_WARN, "VFS", "Adlandirma basarisiz: Hedef isimde dosya zaten var!");
+            klog(LOG_LEVEL_WARN, "VFS", "Rename failed: File with target name already exists!");
             vfs_unlock(); return E_EXIST;
         }
     }
@@ -412,6 +506,14 @@ int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
     return E_NOENT;
 }
 
+/**
+ * @brief fs_atomic_update
+ * @param name
+ * @param content
+ * @param size
+ * @param parent_id
+ * @return int
+ */
 int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
     vfs_lock();
     
@@ -430,16 +532,16 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
     char tmp_name[MAX_FILENAME];
     ft_memset(tmp_name, 0, MAX_FILENAME);
     safe_strcpy(tmp_name, name, MAX_FILENAME - 4);
-
+    
     uint32_t len = ft_strlen(tmp_name);
     tmp_name[len] = '.'; tmp_name[len+1] = 't'; tmp_name[len+2] = 'm'; tmp_name[len+3] = 'p'; tmp_name[len+4] = '\0';
 
     vfs_unlock();
     fs_delete(tmp_name, parent_id);
-    int res = fs_create_file(tmp_name, content, size, parent_id);
+    int res = fs_create_file_raw(tmp_name, content, size, parent_id);
     if (res != E_OK) return res;
 
-    vfs_lock(); // Değişim işlemi için tekrar kilitle
+    vfs_lock(); // Lock again for the swap operation
     int tmp_idx = -1;
     orig_idx = -1;
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
@@ -454,11 +556,17 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
     uint32_t old_sector = dir_table[orig_idx].start_sector;
     uint32_t old_size = dir_table[orig_idx].file_size;
 
-    dir_table[orig_idx].start_sector = dir_table[tmp_idx].start_sector;
-    dir_table[orig_idx].file_size = dir_table[tmp_idx].file_size;
+    if (orig_idx >= 0 && orig_idx < MAX_FILES_IN_DIR && tmp_idx >= 0 && tmp_idx < MAX_FILES_IN_DIR) {
+        rwlock_acquire_write(&inode_locks[orig_idx], current_task ? &current_task->regs : 0);
+        
+        dir_table[orig_idx].start_sector = dir_table[tmp_idx].start_sector;
+        dir_table[orig_idx].file_size = dir_table[tmp_idx].file_size;
 
-    dir_table[tmp_idx].start_sector = old_sector;
-    dir_table[tmp_idx].file_size = old_size;
+        dir_table[tmp_idx].start_sector = old_sector;
+        dir_table[tmp_idx].file_size = old_size;
+        
+        rwlock_release_write(&inode_locks[orig_idx]);
+    }
     
     save_directory_to_disk();
     vfs_unlock();
@@ -467,6 +575,12 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
     return E_OK;
 }
 
+/**
+ * @brief fs_get_entry_idx
+ * @param name
+ * @param parent_id
+ * @return int
+ */
 int fs_get_entry_idx(const char *name, uint8_t parent_id) {
     vfs_lock();
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
@@ -480,6 +594,12 @@ int fs_get_entry_idx(const char *name, uint8_t parent_id) {
     return -1;
 }
 
+/**
+ * @brief fs_mkdir
+ * @param name
+ * @param parent_id
+ * @return int
+ */
 int fs_mkdir(const char *name, uint8_t parent_id) {
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) { vfs_unlock(); return E_ROFS; }
@@ -498,7 +618,7 @@ int fs_mkdir(const char *name, uint8_t parent_id) {
         }
     }
     if (free_idx == -1) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Dizin tablosu dolu, yeni klasor acilamadi.");
+        klog(LOG_LEVEL_ERROR, "VFS", "Directory table full, cannot create new directory.");
         vfs_unlock(); return E_NFILE;
     }
 
@@ -511,18 +631,20 @@ int fs_mkdir(const char *name, uint8_t parent_id) {
     dir_table[free_idx].entry_id = free_idx;
     dir_table[free_idx].parent_id = parent_id;
     dir_table[free_idx].is_used = 1;
-
-    extern process_t tasks[];
-    uint32_t current_uid = (current_task >= 0) ? tasks[current_task].uid : 0;
+uint32_t current_uid = (current_task != 0) ? current_task->uid : 0;
     dir_table[free_idx].owner_uid = current_uid;
 
     save_directory_to_disk();
     vfs_unlock(); return E_OK;
 }
 
+/**
+ * @brief fs_list_dir
+ * @param parent_id
+ */
 void fs_list_dir(uint8_t parent_id) {
     vfs_lock();
-    printk("Icerik:\n----------------------------------------\n");
+    printk("Contents:\n----------------------------------------\n");
     int found = 0;
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id) {
@@ -538,7 +660,7 @@ void fs_list_dir(uint8_t parent_id) {
         }
     }
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    if (!found) printk("(Bos)\n");
+    if (!found) printk("(Empty)\n");
     printk("----------------------------------------\n");
     vfs_unlock();
 }

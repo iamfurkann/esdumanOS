@@ -7,12 +7,9 @@
 #include "ktest.h"
 #include "syscall.h" 
 #include "process.h" // To access process_t and tasks[] array
-
-extern void ft_strcpy(char *dest, const char *src);
-
+#include "libft.h"
+#include "security.h"
 // Import kernel variables to clean up UID after test
-extern process_t tasks[];
-
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
@@ -44,8 +41,8 @@ void run_security_tests(void) {
     serial_print("\n--- Security and Authorization Tests ---\n");
     
     int original_uid = 0;
-    if (current_task >= 0) {
-        original_uid = tasks[current_task].uid;
+    if (current_task != 0) {
+        original_uid = current_task->uid;
     }
     
     char *u_pass_wrong = (char *)0x500400;
@@ -73,16 +70,14 @@ void run_security_tests(void) {
 
     int lockout_res = sys_setuid(0, u_pass_correct);
     KTEST_ASSERT(lockout_res < 0, "[STRICT] Brute-Force Protection: Rejected even with correct password before lockout period expires");
-
-    extern uint32_t auth_fail_ticks[];
-    if (current_task >= 0) {
-        auth_fail_ticks[current_task] = 0; 
+if (current_task != 0) {
+        current_task->auth_fail_ticks = 0; 
     }
 
     int invalid_syscall = ktest_syscall(999, 0, 0, 0);
     KTEST_ASSERT(invalid_syscall < 0, "[STRICT] Kernel: Invalid (999) Syscall number rejected without locking up");
 
-    if (current_task >= 0) {
-        tasks[current_task].uid = original_uid; 
+    if (current_task != 0) {
+        current_task->uid = original_uid; 
     }
 }

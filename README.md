@@ -286,6 +286,8 @@ sudo pacman -S gcc nasm make qemu-system-x86 \
 
 ### Build Commands
 
+> **Note:** The `ESDUMAN_KEY` environment variable is required to build the kernel because of the AES-256 encrypted file system (e.g. `export ESDUMAN_KEY="mysecret"`).
+
 ```bash
 # Full build: compile kernel, encrypt ELF binaries, create bootable ISO
 make

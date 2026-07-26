@@ -8,14 +8,7 @@
 #include "crypto.h"
 #include "fs.h"
 #include "security.h"
-
-extern uint8_t kernel_master_key[32];
-extern int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, const uint8_t key[32], uint8_t parent_id);
-extern int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const uint8_t key[32]);
-extern int ft_strcmp(const char *s1, const char *s2);
-extern int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file);
-extern int fs_delete(const char *name, uint8_t parent_id);
-
+#include "libft.h"
 /**
  * @brief Tests the cryptographic hashing and encrypted file system (CryptoFS) integration.
  *
@@ -40,8 +33,7 @@ void run_crypto_tests(void) {
 
     const char *test_msg = "abc";
     uint8_t hash_out[32];
-    extern void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary);
-    sha256_binary((const uint8_t *)test_msg, 3, hash_out);
+sha256_binary((const uint8_t *)test_msg, 3, hash_out);
     
     // Validate the initial bytes of the hash block to ensure algorithmic correctness.
     // Let's check the first 4 bytes: 

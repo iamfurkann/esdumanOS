@@ -1,3 +1,9 @@
+/*
+ * File: signal.c
+ * Purpose: Kernel timer callbacks and signal processing logic.
+ *
+ * This file is part of the esdumanOS test suite.
+ */
 // [REFACTOR]: Renamed from signal.c logic to Kernel Timer Callbacks
 #include "signal.h"
 #include "stdio.h"
@@ -64,8 +70,11 @@ void process_pending_kernel_timers(void) {
     }
 }
 
+/**
+ * @brief alarm_demo_callback
+ */
 void alarm_demo_callback(void) {
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    printk("\n[KERNEL TIMER] 3 Saniyelik Alarm Tetiklendi! (Bottom-half)\n");
+    printk("\n[KERNEL TIMER] 3 Second Alarm Triggered! (Bottom-half)\n");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 }

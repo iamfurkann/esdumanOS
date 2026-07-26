@@ -7,11 +7,8 @@
 #include "ktest.h"
 #include "syscall.h" 
 #include "process.h"
-
-extern void ft_strcpy(char *dest, const char *src);
-extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
-extern process_t tasks[];
-
+#include "libft.h"
+#include "fs.h"
 // Syscall bridge
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
@@ -38,7 +35,7 @@ void run_passwd_tests(void) {
     serial_print("\n--- Passwd & Shadow Security Tests ---\n");
 
     int original_uid = 0;
-    if (current_task >= 0) original_uid = tasks[current_task].uid;
+    if (current_task != 0) original_uid = current_task->uid;
 
     char *u_etc = (char *)0x502000;
     char *u_passwd = (char *)0x502100;
@@ -53,7 +50,7 @@ void run_passwd_tests(void) {
     // =========================================================================
     // [PREPARATION]: Create /etc and /etc/passwd as ROOT for test environment
     // =========================================================================
-    if (current_task >= 0) tasks[current_task].uid = 0;
+    if (current_task != 0) current_task->uid = 0;
 
     int etc_id = fs_get_entry_idx("etc", 0);
     if (etc_id == -1) {
@@ -72,7 +69,7 @@ void run_passwd_tests(void) {
     // =========================================================================
     // [SIMULATION]: Drop privileges and attack Critical System Files!
     // =========================================================================
-    if (current_task >= 0) tasks[current_task].uid = 1000; // Normal User
+    if (current_task != 0) current_task->uid = 1000; // Normal User
 
     int rm_res = ktest_syscall(22, (int)u_passwd, etc_id, 0); // SYSCALL_RM_FILE
     KTEST_ASSERT(rm_res < 0, "[STRICT] Normal user CANNOT DELETE /etc/passwd");
@@ -86,5 +83,5 @@ void run_passwd_tests(void) {
     // =========================================================================
     // Cleanup: Restore privileges
     // =========================================================================
-    if (current_task >= 0) tasks[current_task].uid = original_uid;
+    if (current_task != 0) current_task->uid = original_uid;
 }

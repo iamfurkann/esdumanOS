@@ -4,12 +4,6 @@
 
 gdt_entry_t gdt_entries[8];
 gdt_ptr_t gdt_ptr;
-
-extern void gdt_flush(uint32_t);
-extern void tss_flush(void);
-
-extern uint32_t kernel_stack_ring0[1024];
-
 /**
  * Configures a single descriptor gate in the Global Descriptor Table (GDT).
  * Expected behavior: Sets up the base address, limit, access flags, and granularity
@@ -40,7 +34,7 @@ void init_gdt(void) {
     gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF); // Kernel Code
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); // Kernel Data
     gdt_set_gate(3, 0, 0xFFFFFFFF, 0x92, 0xCF); // Kernel Stack
-    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xFA, 0xCF); // User Code
+    gdt_set_gate(4, 0, 0xBFFFE, 0xFA, 0xCF); // User Code
     gdt_set_gate(5, 0, 0xFFFFFFFF, 0xF2, 0xCF); // User Data
     gdt_set_gate(6, 0, 0xFFFFFFFF, 0xF2, 0xCF); // User Stack
 

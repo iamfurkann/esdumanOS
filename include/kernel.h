@@ -7,9 +7,9 @@
  * MINOR : New large features
  * PATCH : Bug fixes, minor patches
  */
-#define OS_VERSION_MAJOR    3
-#define OS_VERSION_MINOR    4
-#define OS_VERSION_PATCH    3
+#define OS_VERSION_MAJOR    0
+#define OS_VERSION_MINOR    1
+#define OS_VERSION_PATCH    0
 
 /**
  * @brief Helper macros for stringifying version numbers

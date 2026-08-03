@@ -52,9 +52,32 @@ temp/
 .env
 .env.*
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Compiled binaries
+*.out
+
+# Test binaries
+tests/host/bin/
+
+# CMake
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 compile_commands.json
+
+# Sensitive
 passwords.txt
+
+# QEMU logs
 qemu.log
+
+# Generated test files
+message.txt
+gizli.txt
+
+# Generated resource files
+src/resources/*_data.c

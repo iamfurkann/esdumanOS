@@ -1,5 +1,5 @@
 ifndef ESDUMAN_KEY
-$(error DIKKAT: ESDUMAN_KEY ortam degiskeni tanimli degil! Guvenlik sebebiyle derleme durduruldu.)
+$(error ERROR: ESDUMAN_KEY environment variable is not set! Build aborted for security reasons.)
 endif
 
 ARCH ?= x86
@@ -125,7 +125,7 @@ else ifeq ($(ARCH), riscv64)
                 arch/riscv/cpu/trap.o \
                 arch/riscv/drivers/uart.o
 else
-    $(error "Desteklenmeyen Mimari: $(ARCH). Lutfen x86 veya riscv64 secin.")
+    $(error "Unsupported architecture: $(ARCH). Please select x86 or riscv64.")
 endif
 
 export CC AS LD CFLAGS
@@ -314,7 +314,7 @@ src/resources/date_elf_data.c: apps/bin/date.elf tools/encrypt_tool
 
 
 test:
-	@echo "--- Host Unit Tests Calistiriliyor ---"
+	@echo "--- Running Host Unit Tests ---"
 	
 	@gcc -Wall -Wextra -I./include -I./crypto -DARCH_X86 tests/host/c/test_crypto.c crypto/aes.c -o tests/host/test_crypto
 	@./tests/host/test_crypto
@@ -329,7 +329,7 @@ test:
 	@python3 -m unittest discover -s tests/host/python -p "test_*.py"
 
 test_kernel: $(TEST_BIN) hello.elf
-	@echo "--- Kernel QEMU Self-Test Calistiriliyor ---"
+	@echo "--- Running Kernel QEMU Self-Tests ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
@@ -339,34 +339,34 @@ test_kernel: $(TEST_BIN) hello.elf
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-d int,cpu_reset -D qemu.log \
 		-serial stdio -display none; then \
-		echo "HATA: QEMU beklenmedik sekilde kapandi!"; exit 1; \
+		echo "ERROR: QEMU exited unexpectedly!"; exit 1; \
 	else \
 		RET=$$?; \
 		if [ $$RET -eq 33 ]; then \
-			echo "KERNEL TESTLERI KUSURSUZ! (Tum Moduller Gecti)"; exit 0; \
+			echo "ALL KERNEL TESTS PASSED! (All Modules Passed)"; exit 0; \
 		elif [ $$RET -eq 35 ]; then \
-			echo "KERNEL TESTLERI BASARISIZ! (Bazi testler kaldi)"; exit 1; \
+			echo "KERNEL TESTS FAILED! (Some modules did not pass)"; exit 1; \
 		else \
-			echo "KERNEL PANIC/COKME YASANDI! (Exit Code: $$RET)"; exit 1; \
+			echo "KERNEL PANIC/CRASH DETECTED! (Exit Code: $$RET)"; exit 1; \
 		fi; \
 	fi
 
 fuzz:
-	@echo "--- Fuzzing (libFuzzer) Baslatiliyor ---"
+	@echo "--- Starting Fuzzing (libFuzzer) ---"
 	@mkdir -p tests/host/corpus
 	@clang -g -O1 -fsanitize=fuzzer,address -I./include -DARCH_X86 tests/host/c/fuzz_parser.c -o tests/host/fuzz_parser
-	@echo "Bilinen 'Crash' (Zero-Day) dosyalari (Corpus) test ediliyor, ardindan yeni saldirilar uretilecek..."
+	@echo "Testing known crash (corpus) files, then generating new attack vectors..."
 	@./tests/host/fuzz_parser tests/host/corpus -max_total_time=10
 
 run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
-	@echo "--- [1/4] ELF dosyalari sifreli pakete donusturuluyor..."
+	@echo "--- [1/4] Encrypting ELF binaries..."
 	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@./tools/encrypt_tool apps/bin/clear.elf apps/bin/clear_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@./tools/encrypt_tool apps/bin/echo.elf apps/bin/echo_encrypted.elf 1234 $(ESDUMAN_KEY)
 	@./tools/encrypt_tool apps/bin/sh.elf apps/bin/sh_encrypted.elf 1234 $(ESDUMAN_KEY)
 
-	@echo "--- [2/4] C veri dosyalari uretiliyor..."
+	@echo "--- [2/4] Generating C data files..."
 	@mkdir -p src/resources
 	@xxd -i apps/init_encrypted.elf | sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
 	@xxd -i apps/hello_encrypted.elf | sed 's/apps_hello_encrypted_elf/hello_elf/g' > src/resources/hello_elf_data.c
@@ -374,9 +374,9 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 	@xxd -i apps/bin/echo_encrypted.elf | sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
 	@xxd -i apps/bin/sh_encrypted.elf | sed 's/apps_bin_sh_encrypted_elf/sh_elf/g' > src/resources/sh_elf_data.c
 	
-	@echo "--- [3/4] Kernel yeniden derleniyor (sifreli ELF ile)..."
+	@echo "--- [3/4] Rebuilding kernel (with encrypted ELF binaries)..."
 	@$(MAKE) $(ISO)
-	@echo "--- [4/4] Disk imaji hazirlanip QEMU baslatiliyor..."
+	@echo "--- [4/4] Preparing disk image and launching QEMU..."
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	$(QEMU) $(QEMU_FLAGS)
 

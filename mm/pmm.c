@@ -1,3 +1,7 @@
+/**
+ * @file pmm.c
+ * @brief Physical Memory Manager implementation with dynamic bitmap.
+ */
 /*
  * File: pmm.c
  * Purpose: Physical Memory Manager implementation with dynamic bitmap.
@@ -19,6 +23,11 @@ uint32_t actual_total_memory = 0;
 spinlock_t pmm_lock;
 static uint32_t lowest_free_idx = 0;
 
+/**
+ * @brief Finds the first free frame in the physical memory bitmap.
+ * 
+ * @return The index of the first free frame, or 0xFFFFFFFF if no free frame is found.
+ */
 static uint32_t pmm_find_first_free(void) {
     for (uint32_t i = lowest_free_idx; i < pmm_bitmap_size_words; i++) {
         if (pmm_bitmap[i] != 0xFFFFFFFF) {
@@ -33,6 +42,11 @@ static uint32_t pmm_find_first_free(void) {
     return 0xFFFFFFFF;
 }
 
+/**
+ * @brief Initializes the Physical Memory Manager.
+ * 
+ * @param mboot_info Pointer to the multiboot information structure.
+ */
 void init_pmm(multiboot_info_t *mboot_info) {
     spinlock_init(&pmm_lock);
     lowest_free_idx = 0; 
@@ -119,6 +133,11 @@ void init_pmm(multiboot_info_t *mboot_info) {
     klog_int(LOG_LEVEL_INFO, "PMM", "Total Memory (MB)", actual_total_memory / (1024 * 1024));
 }
 
+/**
+ * @brief Allocates a physical frame.
+ * 
+ * @return The physical address of the allocated frame, or 0xFFFFFFFF if out of memory.
+ */
 uint32_t pmm_alloc_frame(void) {
     spinlock_acquire(&pmm_lock);
     uint32_t frame = pmm_find_first_free();
@@ -132,6 +151,11 @@ uint32_t pmm_alloc_frame(void) {
     return frame * PAGE_SIZE;
 }
 
+/**
+ * @brief Frees a physical frame.
+ * 
+ * @param addr The physical address of the frame to free.
+ */
 void pmm_free_frame(uint32_t addr) {
     uint32_t frame = addr / PAGE_SIZE;
     if (frame < 256) { 
@@ -150,7 +174,18 @@ void pmm_free_frame(uint32_t addr) {
     spinlock_release(&pmm_lock);
 }
 
+/**
+ * @brief Gets the total physical memory size.
+ * 
+ * @return Total memory size in bytes.
+ */
 uint32_t pmm_get_total_memory(void) { return actual_total_memory; }
+
+/**
+ * @brief Gets the available free physical memory size.
+ * 
+ * @return Free memory size in bytes.
+ */
 uint32_t pmm_get_free_memory(void) {
     if (used_memory > actual_total_memory) return 0;
     return actual_total_memory - used_memory;

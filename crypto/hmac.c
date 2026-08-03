@@ -1,9 +1,22 @@
+/**
+ * @file hmac.c
+ * @brief Implementation of HMAC-SHA256
+ */
 #include "hmac.h"
 #include "crypto.h"
 #include "kernel.h"
 #include "kheap.h"
 #include "libft.h"
 
+/**
+ * @brief Compute HMAC-SHA256
+ * @param key Pointer to the key
+ * @param key_len Length of the key in bytes
+ * @param data Pointer to the input data
+ * @param data_len Length of the input data in bytes
+ * @param out Pointer to the 32-byte output buffer
+ * @return None
+ */
 void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t *out) {
     uint8_t k_pad[64];
     uint8_t o_key_pad[64];

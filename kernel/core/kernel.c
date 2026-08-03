@@ -324,7 +324,14 @@ static int init_filesystem_and_vfs(void) {
         }
 
         int home_id = get_vfs_id("home", 0);
-        if (home_id != -1) fs_mkdir("esduman", home_id);
+        if (home_id != -1) {
+            fs_mkdir("esduman", home_id);
+            // Fix ownership: /home/esduman should be owned by esduman (UID 1000), not root
+            int esduman_dir_id = get_vfs_id("esduman", home_id);
+            if (esduman_dir_id != -1) {
+                dir_table[esduman_dir_id].owner_uid = 1000;
+            }
+        }
     }
 
     int tmp_id = get_vfs_id("tmp", 0);

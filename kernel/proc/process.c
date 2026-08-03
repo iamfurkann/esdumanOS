@@ -1,3 +1,7 @@
+/**
+ * @file process.c
+ * @brief Process management, context switching, and multitasking implementation.
+ */
 /*
  * File: process.c
  * Purpose: Process management, context switching, and multitasking implementation (Dynamic Linked List).
@@ -20,6 +24,9 @@ int next_pid = 0;
 int foreground_task = -1;
 process_t *zombie_tasks_head = 0;
 
+/**
+ * @brief Initialize the multitasking system.
+ */
 void init_multitasking(void) {
     task_list_head = 0;
     task_list_tail = 0;
@@ -48,6 +55,14 @@ void init_multitasking(void) {
     }
 }
 
+/**
+ * @brief Create a new process.
+ * 
+ * @param eip Instruction pointer (entry point).
+ * @param esp Stack pointer.
+ * @param cr3 Page directory physical address.
+ * @return The PID of the newly created process, or a negative error code.
+ */
 int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     process_t *new_task = (process_t *)kmalloc(sizeof(process_t));
     if (!new_task) {
@@ -139,6 +154,12 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     return new_task->pid;
 }
 
+/**
+ * @brief Set the priority of a task.
+ * 
+ * @param pid Process ID.
+ * @param new_priority The new priority value.
+ */
 void set_task_priority(int pid, uint8_t new_priority) {
     for (process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->pid == pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) {
@@ -149,6 +170,13 @@ void set_task_priority(int pid, uint8_t new_priority) {
     }
 }
 
+/**
+ * @brief Send a message to another process.
+ * 
+ * @param target_pid The target process ID.
+ * @param payload The message payload.
+ * @return E_OK on success, or a negative error code.
+ */
 int send_message(int target_pid, uint32_t payload) {
     for (process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->pid == target_pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) {
@@ -170,6 +198,13 @@ int send_message(int target_pid, uint32_t payload) {
     return E_NOENT;
 }
 
+/**
+ * @brief Receive a message for the current process.
+ * 
+ * @param sender_out Pointer to store the sender's PID.
+ * @param payload_out Pointer to store the received payload.
+ * @return E_OK on success, or a negative error code.
+ */
 int receive_message(uint32_t *sender_out, uint32_t *payload_out) {
     if (current_task == 0 || current_task->msg_count == 0)
         return E_NOENT;
@@ -183,6 +218,11 @@ int receive_message(uint32_t *sender_out, uint32_t *payload_out) {
     return E_OK;
 }
 
+/**
+ * @brief Clean up the memory of a process.
+ * 
+ * @param page_directory_phys Physical address of the page directory to clean up.
+ */
 void cleanup_process_memory(uint32_t page_directory_phys) {
     uint32_t curr_pd = 0;
     asm volatile("mov %%cr3, %0" : "=r"(curr_pd));
@@ -219,6 +259,11 @@ void cleanup_process_memory(uint32_t page_directory_phys) {
     }
 }
 
+/**
+ * @brief Exit the current process and clean up its resources.
+ * 
+ * @param regs Pointer to the current CPU registers.
+ */
 void exit_current_process(arch_regs_t *regs) {
     if (current_task == 0) return;
     process_t *curr = current_task;
@@ -313,6 +358,12 @@ void exit_current_process(arch_regs_t *regs) {
     schedule(regs);
 }
 
+/**
+ * @brief Put the current task to sleep.
+ * 
+ * @param regs Pointer to the current CPU registers.
+ * @param reason The reason for sleeping.
+ */
 void sleep_current_task(arch_regs_t *regs, int reason) {
     if (current_task == 0) return;
     current_task->regs = *regs;
@@ -321,6 +372,11 @@ void sleep_current_task(arch_regs_t *regs, int reason) {
     schedule(regs);
 }
 
+/**
+ * @brief Wake up tasks that are sleeping for a specific reason.
+ * 
+ * @param reason The reason to wake up tasks for.
+ */
 void wakeup_tasks(int reason) {
     for (process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->state == TASK_WAITING && p->wait_reason == (wait_reason_t)reason) {
@@ -330,6 +386,11 @@ void wakeup_tasks(int reason) {
     }
 }
 
+/**
+ * @brief Schedule the next task to run.
+ * 
+ * @param regs Pointer to the current CPU registers.
+ */
 void schedule(arch_regs_t *regs) {
     asm volatile("cli");
 
@@ -435,11 +496,22 @@ void schedule(arch_regs_t *regs) {
     check_and_deliver_signals(regs);
 }
 
+/**
+ * @brief Initialize a mutex.
+ * 
+ * @param m Pointer to the mutex to initialize.
+ */
 void mutex_init(mutex_t *m) {
     m->locked = 0;
     m->owner_pid = -1;
 }
 
+/**
+ * @brief Acquire a lock on a mutex.
+ * 
+ * @param m Pointer to the mutex to lock.
+ * @param regs Pointer to the current CPU registers.
+ */
 void mutex_lock(mutex_t *m, arch_regs_t *regs) {
     if (!multitasking_enabled || current_task == 0) return;
 
@@ -480,6 +552,11 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs) {
     }
 }
 
+/**
+ * @brief Release a lock on a mutex.
+ * 
+ * @param m Pointer to the mutex to unlock.
+ */
 void mutex_unlock(mutex_t *m) {
     if (!multitasking_enabled || current_task == 0) return;
 
@@ -514,6 +591,12 @@ void mutex_unlock(mutex_t *m) {
     asm volatile("sti"); 
 }
 
+/**
+ * @brief Register a signal handler for the current user process.
+ * 
+ * @param sig_num The signal number.
+ * @param handler_addr Address of the signal handler function.
+ */
 void register_user_signal(int sig_num, uint32_t handler_addr) {
     if (current_task == 0 || sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return;
     
@@ -525,6 +608,12 @@ void register_user_signal(int sig_num, uint32_t handler_addr) {
     current_task->signal_handlers[sig_num] = handler_addr;
 }
 
+/**
+ * @brief Send a signal to a user process.
+ * 
+ * @param target_pid The target process ID.
+ * @param sig_num The signal number.
+ */
 void send_user_signal(int target_pid, int sig_num) {
     if (sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return;
     for (process_t *p = task_list_head; p != 0; p = p->next) {
@@ -539,6 +628,11 @@ void send_user_signal(int target_pid, int sig_num) {
     }
 }
 
+/**
+ * @brief Check for and deliver pending signals to the current process.
+ * 
+ * @param regs Pointer to the current CPU registers.
+ */
 void check_and_deliver_signals(arch_regs_t *regs) {
     if (current_task == 0 || regs == 0) return;
     process_t *curr = current_task;
@@ -570,6 +664,11 @@ void check_and_deliver_signals(arch_regs_t *regs) {
     }
 }
 
+/**
+ * @brief Restore the context after returning from a signal handler.
+ * 
+ * @param regs Pointer to the current CPU registers.
+ */
 void restore_signal_context(arch_regs_t *regs) {
     if (current_task == 0) return;
     process_t *curr = current_task;
@@ -579,11 +678,19 @@ void restore_signal_context(arch_regs_t *regs) {
     }
 }
 
+/**
+ * @brief Check if there is a free task slot available.
+ * 
+ * @return 1 if available, 0 otherwise.
+ */
 int check_free_task_slot(void) {
     // We are dynamic now! Always space (unless OOM).
     return 1;
 }
 
+/**
+ * @brief Start executing the first task.
+ */
 void start_first_task(void) {
     asm volatile("cli"); 
 
@@ -643,24 +750,46 @@ void start_first_task(void) {
     );
 }
 
+/**
+ * @brief Initialize a read-write lock.
+ * 
+ * @param lock Pointer to the read-write lock.
+ */
 void rwlock_init(rwlock_t *lock) {
     lock->readers = 0;
     lock->writer_active = 0;
     mutex_init(&lock->mutex);
 }
 
+/**
+ * @brief Acquire a read lock on a read-write lock.
+ * 
+ * @param lock Pointer to the read-write lock.
+ * @param regs Pointer to the current CPU registers.
+ */
 void rwlock_acquire_read(rwlock_t *lock, arch_regs_t *regs) {
     mutex_lock(&lock->mutex, regs);
     lock->readers++;
     mutex_unlock(&lock->mutex);
 }
 
+/**
+ * @brief Release a read lock on a read-write lock.
+ * 
+ * @param lock Pointer to the read-write lock.
+ */
 void rwlock_release_read(rwlock_t *lock) {
     mutex_lock(&lock->mutex, 0);
     lock->readers--;
     mutex_unlock(&lock->mutex);
 }
 
+/**
+ * @brief Acquire a write lock on a read-write lock.
+ * 
+ * @param lock Pointer to the read-write lock.
+ * @param regs Pointer to the current CPU registers.
+ */
 void rwlock_acquire_write(rwlock_t *lock, arch_regs_t *regs) {
     mutex_lock(&lock->mutex, regs);
     // Simple implementation: wait until readers are 0.
@@ -679,6 +808,11 @@ void rwlock_acquire_write(rwlock_t *lock, arch_regs_t *regs) {
     lock->writer_active = 1;
 }
 
+/**
+ * @brief Release a write lock on a read-write lock.
+ * 
+ * @param lock Pointer to the read-write lock.
+ */
 void rwlock_release_write(rwlock_t *lock) {
     lock->writer_active = 0;
     mutex_unlock(&lock->mutex);

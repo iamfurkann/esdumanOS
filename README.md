@@ -5,28 +5,26 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-3.4.3-blue)
+![Version](https://img.shields.io/badge/version-0.1.0--pre--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
-![License](https://img.shields.io/badge/license-MIT-purple)
-![Status](https://img.shields.io/badge/status-alpha-red)
+[![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
+![Status](https://img.shields.io/badge/status-pre--alpha-red)
 [![Website](https://img.shields.io/badge/Website-Live-2ea44f)](https://iamfurkann.github.io/esdumanOS-website/)
-
-## Live Website
-
-**https://iamfurkann.github.io/esdumanOS-website/**
----
 
 *An independent operating system, booting through GRUB via Multiboot,*
 *with preemptive multitasking, an encrypted file system, and a Unix-style shell.*
 
 </div>
 
+> **⚠️ Pre-Alpha Notice:** This is an early development release intended for testing and educational purposes only. It is not suitable for production use. Expect bugs, crashes, and incomplete features.
+
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Current Status](#current-status)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
@@ -40,6 +38,7 @@
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
+- [Credits](#credits)
 
 ---
 
@@ -50,6 +49,28 @@ esdumanOS is a from-scratch operating system kernel for the x86 (IA-32) architec
 The kernel boots via GRUB using the Multiboot specification, transitions through Protected Mode with full GDT/IDT/TSS initialization, sets up paged virtual memory, and launches a preemptive multitasking environment with Ring 0 / Ring 3 separation. User-space programs are loaded from ELF binaries, and the system provides a Unix-inspired shell with pipes, redirection, and environment variables.
 
 A central design goal is treating security as a first-class concern rather than an afterthought. The kernel includes a tiered security level system, AES-256-CBC disk encryption, user authentication against a shadow password database, and permission enforcement at the system call boundary.
+
+---
+
+## Current Status
+
+**Version:** 0.1.0-pre-alpha (First Public Release)
+
+esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems are functional and the OS boots successfully in QEMU, but this is an early development release. It is intended for developers, OS enthusiasts, and anyone curious about kernel internals.
+
+**What works:**
+- Boots via GRUB, initializes all subsystems, and launches a Unix-style shell
+- Preemptive multitasking with ELF binary execution
+- Encrypted file system with AES-256-CBC
+- User authentication and security levels
+- 14 user-space programs and 20+ shell builtins
+- 19 kernel self-test modules and CI pipeline
+
+**What to expect:**
+- This is not production-ready software
+- You may encounter kernel panics, deadlocks, or unexpected behavior
+- Resource limits are intentionally constrained (16 processes, 2 MB disk, 128 MB RAM)
+- No networking, no GUI, no dynamic linking
 
 ---
 
@@ -113,7 +134,7 @@ A central design goal is treating security as a first-class concern rather than 
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 20+ builtins (cat, ls, cd, pwd, mkdir, rm, mv, echo, env, export, exec, kill, su, dmesg, hexdump, help), pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
-| **Programs** | Standalone ELF binaries: `hello`, `echo`, `clear` |
+| **Programs** | 14 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `date` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -121,7 +142,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 12 test modules: VFS, memory, pipe, security, passwd, devfs, regression, integration, adversarial, concurrency, stress, string |
+| **Kernel Self-Tests** | 19 test modules: VFS, memory, pipe, security, passwd, devfs, regression, integration, adversarial, concurrency, stress, string, paging, PMM, syscall, process, signal, crypto, bcache |
 | **Host Tests** | Crypto verification, ELF static analysis, hash validation |
 | **Fuzzing** | Parser fuzz testing with 45 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -471,12 +492,23 @@ esdumanOS/
 |-- apps/
 |   |-- init.c                       User-space shell and login
 |   +-- bin/
+|       |-- sh.c                     Standalone shell
 |       |-- hello.c                  Hello World ELF program
 |       |-- echo.c                   Echo command
-|       +-- clear.c                  Clear screen
+|       |-- clear.c                  Clear screen
+|       |-- touch.c                  Create empty file
+|       |-- rm.c                     Remove file
+|       |-- mv.c                     Move/rename file
+|       |-- cp.c                     Copy file
+|       |-- free.c                   Display memory info
+|       |-- whoami.c                 Print current user
+|       |-- kill.c                   Send signal to process
+|       |-- grep.c                   Search text patterns
+|       |-- head.c                   Display first lines of file
+|       +-- date.c                   Display date and time
 |
-|-- include/                         37 header files
-|   |-- kernel.h                     Master header (version 3.4.3)
+|-- include/                         42 header files
+|   |-- kernel.h                     Master header (version 0.1.0)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    42 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
@@ -485,13 +517,13 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      12 in-kernel test modules + framework
+|   |-- kernel/                      19 in-kernel test modules + framework
 |   +-- host/                        Host-side tests, fuzzing (45 corpus files)
 |
 |-- tools/                           Build-time utilities
-|   |-- mkfs.c                       File system image creator
+|   |-- mkfs.py                      File system image creator
 |   |-- encrypt_tool.c               ELF encryption tool
-|   +-- inject.c                     Binary data injector
+|   +-- inject.py                    Binary data injector
 |
 |-- grub/
 |   +-- grub.cfg                     GRUB bootloader configuration
@@ -727,9 +759,20 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ---
 
-<div align="center">
+## Credits
 
 **esdumanOS** is developed and maintained by [Esad Furkan Duman](https://github.com/iamfurkann).
+
+### Acknowledgements
+
+- [tiny-AES-c](https://github.com/kokke/tiny-AES-c) — AES implementation reference
+- [OSDev Wiki](https://wiki.osdev.org/) — Invaluable resource for OS development
+- [GRUB](https://www.gnu.org/software/grub/) — Bootloader
+- [QEMU](https://www.qemu.org/) — Emulation and testing
+
+---
+
+<div align="center">
 
 *A kernel built from first principles.*
 

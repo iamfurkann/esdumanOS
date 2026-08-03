@@ -1,3 +1,7 @@
+/**
+ * @file chacha20.c
+ * @brief Implementation of the ChaCha20 cipher
+ */
 #include "chacha20.h"
 
 #define ROTL(a,b) (((a) << (b)) | ((a) >> (32 - (b))))
@@ -7,6 +11,13 @@
     a += b, d ^= a, d = ROTL(d, 8), \
     c += d, b ^= c, b = ROTL(b, 7))
 
+/**
+ * @brief Initialize ChaCha20 context
+ * @param ctx Pointer to the ChaCha20 context
+ * @param key Pointer to the 32-byte key
+ * @param nonce Pointer to the 8-byte nonce
+ * @return None
+ */
 void chacha20_init(chacha20_ctx_t *ctx, const uint8_t key[32], const uint8_t nonce[8]) {
     const char *constants = "expand 32-byte k";
     ctx->state[0] = ((uint32_t*)constants)[0];
@@ -22,6 +33,12 @@ void chacha20_init(chacha20_ctx_t *ctx, const uint8_t key[32], const uint8_t non
     ctx->state[15] = ((uint32_t*)nonce)[1];
 }
 
+/**
+ * @brief Generate the next 64-byte block of keystream
+ * @param ctx Pointer to the ChaCha20 context
+ * @param out Pointer to the 64-byte output buffer
+ * @return None
+ */
 void chacha20_next_block(chacha20_ctx_t *ctx, uint8_t out[64]) {
     uint32_t working_state[16];
     for (int i = 0; i < 16; i++) {

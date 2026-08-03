@@ -1,3 +1,7 @@
+/**
+ * @file aes.c
+ * @brief Implementation of the AES algorithm
+ */
 /*
 
 This is an implementation of the AES algorithm, specifically ECB, CTR and CBC mode.
@@ -216,16 +220,35 @@ static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
   }
 }
 
+/**
+ * @brief Initialize AES context
+ * @param ctx Pointer to the AES context
+ * @param key Pointer to the AES key
+ * @return None
+ */
 void AES_init_ctx(struct AES_ctx* ctx, const uint8_t* key)
 {
   KeyExpansion(ctx->RoundKey, key);
 }
 #if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1))
+/**
+ * @brief Initialize AES context with IV
+ * @param ctx Pointer to the AES context
+ * @param key Pointer to the AES key
+ * @param iv Pointer to the initialization vector
+ * @return None
+ */
 void AES_init_ctx_iv(struct AES_ctx* ctx, const uint8_t* key, const uint8_t* iv)
 {
   KeyExpansion(ctx->RoundKey, key);
   ft_memcpy(ctx->Iv, iv, AES_BLOCKLEN);
 }
+/**
+ * @brief Set IV in AES context
+ * @param ctx Pointer to the AES context
+ * @param iv Pointer to the initialization vector
+ * @return None
+ */
 void AES_ctx_set_iv(struct AES_ctx* ctx, const uint8_t* iv)
 {
   ft_memcpy (ctx->Iv, iv, AES_BLOCKLEN);
@@ -467,12 +490,24 @@ static void InvCipher(state_t* state, const uint8_t* RoundKey)
 #if defined(ECB) && (ECB == 1)
 
 
+/**
+ * @brief Encrypt buffer using AES ECB mode
+ * @param ctx Pointer to the AES context
+ * @param buf Pointer to the buffer to encrypt
+ * @return None
+ */
 void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf)
 {
   // The next function call encrypts the PlainText with the Key using AES algorithm.
   Cipher((state_t*)buf, ctx->RoundKey);
 }
 
+/**
+ * @brief Decrypt buffer using AES ECB mode
+ * @param ctx Pointer to the AES context
+ * @param buf Pointer to the buffer to decrypt
+ * @return None
+ */
 void AES_ECB_decrypt(const struct AES_ctx* ctx, uint8_t* buf)
 {
   // The next function call decrypts the PlainText with the Key using AES algorithm.
@@ -498,6 +533,13 @@ static void XorWithIv(uint8_t* buf, const uint8_t* Iv)
   }
 }
 
+/**
+ * @brief Encrypt buffer using AES CBC mode
+ * @param ctx Pointer to the AES context
+ * @param buf Pointer to the buffer to encrypt
+ * @param length Length of the buffer
+ * @return None
+ */
 void AES_CBC_encrypt_buffer(struct AES_ctx *ctx, uint8_t* buf, size_t length)
 {
   size_t i;
@@ -513,6 +555,13 @@ void AES_CBC_encrypt_buffer(struct AES_ctx *ctx, uint8_t* buf, size_t length)
   ft_memcpy(ctx->Iv, Iv, AES_BLOCKLEN);
 }
 
+/**
+ * @brief Decrypt buffer using AES CBC mode
+ * @param ctx Pointer to the AES context
+ * @param buf Pointer to the buffer to decrypt
+ * @param length Length of the buffer
+ * @return None
+ */
 void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 {
   size_t i;
@@ -535,6 +584,13 @@ void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 #if defined(CTR) && (CTR == 1)
 
 /* Symmetrical operation: same function for encrypting as for decrypting. Note any IV/nonce should never be reused with the same key */
+/**
+ * @brief Encrypt/decrypt buffer using AES CTR mode
+ * @param ctx Pointer to the AES context
+ * @param buf Pointer to the buffer to process
+ * @param length Length of the buffer
+ * @return None
+ */
 void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 {
   uint8_t buffer[AES_BLOCKLEN];

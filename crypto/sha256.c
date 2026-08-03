@@ -1,3 +1,7 @@
+/**
+ * @file sha256.c
+ * @brief Implementation of the SHA256 hash function
+ */
 #include "types.h"
 
 #define ROTRIGHT(word,bits) (((word) >> (bits)) | ((word) << (32-(bits))))
@@ -41,6 +45,12 @@ static void sha256_transform(uint32_t state[8], const uint8_t data[64]) {
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
+/**
+ * @brief Compute SHA256 hash and return as hex string
+ * @param input Pointer to the null-terminated input string
+ * @param output_hex Pointer to the output buffer for the hex string
+ * @return None
+ */
 void sha256_to_hex(const char *input, char *output_hex) {
     uint32_t state[8] = {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
@@ -98,6 +108,13 @@ void sha256_to_hex(const char *input, char *output_hex) {
     output_hex[64] = '\0';
 }
 
+/**
+ * @brief Compute SHA256 hash and return as binary data
+ * @param input Pointer to the input data
+ * @param len Length of the input data in bytes
+ * @param output_binary Pointer to the 32-byte output buffer
+ * @return None
+ */
 void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary) {
     uint32_t state[8] = {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 

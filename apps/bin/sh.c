@@ -338,7 +338,7 @@ char* get_env(const char *key) {
  * @brief Custom signal handler for the shell.
  */
 void my_custom_handler(void) {
-    printk("\n[!!!] MINISHELL CAUGHT USER SIGNAL! [!!!]\n");
+    printk("\n[!!!] esdumanOS CAUGHT USER SIGNAL! [!!!]\n");
     sys_sigreturn();
 }
 
@@ -367,33 +367,38 @@ void read_line(char *buf, int hide, int max_len) {
  * @brief Displays the help menu showing available commands.
  */
 void show_help(void) {
-    printk("Available commands:\n");
-    printk("  help       : Shows this menu\n");
-    printk("  ls         : Lists disk contents\n");
-    printk("  cat [name] : Reads file content\n");
-    printk("  cat_raw [name]   : Bypasses VFS decryption, shows raw (HEX) disk dump\n");
-    printk("  write [name]: Writes new file to disk\n");
-    printk("  rm [name]  : Permanently deletes file from disk\n");
-    printk("  mv [old] [new] : Renames a file\n");
-    printk("  clear      : Clears the screen\n");
-    printk("  layout tr  : Sets keyboard to Turkish (QWERTY)\n");
-    printk("  layout us  : Sets keyboard to English (QWERTY)\n");
-    printk("  lockdown   : Switches system to SAFE MODE\n");
-    printk("  stack      : Shows kernel stack dump\n");
-    printk("  meminfo    : Provides RAM info\n");
-    printk("  testmalloc : Starts heap test\n");
-    printk("  hexdump    : Shows data dump at address\n");
-    printk("  alarm      : CALLBACK test\n");
-    printk("  panic      : ISR test\n");
-    printk("  reboot     : Reboots the system\n");
-    printk("  halt       : Halts the processor\n");
-    printk("  exec [elf] : Executes an external program\n");
-    printk("  kill [pid] [sig]: Sends signal to specified process\n");
-    printk("  --- 42 Minishell Built-in ---\n");
-    printk("  echo [-n]  : Prints text to screen (supports \'>\')\n");
-    printk("  pwd        : Shows current directory\n");
-    printk("  env        : Shows environment variables\n");
-    printk("  export     : Defines new variable (e.g., export VAR VALUE)\n");
+    printk("esdumanOS Shell — Available Commands:\n\n");
+    printk("  File Operations:\n");
+    printk("    ls               List directory contents\n");
+    printk("    cat [-nbEsTA] [f] Read and display file contents\n");
+    printk("    cat_raw [file]    Show raw (HEX) disk dump (bypasses decryption)\n");
+    printk("    write [f] [text]  Create/write a file\n");
+    printk("    rm [file]         Delete a file\n");
+    printk("    mv [old] [new]    Rename a file\n");
+    printk("    mkdir [dir]       Create a directory\n");
+    printk("\n  Navigation:\n");
+    printk("    cd [dir]          Change directory (supports ., .., ~, -)\n");
+    printk("    pwd               Print working directory\n");
+    printk("\n  Process & System:\n");
+    printk("    exec [program]    Execute an ELF binary\n");
+    printk("    kill [pid] [sig]  Send signal to a process\n");
+    printk("    su                Switch to root user\n");
+    printk("    reboot            Reboot the system\n");
+    printk("    halt              Halt the processor\n");
+    printk("    exit              Exit the shell\n");
+    printk("\n  Information:\n");
+    printk("    echo [-n] [text]  Print text (supports > redirect)\n");
+    printk("    env               Show environment variables\n");
+    printk("    export [K] [V]    Set environment variable\n");
+    printk("    meminfo           Display RAM information\n");
+    printk("    dmesg             Show kernel log buffer\n");
+    printk("    hexdump [addr]    Show memory dump at address\n");
+    printk("    help              Show this help menu\n");
+    printk("\n  Settings:\n");
+    printk("    layout tr|us      Set keyboard layout\n");
+    printk("    lockdown          Switch system to safe mode\n");
+    printk("    clear             Clear the screen\n");
+    printk("\n  Operators: | (pipe), > (redirect), && (AND), || (OR)\n");
 }
 
 /**
@@ -552,7 +557,7 @@ void execute_command(char **args, char *redirect_file) {
         // Handle cd -
         else if (ft_strcmp(target, "-") == 0) {
             if (old_path[0] == '\0') {
-                printk("minishell: cd: OLDPWD not set\n");
+                printk("sh: cd: OLDPWD not set\n");
                 last_exit_status = 1;
                 return;
             }
@@ -614,7 +619,11 @@ void execute_command(char **args, char *redirect_file) {
             ft_strcpy(current_path, canon_path);
             last_exit_status = 0;
         } else { 
-            printk("minishell: cd: "); printk(args[1] ? args[1] : "~"); printk(": No such file or directory\n"); 
+            if (new_id == E_ACCES) {
+                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": Permission denied\n"); 
+            } else {
+                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": No such file or directory\n"); 
+            }
             last_exit_status = 1; 
         }
     }
@@ -624,6 +633,8 @@ void execute_command(char **args, char *redirect_file) {
             for(int i = 2; args[i] != 0; i++) { if (args[i+1] != 0) args[i][ft_strlen(args[i])] = ' '; }
             int res = sys_create_file(args[1], content, current_dir_id);
             if (res == E_OK) printk("File written successfully!\n");
+            else if (res == E_ACCES) printk("write: Permission denied\n");
+            else { printk("write: Failed to create file\n"); }
         } else { printk("Usage: write <file> <content>\n"); }
     }
     else if (ft_strcmp(args[0], "rm") == 0) {
@@ -718,7 +729,7 @@ void execute_command(char **args, char *redirect_file) {
     }
     else {
         if (ft_strlen(args[0]) > 58) {
-            printk("minishell: command name too long (max 58 characters)\n");
+            printk("sh: command name too long (max 58 characters)\n");
             last_exit_status = 127;
             return;
         }
@@ -740,7 +751,7 @@ void execute_command(char **args, char *redirect_file) {
 
         int exec_res = syscall(5, (int)exec_path, current_dir_id, (int)arg_str); // SYSCALL_EXEC
         if (exec_res < 0) {
-            printk("minishell: command not found: "); printk(args[0]); printk("\n");
+            printk("sh: command not found: "); printk(args[0]); printk("\n");
             last_exit_status = 127;
         } else {
             last_exit_status = 0;
@@ -788,7 +799,7 @@ void main(void) {
     while (1) {
         printk("\n");
         printk(current_username);
-        printk("@minishell ");
+        printk("@esdumanOS ");
         printk(current_path); 
         
         if (current_uid == 0) printk(" # ");

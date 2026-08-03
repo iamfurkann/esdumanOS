@@ -13,22 +13,22 @@ jobs:
       ESDUMAN_KEY: "github_actions_dummy_key"
 
     steps:
-      - name: Kodlari Cek
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Bagimliliklari Kur (GCC, Clang, QEMU, Python)
+      - name: Install Dependencies (GCC, Clang, QEMU, Python)
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm mtools xorriso libssl-dev
 
-      - name: 1. Host Araclarini Test Et
+      - name: 1. Run Host Unit Tests
         run: make test
 
-      - name: 2. Fuzzing & Guvenlik Testleri
+      - name: 2. Run Fuzzing & Security Tests
         run: make fuzz
 
-      - name: 3. Isletim Sistemini Derle
+      - name: 3. Build Operating System
         run: make
 
-      - name: 4. Kernel QEMU Entegrasyon ve Regresyon Testleri
+      - name: 4. Run Kernel QEMU Integration & Regression Tests
         run: make test_kernel

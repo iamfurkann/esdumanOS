@@ -163,8 +163,38 @@ OBJS = $(CORE_OBJS) $(ARCH_OBJS)
 
 BIN = myos.bin
 TEST_BIN = myos_test.bin
-ISO = myos.iso
 LIBC = lib/libc.a
+
+# Release version, read out of the one place that defines it.
+#
+# include/kernel.h is the single source of truth: the kernel builds its own
+# banner string from these same macros. Deriving the ISO name from them means a
+# version bump touches exactly one file, instead of leaving a second copy here to
+# drift out of step - which is the failure mode this build already had for the
+# PIT rate and the syscall count.
+#
+# BIN stays myos.bin on purpose: grub/grub.cfg names it, and a mismatch between
+# the two produces an ISO that fails to boot rather than a build error.
+# The \# escapes are required: make treats an unescaped # as a comment even inside
+# a $(shell ...) call, which silently truncates the sed script mid-expression.
+OS_VER_MAJOR := $(shell sed -n 's/^\#define OS_VERSION_MAJOR *\([0-9][0-9]*\).*/\1/p' include/kernel.h)
+OS_VER_MINOR := $(shell sed -n 's/^\#define OS_VERSION_MINOR *\([0-9][0-9]*\).*/\1/p' include/kernel.h)
+OS_VER_PATCH := $(shell sed -n 's/^\#define OS_VERSION_PATCH *\([0-9][0-9]*\).*/\1/p' include/kernel.h)
+OS_VER_PRE   := $(shell sed -n 's/^\#define OS_VERSION_PRE  *"\(.*\)".*/\1/p' include/kernel.h)
+OS_VERSION   := $(OS_VER_MAJOR).$(OS_VER_MINOR).$(OS_VER_PATCH)$(OS_VER_PRE)
+
+# Fail loudly rather than silently producing "esdumanOS-v..iso" if the parse breaks.
+ifeq ($(strip $(OS_VER_MAJOR)),)
+$(error Could not read OS_VERSION_MAJOR from include/kernel.h)
+endif
+ifeq ($(strip $(OS_VER_MINOR)),)
+$(error Could not read OS_VERSION_MINOR from include/kernel.h)
+endif
+ifeq ($(strip $(OS_VER_PATCH)),)
+$(error Could not read OS_VERSION_PATCH from include/kernel.h)
+endif
+
+ISO = esdumanOS-v$(OS_VERSION).iso
 
 # Wall-clock budget for a QEMU self-test run. A kernel panic parks the CPU with
 # cli;hlt and never reaches isa-debug-exit, so without this the run hangs instead
@@ -505,7 +535,10 @@ clean:
 	rm -rf src/resources/*_data.c src/resources/*.o
 	rm -f disk.img kernel_log.txt
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/test_elf_validation tests/host/fuzz_parser
-	rm -rf $(OBJS) $(TEST_OBJS) $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(BIN) $(TEST_BIN) $(ISO) isodir message.txt gizli.txt
+	rm -rf $(OBJS) $(TEST_OBJS) $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(BIN) $(TEST_BIN) isodir message.txt gizli.txt
+	# Wildcard, not just $(ISO): a version bump renames the ISO, and the image
+	# built under the previous version would otherwise never be cleaned up.
+	rm -f esdumanOS-v*.iso myos.iso
 
 # =============================================================================
 # Developer Mode Targets

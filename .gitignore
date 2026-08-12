@@ -87,4 +87,7 @@ gizli.txt
 
 # Generated resource files
 src/resources/*_data.c
+
+# Local editor and agent tooling state. Machine-specific, not project config.
 .claude/
+.VSCodeCounter/

@@ -2,11 +2,31 @@
 #define BCACHE_H
 
 #include "types.h"
+#include "rtc.h"
 
 /**
  * @brief Maximum number of sectors that can be stored in the block cache.
  */
-#define BCACHE_SIZE 64 
+#define BCACHE_SIZE 64
+
+/**
+ * @brief Dirty slots that force a write-behind flush.
+ *
+ * Half the cache. Bounds how much unwritten filesystem a crash can take with it
+ * by volume, and leaves the other half free so that a flush is not triggered on
+ * nearly every write once the cache is warm.
+ */
+#define BCACHE_DIRTY_HIGH_WATER (BCACHE_SIZE / 2)
+
+/**
+ * @brief How long dirty data may sit in the cache, in timer ticks.
+ *
+ * Five seconds, the same order as Linux's dirty_writeback_centisecs default. This
+ * is the bound that matters for a single small edit, which the volume bound never
+ * reaches. Derived from TIMER_HZ rather than written out as a tick count, so it
+ * stays five seconds if the PIT rate is ever changed.
+ */
+#define BCACHE_FLUSH_INTERVAL_TICKS (TIMER_HZ * 5)
 
 /**
  * @brief Represents a single cached block entry.
@@ -47,6 +67,31 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer);
  * @brief Flushes all dirty sectors in the block cache to the underlying physical storage.
  */
 void bcache_flush(void);
+
+/**
+ * @brief Whether dirty data has been waiting past BCACHE_FLUSH_INTERVAL_TICKS.
+ *
+ * Side-effect free, so the flush policy can be asserted without performing any
+ * disk I/O.
+ *
+ * @return 1 when a time-based flush is owed, 0 when there is nothing dirty or
+ *         the deadline has not passed.
+ */
+int bcache_flush_is_due(void);
+
+/**
+ * @brief Flushes only if bcache_flush_is_due().
+ *
+ * Must be called from normal kernel context with interrupts enabled - never from
+ * an interrupt handler, because the ATA driver waits for its IRQ with hlt.
+ */
+void bcache_flush_if_due(void);
+
+/**
+ * @brief Number of cached sectors modified but not yet written to disk.
+ * @return The current dirty slot count, 0 to BCACHE_SIZE.
+ */
+uint32_t bcache_dirty_count(void);
 
 
 // --- Added by Refactor Script 2 ---

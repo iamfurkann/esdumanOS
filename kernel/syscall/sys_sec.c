@@ -18,13 +18,18 @@
 #include "bcache.h"
 #include "kernel.h"
 #include "rtc.h"
+#include "uaccess.h"
 
 /**
  * @brief Function sys_auth
  */
 void sys_auth(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, MAX_FILENAME) || 
-        !validate_string_pointer((const char *)regs->ecx, MAX_FILENAME)) { 
+    char user[MAX_FILENAME];
+    char pass[MAX_FILENAME];
+    if (!validate_string_pointer((const char *)regs->ebx, sizeof(user)) ||
+        !validate_string_pointer((const char *)regs->ecx, sizeof(pass)) ||
+        copy_string_from_user(user, (const char *)regs->ebx, sizeof(user)) != E_OK ||
+        copy_string_from_user(pass, (const char *)regs->ecx, sizeof(pass)) != E_OK) {
         regs->eax = E_FAULT; 
         return; 
     }
@@ -36,9 +41,6 @@ void sys_auth(arch_regs_t *regs) {
         regs->eax = E_FAULT; 
         return;
     }
-
-    char *user = (char *)regs->ebx;
-    char *pass = (char *)regs->ecx;
 
     int p_len = 0;
     while (pass[p_len]) p_len++;
@@ -63,7 +65,6 @@ void sys_auth(arch_regs_t *regs) {
  */
 void sys_setuid_call(arch_regs_t *regs) {
     uint32_t requested_uid = (uint32_t)regs->ebx;
-    char *provided_password = (char *)regs->ecx;
 
     if (current_task->uid == 0) {
         current_task->uid = requested_uid;
@@ -73,7 +74,9 @@ void sys_setuid_call(arch_regs_t *regs) {
     }
 
     if (requested_uid == 0) {
-        if (!validate_string_pointer((const char *)provided_password, 64)) {
+        char provided_password[64];
+        if (!validate_string_pointer((const char *)regs->ecx, sizeof(provided_password)) ||
+            copy_string_from_user(provided_password, (const char *)regs->ecx, sizeof(provided_password)) != E_OK) {
             regs->eax = E_FAULT; 
             return;
         }
@@ -168,6 +171,28 @@ void sys_panic(arch_regs_t *regs) {
     }
     asm volatile("int $0x0");
     regs->eax = 0;
+}
+
+/**
+ * @brief Writes every dirty block-cache sector out to disk.
+ *
+ * The cache is write-back, and the automatic policy only promises that dirty data
+ * reaches the platter within BCACHE_FLUSH_INTERVAL_TICKS or once
+ * BCACHE_DIRTY_HIGH_WATER slots are outstanding. A caller that has just written
+ * something it cannot afford to lose needs a way to close that window itself.
+ *
+ * Unprivileged on purpose: it writes back data the caller was already allowed to
+ * write, creates nothing new, and the alternative - making durability a root-only
+ * capability - would leave ordinary programs no way to commit their own work.
+ *
+ * Not gated on the security level either. IMMUTABLE stops new writes, but dirty
+ * sectors already in the cache were produced while they were still permitted, and
+ * refusing to flush them would guarantee exactly the loss this syscall exists to
+ * prevent.
+ */
+void sys_sync(arch_regs_t *regs) {
+    bcache_flush();
+    regs->eax = E_OK;
 }
 
 /**

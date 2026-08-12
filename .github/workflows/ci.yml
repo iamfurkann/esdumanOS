@@ -10,16 +10,21 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     env:
-      ESDUMAN_KEY: "github_actions_dummy_key"
+      # ELF encryption key for CI builds (NOT a login password).
+      # Embedded in kernel binary — provides tamper resistance only.
+      ESDUMAN_ELF_KEY_HEX: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies (GCC, Clang, QEMU, Python)
+      - name: Install Dependencies (GCC, Clang, QEMU, GRUB, Python)
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm mtools xorriso libssl-dev
+          # grub-common provides grub-mkrescue and grub-pc-bin the BIOS modules it
+          # needs; without them the "Build Operating System" step cannot make the ISO.
+          sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm \
+            mtools xorriso libssl-dev grub-common grub-pc-bin
 
       - name: 1. Run Host Unit Tests
         run: make test
@@ -31,4 +36,26 @@ jobs:
         run: make
 
       - name: 4. Run Kernel QEMU Integration & Regression Tests
+        # Runs the 23 kernel-mode modules and then hands control to the Ring 3
+        # payload (tests/user/ktest_user.c), which exercises the syscall and
+        # uaccess boundary from CPL=3.
+        #
+        # The default QEMU i386 model exposes neither RDRAND nor SMEP/SMAP, so
+        # this is the run that covers the weak-entropy fallback path.
         run: make test_kernel
+
+      - name: 5. Kernel Tests with RDRAND
+        # Covers the ENTROPY_OK branch, which step 6 cannot reach: "-cpu max"
+        # brings RDRAND *and* SMAP, and under SMAP the kernel-mode modules are
+        # skipped. Asking for RDRAND on its own gets there.
+        run: make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
+
+      - name: 6. SMAP/SMEP Runtime Test
+        # The only configuration where the uaccess rules are enforced by hardware
+        # rather than by convention: a supervisor access to user memory that
+        # bypasses copy_to_user() faults here instead of silently working.
+        #
+        # This was continue-on-error until sys_readdir() stopped writing to user
+        # memory directly. That landed, so it is blocking now — a SMAP regression
+        # must fail the build rather than leave CI green.
+        run: make test_smap

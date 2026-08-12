@@ -4,6 +4,17 @@
 #include "types.h"
 
 /**
+ * @brief PIT interrupt frequency, in hertz.
+ *
+ * The rate init_timer() is called with, and therefore the rate timer_get_ticks()
+ * advances at. It exists because the number 100 used to be a literal in
+ * kernel_main() with the same assumption then restated in prose in three other
+ * places - a tick-to-seconds conversion that nothing would have corrected if the
+ * PIT rate ever changed.
+ */
+#define TIMER_HZ 100
+
+/**
  * @brief Prints the current system time.
  * 
  * Retrieves the current time from the Real-Time Clock (RTC) and prints it 

@@ -88,7 +88,29 @@ extern void enable_paging(void);
 
 // --- Added by Refactor Script ---
 extern uint32_t *page_directory;
+
+/**
+ * @brief Creates a new address space sharing the kernel half of the current one.
+ *
+ * @return Physical address of the new page directory, or 0 on failure. The
+ *         result is loaded straight into CR3, so failure must be 0 rather than
+ *         a negative errno.
+ */
 extern uint32_t clone_page_directory(void);
+
+/**
+ * @brief Releases every frame owned by an address space, then the directory.
+ *
+ * Frees the user-space page tables (directory entries 0..767) and the frames
+ * they map, and finally the directory itself. Kernel entries (768..1022) are
+ * shared with every other address space and are left alone.
+ *
+ * Must not be called on the address space currently in CR3; the caller has to
+ * switch away first. Process teardown therefore defers this to the zombie
+ * reaper in schedule(), which runs once another task's directory is live.
+ *
+ * @param cr3 Physical address of the page directory to release.
+ */
 extern void cleanup_process_memory(uint32_t cr3);
 
 #endif

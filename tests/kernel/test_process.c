@@ -53,4 +53,90 @@ void run_process_tests(void) {
     }
 
     asm volatile("sti");
+
+    /* ------------------------------------------------------------------
+     * Live interrupt frame detection.
+     *
+     * Only the frame the ISR stub pushed on the current kernel stack may be
+     * handed to the locking primitives. The VFS used to pass
+     * &current_task->regs, which is a saved copy: writing through it corrupts
+     * the task's stored context and leaves current_task and CR3 describing
+     * different tasks. The guard has to reject it by address, because the two
+     * are indistinguishable by content.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(!trap_frame_is_live(0),
+                 "Locks: a null frame is not a live interrupt frame");
+    KTEST_ASSERT(!trap_frame_is_live(&current_task->regs),
+                 "[STRICT] Locks: the PCB's saved regs are rejected as a live frame");
+    KTEST_ASSERT(trap_frame_is_live((arch_regs_t *)current_task->kstack),
+                 "Locks: a frame inside the current kernel stack is accepted");
+    KTEST_ASSERT(!trap_frame_is_live(
+                     (arch_regs_t *)((uint32_t)current_task->kstack + KERNEL_STACK_SIZE)),
+                 "[STRICT] Locks: a frame past the end of the kernel stack is rejected");
+
+    /* ------------------------------------------------------------------
+     * Read/write lock state machine.
+     * ------------------------------------------------------------------ */
+    rwlock_t rw;
+    rwlock_init(&rw);
+
+    rwlock_acquire_read(&rw, 0);
+    KTEST_ASSERT(rw.readers == 1, "RWLock: read acquire counts the reader");
+    rwlock_release_read(&rw);
+    KTEST_ASSERT(rw.readers == 0, "RWLock: read release drops the count");
+
+    rwlock_release_read(&rw);
+    KTEST_ASSERT(rw.readers == 0,
+                 "[STRICT] RWLock: an unmatched read release cannot underflow the count");
+
+    rwlock_acquire_write(&rw, 0);
+    KTEST_ASSERT(rw.writer_active == 1,
+                 "[STRICT] RWLock: write acquire marks the lock held before returning");
+    KTEST_ASSERT(rw.readers == 0, "RWLock: write acquire leaves the reader count alone");
+    rwlock_release_write(&rw);
+    KTEST_ASSERT(rw.writer_active == 0, "RWLock: write release clears the flag");
+
+    /* ------------------------------------------------------------------
+     * Syscall restart guard.
+     *
+     * Blocking used to be spelled "regs->eip -= 2", applied to whatever frame
+     * the caller happened to be holding. Nothing checked that the frame was a
+     * syscall entry at all, so an interrupt frame from Ring 3 would have had
+     * its user EIP moved into the middle of an instruction. The replacement
+     * refuses anything it cannot prove is a Ring 3 syscall frame owned by this
+     * task, and a refusal must leave the task exactly as it found it.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(syscall_block_and_restart(0, WAIT_KBD) == 0,
+                 "Syscall restart: a null frame is refused");
+    KTEST_ASSERT(syscall_block_and_restart(&current_task->regs, WAIT_KBD) == 0,
+                 "Syscall restart: refused when the task is not inside a syscall");
+
+    // Now claim to be mid-syscall and offer the PCB's saved frame. Every field
+    // in it looks plausible, so only the address check can reject it.
+    current_task->regs.eip = 0xDEADBEEF;
+    current_task->in_syscall = 1;
+    int blocked = syscall_block_and_restart(&current_task->regs, WAIT_KBD);
+    current_task->in_syscall = 0;
+
+    KTEST_ASSERT(blocked == 0,
+                 "[STRICT] Syscall restart: the PCB's saved frame is refused");
+    KTEST_ASSERT(current_task->regs.eip == 0xDEADBEEF,
+                 "[STRICT] Syscall restart: a refused frame is left untouched");
+    KTEST_ASSERT(current_task->state != TASK_WAITING,
+                 "[STRICT] Syscall restart: a refused call does not block the task");
+
+    /* ------------------------------------------------------------------
+     * Scheduler fallback.
+     *
+     * The scheduler must always have somewhere to go. When it found nothing
+     * runnable it used to halt and return, which left the interrupt frame
+     * untouched and resumed the task it had just rejected - a blocked task
+     * carried on running as if it had never blocked. The idle task is the
+     * invariant that makes that case impossible, so it is asserted directly.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(idle_task != 0, "[STRICT] Scheduler: an idle task exists as the fallback");
+    KTEST_ASSERT(idle_task == 0 || idle_task->state == TASK_RUNNING,
+                 "[STRICT] Scheduler: the idle task is always runnable");
+    KTEST_ASSERT(idle_task == 0 || idle_task->base_priority == 0,
+                 "Scheduler: the idle task has the lowest priority");
 }

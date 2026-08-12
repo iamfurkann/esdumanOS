@@ -1,5 +1,6 @@
 #include "types.h"
 #include "io.h"
+#include "entropy.h"
 
 #define PIT_CMD_PORT 0x43
 #define PIT_CH0_PORT 0x40
@@ -17,8 +18,17 @@ extern void kernel_timer_tick_handler(void);
  */
 void timer_interrupt_handler(void) {
     timer_ticks++;
+
+    /*
+     * Mixed into the entropy pool but credited zero bits: the PIT fires at a
+     * fixed rate, so the interval between two of these carries no entropy however
+     * it is measured. Feeding it in costs nothing and keeps the pool stirred;
+     * counting it would be lying to ourselves. See entropy_add_event().
+     */
+    entropy_add_event(ENTROPY_SRC_TIMER, timer_ticks);
+
     rtc_timer_callback();
-    kernel_timer_tick_handler(); 
+    kernel_timer_tick_handler();
 }
 
 /**

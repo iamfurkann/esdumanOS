@@ -99,7 +99,7 @@ int pipe_read(pipe_t *p, uint8_t *buf, int size) {
         buf[bytes_read++] = p->buffer[p->head % PIPE_SIZE];
         p->head++;
     }
-wakeup_tasks(2); // 2 = WAIT_IPC
+wakeup_tasks(WAIT_IPC);
     
     return bytes_read;
 }
@@ -128,7 +128,7 @@ int pipe_write(pipe_t *p, const uint8_t *buf, int size) {
         p->buffer[p->tail % PIPE_SIZE] = buf[bytes_written++];
         p->tail++;
     }
-wakeup_tasks(2); // 2 = WAIT_IPC
+wakeup_tasks(WAIT_IPC);
     
     return bytes_written;
 }

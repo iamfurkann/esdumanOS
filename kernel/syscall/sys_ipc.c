@@ -12,6 +12,9 @@
 #include "process.h"
 #include "errno.h"
 #include "klog.h"
+#include "uaccess.h"
+#include "signal.h"
+#include "rtc.h"
 /**
  * @brief Function sys_ipc_send
  */
@@ -29,21 +32,42 @@ void sys_ipc_receive(arch_regs_t *regs) {
     uint32_t *sender_ptr = (uint32_t *)regs->ebx;
     uint32_t *payload_ptr = (uint32_t *)regs->ecx;
 
-    if (!validate_user_pointer((const void *)sender_ptr, 4) || 
-        !validate_user_pointer((const void *)payload_ptr, 4)) { 
+    if (!validate_user_writable_pointer((const void *)sender_ptr, 4) ||
+        !validate_user_writable_pointer((const void *)payload_ptr, 4)) {
         regs->eax = E_FAULT; 
         return; 
     }
-    
-    regs->eax = receive_message(sender_ptr, payload_ptr);
+
+    uint32_t sender;
+    uint32_t payload;
+    int ret = receive_message(&sender, &payload);
+    if (ret == E_OK &&
+        (copy_to_user(sender_ptr, &sender, sizeof(sender)) != E_OK ||
+         copy_to_user(payload_ptr, &payload, sizeof(payload)) != E_OK)) {
+        ret = E_FAULT;
+    }
+    regs->eax = ret;
 }
 
 /**
  * @brief Function sys_alarm
  */
+/**
+ * @brief Arms the demo alarm timer.
+ *
+ * The delay used to be the literal 55, which at TIMER_HZ is 0.55 seconds - while
+ * the message printed right above it promised three. The mismatch survived
+ * because this call was compiled against the invented declaration that used to be
+ * in process.h, where the second parameter was a pid rather than a tick count, so
+ * neither the compiler nor a reader had reason to read 55 as a duration.
+ *
+ * Timer slot 1 is the one kernel_main() registers alarm_demo_callback() on.
+ */
+#define ALARM_DEMO_SECONDS 3
+
 void sys_alarm(arch_regs_t *regs) {
-    printk("Alarm set! It will ring in 3 seconds...\n");
-    schedule_kernel_timer(1, 55); 
+    printk("Alarm set! It will ring in %d seconds...\n", ALARM_DEMO_SECONDS);
+    schedule_kernel_timer(1, TIMER_HZ * ALARM_DEMO_SECONDS);
     regs->eax = 0;
 }
 
@@ -53,7 +77,7 @@ void sys_alarm(arch_regs_t *regs) {
 void sys_signal_reg(arch_regs_t *regs) {
     int sig_num = (int)regs->ebx;
     uint32_t handler_addr = (uint32_t)regs->ecx;
-    if (!validate_user_pointer((const void *)handler_addr, 4)) { 
+    if (handler_addr != 0 && !validate_user_pointer((const void *)handler_addr, 1)) {
         regs->eax = E_FAULT;
         return; 
     }

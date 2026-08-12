@@ -14,12 +14,45 @@
 #include "process.h"
 #include "tty.h"
 #include "signal.h"
+
+void sys_readdir(arch_regs_t *regs);
+
+/*
+ * Provided by tests/kernel/selftest.c, which is linked only into $(TEST_BIN).
+ * The weak reference resolves to 0 in production kernels, so SYSCALL_KTEST_REPORT
+ * is answered with -ENOSYS there. Same pattern as run_all_selftests().
+ */
+extern void __attribute__((weak)) sys_ktest_report(arch_regs_t *regs);
+extern int is_test_mode;
+
 /**
  * @brief Function syscall_handler
+ * 
+
  */
 void syscall_handler(arch_regs_t *regs) {
     asm volatile("sti");
-    
+
+    /*
+     * Record where this trap came from before dispatching anything.
+     *
+     * A syscall that has to block resumes on the int 0x80 itself rather than
+     * after it, and this is the only code that knows the trap was an int 0x80
+     * at all - the blocking sites just use the recorded address. It also marks
+     * the frame as a syscall frame, which is what lets those sites tell it
+     * apart from an interrupt frame that also arrived from Ring 3.
+     *
+     * The task is captured now because a blocking syscall returns with
+     * current_task pointing at whoever was scheduled next.
+     */
+    process_t *caller = current_task;
+    int from_user = (regs->cs & 0x03) == 3;
+
+    if (caller && from_user) {
+        caller->syscall_entry_eip = regs->eip - SYSCALL_INSN_LEN;
+        caller->in_syscall = 1;
+    }
+
     uint32_t syscall_num = regs->eax;
 
     switch (syscall_num) {
@@ -51,6 +84,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_LIST_FILES:   sys_list_files(regs); break;
         case SYSCALL_CAT_RAW:      sys_cat_raw(regs); break;
         case SYSCALL_CAT_FILE:     sys_cat_file(regs); break;
+        case SYSCALL_READDIR:      sys_readdir(regs); break;
 
         //sys_ipc.c
         case SYSCALL_IPC_SEND:     sys_ipc_send(regs); break;
@@ -69,6 +103,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_REBOOT:       sys_reboot(regs); break;
         case SYSCALL_HALT:         sys_halt(regs); break;
         case SYSCALL_DMESG:        sys_dmesg(regs); break;
+        case SYSCALL_SYNC:         sys_sync(regs); break;
 
         case SYSCALL_CLEAR_SCREEN:
             terminal_initialize();
@@ -79,10 +114,22 @@ void syscall_handler(arch_regs_t *regs) {
             restore_signal_context(regs);
             break;
 
+        case SYSCALL_KTEST_REPORT:
+            if (is_test_mode && sys_ktest_report) {
+                sys_ktest_report(regs);
+            } else {
+                regs->eax = E_NOSYS;
+            }
+            break;
+
         default:
             printk("Unknown Syscall Number: %d\n", syscall_num);
             regs->eax = E_NOSYS;
             break;
     }
     check_and_deliver_signals(regs);
+
+    if (caller && from_user) {
+        caller->in_syscall = 0;
+    }
 }

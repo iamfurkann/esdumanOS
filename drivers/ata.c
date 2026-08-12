@@ -10,6 +10,7 @@
 #include "klog.h"
 #include "libft.h"
 #include "rtc.h"
+#include "entropy.h"
 #define ATA_TIMEOUT_MS 200
 
 volatile int ata_interrupt_fired = 0;
@@ -20,7 +21,16 @@ static uint32_t ata_total_sectors = 0;
  */
 void ata_irq_handler(void) {
     ata_interrupt_fired = 1;
-    inb(ATA_PORT_STATUS); 
+
+    /*
+     * Command completion timing is aperiodic, so unlike the PIT it earns entropy
+     * credit - but only a couple of bits per event, because on an emulated disk
+     * most of the apparent variation comes from the emulator rather than from
+     * physical seek and rotation.
+     */
+    entropy_add_event(ENTROPY_SRC_ATA, 0);
+
+    inb(ATA_PORT_STATUS);
 }
 
 /**

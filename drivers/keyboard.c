@@ -8,6 +8,7 @@
 #include "io.h"
 #include "tty.h"
 #include "process.h"
+#include "entropy.h"
 
 // 0: US layout, 1: TR layout
 int current_layout = 0; 
@@ -89,6 +90,14 @@ static int e0_mode = 0;
 void keyboard_interrupt_handler(void) {
     uint8_t scancode = inb(0x60);
 
+    /*
+     * Before the early returns, deliberately. Most paths through this handler
+     * bail out - 0xE0 prefixes, modifiers, key releases, function keys - and the
+     * timing of those events is entropy just the same as a printable character's.
+     * Human keystroke intervals are the best source this machine has.
+     */
+    entropy_add_event(ENTROPY_SRC_KBD, scancode);
+
     if (scancode == 0xE0) { e0_mode = 1; return; }
 
     if (e0_mode) {
@@ -132,7 +141,7 @@ void keyboard_interrupt_handler(void) {
         if (next_head != kbd_tail) {
             kbd_buffer[kbd_head] = c;
             kbd_head = next_head;
-wakeup_tasks(1); // WAIT_KBD
+wakeup_tasks(WAIT_KBD);
         }
     }
 }

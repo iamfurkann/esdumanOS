@@ -8,7 +8,12 @@ Thank you for your interest in contributing to esdumanOS! This document provides
 2. Set up the build environment using the dependency list in the [README](README.md#building).
 3. Run the full test suite before submitting changes:
    ```bash
-   make test && make fuzz && make && make test_kernel
+   make test && make fuzz && make && make test_kernel && make test_smap
+   ```
+   If your change touches entropy, crypto, or the `/dev` random devices, also run the
+   configuration that exposes RDRAND — it reaches a branch the other targets cannot:
+   ```bash
+   make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
    ```
 
 ## Development Environment
@@ -25,15 +30,26 @@ Thank you for your interest in contributing to esdumanOS! This document provides
 
 ### Building
 
+`ESDUMAN_ELF_KEY_HEX` must be set and must be **exactly 64 hexadecimal characters** —
+the 32-byte AES-256 key used to encrypt the embedded ELF binaries. The Makefile checks
+both the presence and the length and aborts otherwise, so a passphrase-style value will
+not work.
+
 ```bash
-export ESDUMAN_KEY="your_test_key"
+export ESDUMAN_ELF_KEY_HEX=$(openssl rand -hex 32)
 make clean
 make
 ```
 
+The key is compiled into the kernel image, so treat it as a build parameter rather than
+a secret.
+
 ## Code Style
 
-- **Language:** C99, freestanding (no libc). Assembly in NASM syntax.
+- **Language:** GNU C, freestanding (no libc). The build passes no `-std`, so it takes
+  the compiler default and relies on GNU extensions throughout — inline `asm`,
+  `__attribute__`, statement expressions. It does not compile under strict ISO mode and
+  is not meant to. Assembly in NASM syntax.
 - **Indentation:** Tabs for indentation, spaces for alignment.
 - **Naming:** `snake_case` for functions and variables. `UPPER_SNAKE_CASE` for macros and constants.
 - **Comments:** Comment non-obvious logic. English is preferred for new contributions.
@@ -57,7 +73,8 @@ Valid prefixes: `mm:`, `fs:`, `proc:`, `drivers:`, `crypto:`, `tests:`, `build:`
 
 ## Pull Request Process
 
-1. Ensure all tests pass (`make test && make test_kernel`).
+1. Ensure all tests pass (`make test && make test_kernel && make test_smap`). CI runs
+   the same targets and none of them are allowed to fail.
 2. Add or update tests for any new functionality.
 3. Update documentation if the change affects user-visible behavior.
 4. One feature or fix per pull request.

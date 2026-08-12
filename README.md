@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.1.0--pre--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.2.0--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,9 +54,17 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.1.0-pre-alpha (First Public Release)
+**Version:** 0.2.0-alpha
 
-esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems are functional and the OS boots successfully in QEMU, but this is an early development release. It is intended for developers, OS enthusiasts, and anyone curious about kernel internals.
+esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional, the
+OS boots in QEMU, and — as of this release — the privilege boundary is actually
+tested rather than merely written: the self-test suite hands control to a real Ring 3
+process and asserts from CPL=3, and it also runs under hardware SMEP/SMAP enforcement.
+Before v0.2.0 every automated test ran at CPL=0, which meant process isolation and the
+scheduler were never exercised at all.
+
+It remains an early development release, intended for developers, OS enthusiasts, and
+anyone curious about kernel internals — not for storing anything you care about.
 
 **What works:**
 - Boots via GRUB, initializes all subsystems, and launches a Unix-style shell
@@ -64,7 +72,7 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 14 user-space programs and 20+ shell builtins
-- 19 kernel self-test modules and CI pipeline
+- 23 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -81,9 +89,9 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
 | Component | Description |
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
-| **GDT / IDT / TSS** | 8-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, TSS for privilege transitions |
-| **Syscall Interface** | 42 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
-| **Kernel Logging** | 4 KB ring buffer logger (dmesg equivalent) with disk persistence to `/var/log/dmesg.log` |
+| **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
+| **Syscall Interface** | 43 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
+| **Kernel Logging** | 8 KB ring buffer logger (dmesg equivalent) with disk persistence to `/var/log/dmesg.log` |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
 ### Memory Management
@@ -101,7 +109,7 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
 | **Scheduler** | Preemptive, priority-based, with kernel-mode preemption guard |
 | **ELF Loader** | Loads PT_LOAD segments, sets up user stack with guard page, inherits file descriptors |
 | **IPC** | Message passing (8-slot mailbox per process), anonymous and named pipes (16 pipes, 4 KB ring buffer each) |
-| **Signals** | Per-process signal handlers (32 slots), kernel timer signals (16 slots) |
+| **Signals** | Per-process signal handlers (32 slots), kernel timer slots (32) |
 | **FPU** | Lazy FPU state save/restore (FXSAVE/FXRSTOR), per-process 512-byte state |
 
 ### File System
@@ -109,9 +117,9 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
 | Component | Description |
 |-----------|-------------|
 | **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates |
-| **CryptoFS** | Transparent AES-256-CBC encryption layer with per-file random IVs (RDRAND + PRNG fallback), integrity checksums |
-| **Block Cache** | 64-slot LRU sector cache with write-through policy |
-| **DevFS** | `/dev/null` and `/dev/random` device nodes |
+| **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
+| **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()` |
+| **DevFS** | `/dev/null`, `/dev/random` and `/dev/urandom` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically |
 
 ### Drivers
 
@@ -127,7 +135,11 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
 | Algorithm | Description |
 |-----------|-------------|
 | **AES-256** | Full implementation supporting ECB, CBC, and CTR modes (based on tiny-AES-c) |
-| **SHA-256** | Hash function for password verification and file integrity |
+| **SHA-256** | Incremental implementation (init/update/final), verified against NIST vectors |
+| **HMAC-SHA256** | RFC 2104, verified against RFC 4231 test vectors. Used for file integrity and IV derivation |
+| **PBKDF2-HMAC-SHA256** | Password key derivation, verified against RFC 6070 vectors. Iteration count is clamped to a sane range on read |
+| **ChaCha20** | Stream cipher backing `/dev/random` and `/dev/urandom`, keyed from the entropy pool |
+| **Entropy pool** | RDRAND when available; otherwise interrupt timing jitter with per-source entropy budgets and an honest quality verdict |
 
 ### User Space
 
@@ -142,9 +154,9 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 19 test modules: VFS, memory, pipe, security, passwd, devfs, regression, integration, adversarial, concurrency, stress, string, paging, PMM, syscall, process, signal, crypto, bcache |
-| **Host Tests** | Crypto verification, ELF static analysis, hash validation |
-| **Fuzzing** | Parser fuzz testing with 45 corpus files |
+| **Kernel Self-Tests** | 23 kernel-mode modules: VFS, memory, pipe, security, passwd, devfs, regression, integration, adversarial, concurrency, stress, string, paging, PMM, lifecycle, fault, syscall, process, signal, ELF, crypto, entropy, bcache — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side |
+| **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
+| **Fuzzing** | Parser fuzz testing with 54 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
 
 ---
@@ -162,7 +174,7 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
                           INT 0x80      INT 0x80  INT 0x80  INT 0x80
                                |             |        |         |
     +--------------------------|-------------|--------|---------|-------+
-    |                    System Call Dispatcher (42 syscalls)           |
+    |                    System Call Dispatcher (43 syscalls)           |
     +------------------------------------------------------------------+
     |                                                                   |
     |   +-------------+  +-------------+  +-------------+  +---------+ |
@@ -182,7 +194,7 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
     |                                                                   |
     |   +-----------------------------------------------------------+   |
     |   |                   x86 CPU Infrastructure                  |   |
-    |   |   GDT (8 entries)  |  IDT (256 vectors)  |  TSS  |  PIC  |   |
+    |   |   GDT (9 entries)  |  IDT (256 vectors)  |  TSS  |  PIC  |   |
     |   +-----------------------------------------------------------+   |
     +-------------------------------------------------------------------+
                                |
@@ -201,8 +213,12 @@ esdumanOS is currently in the **Pre-Alpha** stage. The core kernel subsystems ar
             |  (kernel code, data,    |
             |   heap, page tables)    |
 0xBFFFFFFF  +-------------------------+
-            |  User Stack             |  0xBFFFF000 (128 KB, guard page below)
-            +                         +
+            |  (unmapped)             |  Top of the user range; validated as
+            |                         |  writable but nothing is mapped here
+0xB0000000  +-------------------------+
+            |  User Stack             |  Stack top set by the ELF loader,
+            +                         +  grows down, guard page below
+
             |                         |
             |  User Space             |  Process-specific mappings
             |  (ELF segments)         |
@@ -226,24 +242,26 @@ boot.asm -----> Set up page tables (identity + higher-half)
 kernel_main()
   |
   +---> init_terminal()          VGA text mode, 3 virtual terminals
-  +---> init_gdt()               8-entry GDT, Ring 0 + Ring 3 segments
+  +---> init_gdt()               9-entry GDT, Ring 0 + Ring 3 segments, #DF TSS
   +---> init_idt()               256 IDT entries, PIC remapping
+  +---> init_security()          Seeds the entropy pool (RTC + TSC)
+  +---> init_elf_master_key()    Loads the build-time ELF decryption key
   +---> init_pmm()               Bitmap allocator from multiboot memory map
   +---> init_paging()            Recursive page directory, identity map 16 MB
   +---> init_kernel_heap()       First-fit heap allocator
-  +---> init_timer(1000)         PIT at 1000 Hz
-  +---> init_signals()           Kernel timer signal table
-  +---> init_security()          Master key derivation from boot parameter
+  +---> init_timer(TIMER_HZ)     PIT at 100 Hz
+  +---> init_signals()           Kernel timer slot table
   +---> ata_identify()           ATA disk detection
   +---> fs_init()                VFS, FAT, directory table from disk
   +---> init_fpu()               FPU/SSE detection and initialization
   +---> init_multitasking()      Idle task, task array
   +---> Create FHS hierarchy     /bin, /dev, /etc, /home, /root, /tmp, /var
-  +---> Write passwd/shadow      Default user database on first boot
-  +---> Load ELF programs        Decrypt and write init, hello, echo, clear
-  +---> load_and_exec_elf()      Launch init process
+  +---> First boot setup         Prompts for the root and user passwords,
+  |                              then writes /etc/passwd and /etc/shadow
+  +---> Load ELF programs        Decrypt and write init and the /bin tools
+  +---> load_and_exec_elf()      Load init into its own address space
   v
-switch_to_user_mode() ---------> Ring 3, init shell starts
+start_first_task() ------------> iret to Ring 3, init shell starts
 ```
 
 ---
@@ -259,8 +277,14 @@ cd esdumanOS
 make run
 ```
 
-The kernel will boot in a QEMU window. You will be greeted with a login prompt.
-Default credentials: `root` / `1234`.
+The kernel boots inside your terminal (`make run` passes `-display curses`, not a
+separate window). There is no default password: on a fresh
+disk the first boot runs a setup prompt that asks you to choose passwords for
+`root` and for the `esduman` user, and only then writes `/etc/shadow`. Subsequent
+boots go straight to the login prompt.
+
+The exception is a self-test build (`make test_kernel`), which needs to run
+unattended and so creates both accounts with the password `test`.
 
 ---
 
@@ -307,7 +331,17 @@ sudo pacman -S gcc nasm make qemu-system-x86 \
 
 ### Build Commands
 
-> **Note:** The `ESDUMAN_KEY` environment variable is required to build the kernel because of the AES-256 encrypted file system (e.g. `export ESDUMAN_KEY="mysecret"`).
+> **Required:** `ESDUMAN_ELF_KEY_HEX` must be set, and it must be **exactly 64
+> hexadecimal characters** — the 32-byte AES-256 key used to encrypt the embedded
+> ELF binaries. The Makefile checks both and aborts otherwise. A passphrase-style
+> value will not work.
+>
+> ```bash
+> export ESDUMAN_ELF_KEY_HEX=$(openssl rand -hex 32)
+> ```
+>
+> The key ends up compiled into the kernel image, so treat it as a build
+> parameter rather than a secret — see [Known Limitations](#security).
 
 ```bash
 # Full build: compile kernel, encrypt ELF binaries, create bootable ISO
@@ -315,16 +349,19 @@ make
 
 # Clean all build artifacts
 make clean
-
-# Build for RISC-V 64-bit (experimental, skeletal support)
-make ARCH=riscv64
 ```
 
+> `make ARCH=riscv64` stops with a diagnostic: the Makefile carries a RISC-V
+> branch, but `arch/riscv/` is not present in this tree. Only `ARCH=x86` builds.
+
 The build process:
-1. Compiles all C and assembly source files with `-ffreestanding -nostdlib`
-2. Builds user-space ELF programs (init, hello, echo, clear)
-3. Encrypts ELF binaries with AES-256 and embeds them as C arrays
-4. Links the kernel binary against the custom linker script
+1. Compiles all C and assembly source files with `-m32 -nostdlib -nodefaultlibs
+   -fno-builtin` (user-space programs additionally get `-ffreestanding`)
+2. Builds the 14 user-space ELF programs plus `init`
+3. Encrypts each ELF with AES-256-CBC using `ESDUMAN_ELF_KEY_HEX` and embeds the
+   ciphertext as a C array via `xxd -i`
+4. Links the kernel binary against the custom linker script (load at 1 MB,
+   higher-half at 0xC0000000)
 5. Creates a GRUB-bootable ISO image via `grub-mkrescue`
 
 ---
@@ -338,23 +375,39 @@ The build process:
 make run
 ```
 
-This executes QEMU with the following configuration:
-- 128 MB RAM (`-m 128`)
-- ISA debug exit device (for test automation)
-- Serial output to stdio
-- Bootable CD-ROM from the generated ISO
-- Attached 2 MB raw disk image
+This executes QEMU as:
+
+```
+qemu-system-i386 -cdrom esdumanOS.iso -serial file:kernel_log.txt \
+    -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+```
+
+Which means:
+- **`-display curses`** — the OS runs inside your terminal, not a separate window.
+  Quit with `Esc` then `2` to reach the QEMU monitor, or `Ctrl-A X` under `-nographic`.
+- **Serial output goes to `kernel_log.txt`**, not to the terminal. That file is
+  where `klog` output lands; tail it in another shell while the OS runs.
+- Bootable CD-ROM from the generated ISO, plus a 2 MB raw disk image on the
+  primary IDE channel.
+- No `-m` flag is passed, so QEMU's default for i386 applies — 128 MB, which is
+  what the PMM reports at boot.
+- No debug-exit device: that is added only by `make test_kernel` and `make test_smap`.
 
 ### Manual QEMU Invocation
+
+To get a graphical window and the serial log on your terminal instead of the
+defaults above:
 
 ```bash
 qemu-system-i386 \
     -m 128 \
     -cdrom esdumanOS.iso \
     -drive file=disk.img,format=raw,if=ide \
-    -serial stdio \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+    -serial stdio
 ```
+
+Add `-device isa-debug-exit,iobase=0xf4,iosize=0x04` only if you want the kernel
+to be able to terminate QEMU with an exit code, as the self-test targets do.
 
 ### Keyboard Shortcuts (Inside the OS)
 
@@ -404,11 +457,19 @@ esdumanOS includes a multi-layered test infrastructure:
 # Run host-side unit tests (crypto, ELF analysis, hash)
 make test
 
-# Run parser fuzzing with 45 corpus files
+# Run parser fuzzing with 54 corpus files
 make fuzz
 
-# Boot kernel in self-test mode, run 12 test modules in QEMU
+# Boot kernel in self-test mode: 23 kernel-mode modules, then a Ring 3 payload
 make test_kernel
+
+# Same suite on a CPU that exposes RDRAND, to cover the strong-entropy path
+make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
+
+# Same suite with SMEP/SMAP enforced. The kernel-mode modules are skipped there
+# (they stand in for user space from Ring 0, which SMAP forbids); the Ring 3
+# payload covers the boundary from the correct side.
+make test_smap
 ```
 
 ### Kernel Test Modules
@@ -425,8 +486,24 @@ make test_kernel
 | `test_regression.c` | 5 previously-fixed bugs: kfree(NULL), PID confusion, ATA limits |
 | `test_integration.c` | Cross-component: VFS lifecycle, ELF load-to-process |
 | `test_concurrency.c` | Hardware atomic operations (`__sync_lock_test_and_set`) |
-| `test_devfs.c` | Device filesystem: `/dev` directory, invalid device rejection |
+| `test_devfs.c` | Device filesystem: `/dev` nodes, invalid device rejection, DRBG re-keying |
 | `test_string.c` | libft string function correctness |
+| `test_paging.c` | Map/unmap, collision rejection, CR0.WP enforcement on read-only user pages |
+| `test_pmm.c` | Frame allocation, free-memory accounting |
+| `test_lifecycle.c` | Address space clone and teardown; asserts every frame is reclaimed |
+| `test_fault.c` | Double-fault infrastructure: task gate, TSS descriptor, dedicated stack |
+| `test_syscall.c` | Dispatcher rejection of bad numbers, FDs, and sizes |
+| `test_process.c` | Scheduler, live-frame detection, rwlocks, syscall restart, idle task |
+| `test_signal.c` | Handler registration and pending-signal bookkeeping |
+| `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
+| `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
+| `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
+| `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()` |
+
+The Ring 3 payload (`tests/user/ktest_user.c`) runs after these and reports its
+results back through a dedicated syscall. It is the only part of the suite that
+actually crosses the privilege boundary, covering user-pointer validation, pipes,
+`readdir`, process teardown, and lockdown behaviour from an unprivileged process.
 
 ---
 
@@ -440,27 +517,30 @@ esdumanOS/
 |       |-- boot/
 |       |   +-- boot.asm             Multiboot entry, page table setup, stack init
 |       |-- cpu/
-|       |   |-- gdt.c                Global Descriptor Table (8 entries)
+|       |   |-- gdt.c                Global Descriptor Table (9 entries)
 |       |   |-- idt.c                Interrupt Descriptor Table, PIC remapping
 |       |   |-- isr.c                Interrupt dispatcher, exception handlers
-|       |   |-- timer.c              PIT configuration (1000 Hz)
-|       |   |-- tss.c                Task State Segment
-|       |   +-- user_mode.asm        Ring 0 -> Ring 3 transition via iret
+|       |   |-- timer.c              PIT configuration (TIMER_HZ = 100 Hz)
+|       |   +-- tss.c                Task State Segment, double-fault TSS
 |       +-- linker.ld                Kernel linker script (load at 1 MB)
 |
 |-- kernel/
 |   |-- core/
 |   |   |-- kernel.c                 Entry point, subsystem initialization
-|   |   +-- klog.c                   Ring buffer kernel logger
+|   |   |-- klog.c                   Ring buffer kernel logger
+|   |   +-- uaccess.c                Validated copies across the user boundary
 |   |-- proc/
 |   |   |-- process.c                Scheduler, IPC, mutexes, context switch
 |   |   |-- elf.c                    ELF binary loader
+|   |   |-- elf_validate.c           Header and segment validation (also fuzzed)
 |   |   |-- pipe.c                   Anonymous and named pipes
-|   |   +-- signal.c                 Timer-based kernel signals
+|   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   +-- syscall.c                42 system call handlers
+|   |   |-- syscall.c                Dispatcher, 43 system calls
+|   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
-|       |-- security.c               Security levels, master key derivation
+|       |-- security.c               Security levels, master key lifetime
+|       |-- entropy.c                Entropy pool, RDRAND and interrupt jitter
 |       +-- passwd.c                 User authentication, shadow database
 |
 |-- mm/
@@ -472,8 +552,8 @@ esdumanOS/
 |-- fs/
 |   |-- vfs.c                        Virtual file system, FAT, directory table
 |   |-- crypto_fs.c                  AES-256-CBC transparent encryption
-|   |-- bcache.c                     Block cache (64-slot LRU)
-|   +-- devfs.c                      Device filesystem (/dev/null, /dev/random)
+|   |-- bcache.c                     Block cache (64-slot LRU, write-back)
+|   +-- devfs.c                      Device filesystem (/dev/null, /dev/random, /dev/urandom)
 |
 |-- drivers/
 |   |-- ata.c                        ATA/IDE PIO disk driver
@@ -483,9 +563,12 @@ esdumanOS/
 |
 |-- crypto/
 |   |-- aes.c                        AES-256 (ECB / CBC / CTR)
-|   +-- sha256.c                     SHA-256 hash function
+|   |-- sha256.c                     SHA-256, incremental and one-shot
+|   |-- hmac.c                       HMAC-SHA256
+|   |-- pbkdf2.c                     PBKDF2-HMAC-SHA256
+|   +-- chacha20.c                   ChaCha20 stream cipher
 |
-|-- lib/                             Freestanding standard library (49 files)
+|-- lib/                             Freestanding standard library (48 files)
 |   |-- stdio.c                      kvsnprintf, printk
 |   +-- ft_*.c                       String, memory, character, list utilities
 |
@@ -507,35 +590,38 @@ esdumanOS/
 |       |-- head.c                   Display first lines of file
 |       +-- date.c                   Display date and time
 |
-|-- include/                         42 header files
-|   |-- kernel.h                     Master header (version 0.1.0)
+|-- include/                         40 header files
+|   |-- kernel.h                     Master header (version 0.2.0-alpha)
 |   |-- types.h                      Integer type definitions
-|   |-- syscall.h                    42 syscall number definitions
+|   |-- syscall.h                    43 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
 |   |-- fs.h                         VFS structures, file operations
 |   |-- paging.h                     Virtual memory constants
+|   |-- entropy.h                    Entropy pool API and quality contract
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      19 in-kernel test modules + framework
-|   +-- host/                        Host-side tests, fuzzing (45 corpus files)
+|   |-- kernel/                      23 kernel-mode test modules + framework
+|   |-- user/                        Ring 3 test payload
+|   +-- host/                        Host-side tests, fuzzing (54 corpus files)
 |
 |-- tools/                           Build-time utilities
 |   |-- mkfs.py                      File system image creator
-|   |-- encrypt_tool.c               ELF encryption tool
-|   +-- inject.py                    Binary data injector
+|   +-- encrypt_tool.c               ELF encryption tool (links OpenSSL libcrypto)
 |
 |-- grub/
 |   +-- grub.cfg                     GRUB bootloader configuration
 |
-+-- Makefile                          Build system (x86 + RISC-V)
++-- Makefile                          Build system. Only ARCH=x86 is present; the
+                                      ARCH=riscv64 branch is scaffolding and
+                                      stops with a diagnostic.
 ```
 
 ---
 
 ## System Call Reference
 
-The kernel exposes 42 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 43 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 ### Process Management
 
@@ -570,6 +656,8 @@ The kernel exposes 42 system calls through `INT 0x80`. The syscall number is pas
 | 28 | `LS_DIR` | List directory contents |
 | 29 | `GET_DIR_ID` | Resolve directory path to ID |
 | 34 | `CAT_RAW` | Read raw (unencrypted) file contents |
+| 44 | `READDIR` | Read directory entries into user buffer |
+| 45 | `SYNC` | Write every dirty block-cache sector out to disk |
 
 ### IPC and Signals
 
@@ -587,12 +675,12 @@ The kernel exposes 42 system calls through `INT 0x80`. The syscall number is pas
 | Number | Name | Description |
 |--------|------|-------------|
 | 13 | `LOCKDOWN` | Enter security lockdown mode |
-| 30 | `CRYPTO_ENCRYPT` | Encrypt data with kernel master key |
-| 31 | `CRYPTO_DECRYPT` | Decrypt data with kernel master key |
-| 32 | `CRYPTO_KEYGEN` | Generate cryptographic key material |
 | 33 | `SET_SEC_LEVEL` | Set kernel security level |
 | 35 | `SETUID` | Change effective user ID (requires password) |
 | 41 | `AUTH` | Authenticate user against shadow database |
+| 43 | `GETUID` | Get user ID of current process |
+
+*Note: Syscall numbers 30-32 are reserved for future crypto API.*
 
 ### System and Debug
 
@@ -623,29 +711,45 @@ The kernel operates under one of four escalating security levels. Once raised, t
 ```
 Level 0: NORMAL             Standard operation. Encryption is optional.
                             |
-Level 1: LOCKDOWN           New task creation is blocked.
-                            Terminal access is restricted.
-                            |
-Level 2: CRYPTO_ENFORCED    ALL VFS read/write operations MUST be encrypted.
+Level 1: CRYPTO_ENFORCED    ALL VFS read/write operations MUST be encrypted.
                             Unencrypted disk access is denied.
                             |
+Level 2: LOCKDOWN           New task creation is blocked.
+                            The in-RAM master key is destroyed, and encrypted
+                            VFS access is then refused outright rather than
+                            silently attempted with a zeroed key.
+                            |
 Level 3: IMMUTABLE          Disk writes are completely disabled.
-                            Kernel enters read-only mode.
+                            Kernel enters read-only mode. Dirty sectors already
+                            in the block cache can still be flushed.
 ```
 
 ### Authentication
 
-- User database stored in `/etc/shadow` with SHA-256 hashed passwords
+- User database stored in `/etc/shadow` in a `$v1$` format that records the
+  iteration count and a 16-byte per-user salt alongside the derived key
+- Passwords are derived with PBKDF2-HMAC-SHA256, not a bare hash. The stored
+  iteration count is clamped to a sane range on read, so a tampered `/etc/shadow`
+  cannot weaken verification or stall the kernel with an absurd count
+- Verification is constant-time over the derived key
+- Repeated failures are rate limited per process
 - `su` command requires password re-authentication
 - UID-based permission model (root = UID 0)
 - `/etc/passwd` file is protected from non-root modification (delete, overwrite, rename)
 
 ### Disk Encryption
 
-- AES-256-CBC with per-file random initialization vectors
-- Master key derived from boot-time `kernel_pass` parameter
-- RDRAND hardware entropy source with PRNG fallback for IV generation
-- Magic header ("SAFE") and djb2 checksum for integrity verification
+- AES-256-CBC, with the IV stored as the first 16 plaintext bytes of each file
+- The ELF/filesystem master key is a **build-time constant** compiled into the
+  kernel from `ESDUMAN_ELF_KEY_HEX`. This gives tamper resistance, *not*
+  at-rest confidentiality: anyone holding the kernel binary holds the key, and
+  the kernel says so in its own boot log
+- Per-file IVs are derived rather than drawn directly from the entropy pool:
+  `HMAC-SHA256(file key, "esdumanOS-iv-v1" ‖ counter ‖ pool bytes)`. The
+  monotonic counter makes the input distinct on every call, so two files cannot
+  share an IV even on a machine whose entropy sources are worthless; keying the
+  derivation with the file key keeps the result unpredictable to anyone without it
+- Magic header ("SAFE") and an HMAC-SHA256 tag over the plaintext for integrity
 
 ---
 
@@ -657,19 +761,29 @@ The following are known constraints of the current implementation. These are doc
 
 | Resource | Limit |
 |----------|-------|
-| Maximum processes | 16 |
-| File descriptors per process | 16 |
-| Files in directory table | 32 |
-| Maximum filename length | 24 bytes |
+| Maximum processes | 16 (`MAX_TASKS`) |
+| File descriptors per process | 32 (`MAX_FD_PER_TASK`) |
+| Files in directory table | 256 (`MAX_FILES_IN_DIR`) |
+| Maximum filename length | 256 bytes (`MAX_FILENAME`) |
 | Maximum disk size (FAT) | 2 MB (4096 sectors) |
 | Physical memory supported | 128 MB |
-| Pipe buffer size | 4 KB |
-| Named pipes | 16 |
-| Kernel log buffer | 4 KB |
+| Pipe buffer size | 4 KB (`PIPE_SIZE`) |
+| Pipes, system-wide | 16 (`MAX_SYSTEM_PIPES`, shared by named and anonymous) |
+| Per-process kernel stack | 8 KB (`KERNEL_STACK_SIZE`) |
+| Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
+| Kernel log buffer | 8 KB (`KLOG_BUF_SIZE`) |
 
 ### Architectural
 
 - **Single-core only.** SMP data structures are stubbed but not implemented.
+- **The kernel is not preemptible.** A task that enters the kernel runs until it
+  returns to user mode or blocks of its own accord; only Ring 3 frames are ever
+  rescheduled. This is deliberate, and much of the kernel depends on it — the
+  block cache, the pipe pool and the ATA driver hold no locks at all, the task
+  list is edited without masking interrupts, and the uaccess fault state is a
+  single global. Making the kernel preemptible means fixing all of that first,
+  starting with the interrupt frame layout, which cannot currently describe a
+  Ring 0 frame.
 - **No fork() syscall.** Process creation is exec-only; child processes do not inherit parent memory.
 - **No mmap() or brk().** User-space programs cannot dynamically allocate memory beyond their initial ELF segments and stack.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
@@ -680,10 +794,23 @@ The following are known constraints of the current implementation. These are doc
 
 ### Security
 
-- Default root password is `1234` and should be changed after first boot.
-- Password hashing does not use per-user salt.
-- Key derivation uses a custom KDF, not a standard algorithm (PBKDF2, scrypt).
-- Boot-time encryption key is visible in the GRUB configuration.
+- **The disk encryption key is compiled into the kernel image.** It provides
+  tamper resistance, not confidentiality at rest. Anyone with the binary has the
+  key. A real design would derive it from a passphrase at boot.
+- **Entropy is weak without RDRAND.** The pool is fed by interrupt timing, and
+  the only source it credits meaningfully is the keyboard — the PIT is periodic
+  and earns nothing, and disk completions are capped at 64 bits for the whole
+  boot. On a headless machine with no RDRAND the pool never reaches the threshold
+  at which it would claim cryptographic quality, and it reports that honestly
+  instead of pretending otherwise. IV and salt *uniqueness* does not depend on
+  this; unpredictability does.
+- **Entropy uniqueness is guaranteed within a boot, not across boots.** Two cold
+  boots of the same image inside the same RTC second are not provably distinct.
+  Closing that needs a seed persisted on disk.
+- **No ASLR, no stack canaries in user space, no W^X for user pages.**
+- LOCKDOWN blocks new programs and destroys the master key. It does not restrict
+  an already-running shell, so a session that is open when the level is raised
+  keeps its terminal.
 
 ---
 
@@ -693,19 +820,28 @@ Near-term priorities for the project, roughly in order:
 
 | Priority | Item |
 |----------|------|
-| P0 | Correct SHA-256 implementation (multi-block, proper padding) |
-| P0 | Fix kernel page permissions (supervisor-only for kernel memory) |
-| P0 | Process memory cleanup on exit (page table walk + frame deallocation) |
-| P1 | ELF loader segment address validation |
-| P1 | BSS zeroing in bootloader |
-| P1 | Integrate block cache into VFS read/write path |
+| P1 | Persist an entropy seed across boots, so uniqueness does not rest on the RTC |
 | P1 | Bounded string operations throughout user space |
-| P2 | Per-mutex wait queues (replace global wakeup) |
-| P2 | Salted password hashing |
-| P2 | Syscall API reference documentation |
+| P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
+| P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P3 | Fork/wait syscalls for proper process hierarchy |
+| P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments |
 | P3 | ANSI escape code support in terminal |
 | P3 | Expanded /dev device drivers |
+| P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
+
+Deliberately **not** planned: making the kernel preemptible. See the note under
+[Architectural](#architectural) — the guarantee that kernel code runs to
+completion is load-bearing for the block cache, the pipe pool, the ATA driver and
+the uaccess state, and removing the guard without replacing all of that would
+trade a documented limitation for silent corruption.
+
+The following were on this list and are done: multi-block SHA-256 with correct
+padding; supervisor-only kernel page permissions with `CR0.WP` enabled; address
+space teardown on exit with frame reclamation; ELF segment address validation
+(plus a fuzzer); BSS zeroing in the bootloader; block cache integration into the
+VFS read/write path; salted password hashing, now PBKDF2-HMAC-SHA256; and this
+syscall reference.
 
 ---
 
@@ -724,7 +860,10 @@ Contributions are welcome. If you are interested in contributing to esdumanOS, p
 
 ### Code Style
 
-- **Language:** C99, freestanding (no libc). Assembly in NASM syntax.
+- **Language:** GNU C, freestanding (no libc). The build passes no `-std`, so it
+  takes the compiler default and relies on GNU extensions throughout — inline
+  `asm`, `__attribute__`, statement expressions. It does not compile under strict
+  ISO mode and is not meant to. Assembly in NASM syntax.
 - **Indentation:** Tabs for indentation, spaces for alignment.
 - **Naming:** `snake_case` for functions and variables. `UPPER_SNAKE_CASE` for macros and constants.
 - **Comments:** Comment non-obvious logic. Existing comments are in Turkish; new contributions may use English.

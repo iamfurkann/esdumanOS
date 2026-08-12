@@ -24,7 +24,7 @@ What actually happened, including any error messages or kernel panics.
 ## Environment
 - **Host OS:** (e.g., Ubuntu 22.04, macOS 14)
 - **QEMU Version:** (e.g., 8.0.0)
-- **esdumanOS Version:** (e.g., v0.1.0-pre-alpha)
+- **esdumanOS Version:** (e.g., v0.2.0-alpha)
 - **Build Method:** (e.g., `make run`, manual QEMU invocation)
 
 ## Serial/Kernel Log Output

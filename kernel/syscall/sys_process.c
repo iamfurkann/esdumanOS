@@ -18,6 +18,13 @@
 #include "kheap.h"
 #include "pmm.h"
 #include "stack.h"
+#include "uaccess.h"
+#include "bcache.h"
+
+static int copy_user_string(char *destination, const char *source, size_t max_len) {
+    if (!validate_string_pointer(source, max_len)) return 0;
+    return copy_string_from_user(destination, source, max_len) == E_OK;
+}
 /**
  * @brief Function sys_exit
  */
@@ -29,28 +36,22 @@ void sys_exit(arch_regs_t *regs) {
  * @brief Function sys_exec
  */
 void sys_exec(arch_regs_t *regs) {
-    if (!validate_string_pointer((const char *)regs->ebx, 256)) { 
+    char target_path[MAX_FILENAME];
+    if (!copy_user_string(target_path, (const char *)regs->ebx, sizeof(target_path))) {
         regs->eax = E_FAULT; 
         return; 
     }
-    char *target_path = (char *)regs->ebx;
     uint8_t calling_dir_id = (uint8_t)regs->ecx;
 
     char temp_args[128];
     for (int k = 0; k < 128; k++) temp_args[k] = '\0';
-    char *args_str = (char *)regs->edx; 
+    const char *args_str = (const char *)regs->edx;
     
     if (args_str) {
-        if (!validate_string_pointer((const char *)args_str, 128)) { 
+        if (!copy_user_string(temp_args, args_str, sizeof(temp_args))) {
             regs->eax = E_FAULT; 
             return; 
         }
-        int i = 0; 
-        while (args_str[i] && i < 127) { 
-            temp_args[i] = args_str[i]; 
-            i++; 
-        } 
-        temp_args[i] = '\0';
     }
 
     char basename[MAX_FILENAME];
@@ -86,10 +87,20 @@ void sys_exec(arch_regs_t *regs) {
             child_process->cmd_args[i] = '\0';
         }
 
-        sleep_current_task(regs, 5); // WAIT_CHILD = 5
+        /*
+         * Publish the parent's return value BEFORE sleeping.
+         *
+         * sleep_current_task() snapshots *regs into the parent's PCB and then
+         * schedule() overwrites *regs with the incoming task's context, so
+         * anything written afterwards lands in a different task's saved
+         * registers instead. The old order left the parent returning the
+         * syscall number it went in with, and silently clobbered EAX for
+         * whichever task ran next.
+         */
         regs->eax = E_OK;
-    } else { 
-        regs->eax = E_NOEXEC; 
+        sleep_current_task(regs, WAIT_CHILD);
+    } else {
+        regs->eax = E_NOEXEC;
     }
 }
 
@@ -130,9 +141,25 @@ void sys_set_priority(arch_regs_t *regs) {
 }
 
 /**
- * @brief Function sys_yield
+ * @brief Gives up the rest of the timeslice, and drives write-back on the way.
+ *
+ * The idle task is a Ring 3 loop of "mov eax, SYSCALL_YIELD; int 0x80" (see
+ * init_multitasking()), so this is the one place in the kernel that is entered
+ * continuously whenever nothing else wants the CPU - which makes it the right
+ * place to notice that the block cache has been holding dirty sectors too long.
+ *
+ * It has to be here rather than in the timer handler: ata_write_sector() waits
+ * for the ATA interrupt using hlt, and an ISR runs with interrupts masked, where
+ * that hlt would never wake. Here we are in a syscall, on the task's own kernel
+ * stack, with interrupts already re-enabled by syscall_handler().
+ *
+ * The flush happens before schedule(), because schedule() may switch away and
+ * never come back to this frame. The flush itself is not interrupted: the timer
+ * ISR only reschedules frames from Ring 3, so its arrival during the hlt loop
+ * does not preempt us.
  */
 void sys_yield(arch_regs_t *regs) {
+    bcache_flush_if_due();
     schedule(regs);
 }
 
@@ -152,18 +179,19 @@ void sys_getuid(arch_regs_t *regs) {
  */
 void sys_get_args(arch_regs_t *regs) {
     char *buf = (char *)regs->ebx;
-    if (!validate_user_pointer((const void *)buf, 128)) { 
+    if (!validate_user_writable_pointer((const void *)buf, 128)) {
         regs->eax = E_FAULT; 
         return; 
     }
     
     int i = 0;
+    char args[128];
     while (current_task->cmd_args[i] && i < 127) {
-        buf[i] = current_task->cmd_args[i];
+        args[i] = current_task->cmd_args[i];
         i++;
     }
-    buf[i] = '\0';
-    regs->eax = i;
+    args[i] = '\0';
+    regs->eax = copy_to_user(buf, args, (size_t)(i + 1)) == E_OK ? i : E_FAULT;
 }
 
 
@@ -226,6 +254,11 @@ void sys_hexdump(arch_regs_t *regs) {
         regs->eax = E_PERM; 
         return; 
     }
-    print_hexdump(regs->ebx, 64);
-    regs->eax = 0;
+    uint8_t data[64];
+    if (copy_from_user(data, (const void *)regs->ebx, sizeof(data)) != E_OK) {
+        regs->eax = E_FAULT;
+        return;
+    }
+    print_hexdump((uint32_t)data, sizeof(data));
+    regs->eax = E_OK;
 }

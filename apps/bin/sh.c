@@ -59,6 +59,21 @@ void ft_strncpy(char *dest, const char *src, int n) {
 }
 
 /**
+ * @brief Compares two strings up to n characters.
+ * @param s1 First string.
+ * @param s2 Second string.
+ * @param n Maximum characters to compare.
+ * @return Difference between first non-matching characters.
+ */
+int ft_strncmp(const char *s1, const char *s2, int n) {
+    for (int i = 0; i < n; i++) {
+        if (s1[i] != s2[i]) return (unsigned char)s1[i] - (unsigned char)s2[i];
+        if (s1[i] == '\0') return 0;
+    }
+    return 0;
+}
+
+/**
  * @brief Calculates the length of a string.
  * 
  * @param s The string.
@@ -264,6 +279,14 @@ void sys_ls_dir(int parent_id) { syscall(28, parent_id, 0, 0); }
  * @return Directory ID.
  */
 int sys_get_dir_id(const char *name, int parent_id) { return syscall(29, (int)name, parent_id, 0); }
+/**
+ * @brief Reads directory entries into buffer.
+ * @param dir_id Directory ID to read.
+ * @param buf Buffer to store null-separated filenames.
+ * @param buf_size Buffer size.
+ * @return Total bytes written.
+ */
+int sys_readdir(int dir_id, char *buf, int buf_size) { return syscall(44, dir_id, (int)buf, buf_size); }
 /**
  * @brief Creates a pipe.
  * @param pipefd Array to store the read and write file descriptors.
@@ -759,6 +782,204 @@ void execute_command(char **args, char *redirect_file) {
     }
 }
 
+/* ================== TAB COMPLETION ================== */
+
+/** Built-in command names for tab completion */
+static const char *builtin_commands[] = {
+    "cat", "cat_raw", "cd", "clear", "dmesg", "echo", "env", "exec",
+    "exit", "export", "halt", "help", "hexdump", "kill", "layout",
+    "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
+    "rm", "su", "write",
+    0  // sentinel
+};
+
+/**
+ * @brief Performs tab completion on the current input buffer.
+ *
+ * If cursor is at first word position, completes command names.
+ * Otherwise, completes file/directory names in the current directory.
+ * Single match: auto-completes. Multiple matches: lists them.
+ *
+ * @param buf Current input buffer.
+ * @param idx Pointer to current cursor position in buffer.
+ */
+static void handle_tab_completion(char *buf, int *idx) {
+    // Find the start of the current word
+    int word_start = *idx;
+    while (word_start > 0 && buf[word_start - 1] != ' ') word_start--;
+    
+    // Extract the partial word (prefix to match)
+    char prefix[128];
+    int prefix_len = *idx - word_start;
+    for (int i = 0; i < prefix_len && i < 127; i++) prefix[i] = buf[word_start + i];
+    prefix[prefix_len] = '\0';
+    
+    // Determine if we're completing a command (first word) or a filename
+    int is_command = (word_start == 0);
+    
+    // Collect matches
+    char matches[32][64];  // max 32 matches, 64 chars each
+    int match_count = 0;
+    int match_is_dir[32];  // track which matches are directories
+    
+    if (is_command) {
+        // Match built-in commands
+        for (int i = 0; builtin_commands[i] != 0; i++) {
+            if (prefix_len == 0 || ft_strncmp(builtin_commands[i], prefix, prefix_len) == 0) {
+                if (match_count < 32) {
+                    ft_strncpy(matches[match_count], builtin_commands[i], 64);
+                    match_is_dir[match_count] = 0;
+                    match_count++;
+                }
+            }
+        }
+        // Also match /bin/ executables
+        int bin_id = sys_get_dir_id("/bin", 0);
+        if (bin_id >= 0) {
+            char dir_buf[2048];
+            int bytes = sys_readdir(bin_id, dir_buf, sizeof(dir_buf));
+            int off = 0;
+            while (off < bytes) {
+                char *name = &dir_buf[off];
+                int nlen = 0;
+                while (name[nlen] != 1 && name[nlen] != 2 && name[nlen] != '\0') nlen++;
+                // Skip the type marker byte
+                char entry_name[64];
+                for (int j = 0; j < nlen && j < 63; j++) entry_name[j] = name[j];
+                entry_name[nlen] = '\0';
+                
+                if (prefix_len == 0 || ft_strncmp(entry_name, prefix, prefix_len) == 0) {
+                    // Check it's not already a builtin
+                    int is_dup = 0;
+                    for (int m = 0; m < match_count; m++) {
+                        if (ft_strcmp(matches[m], entry_name) == 0) { is_dup = 1; break; }
+                    }
+                    if (!is_dup && match_count < 32) {
+                        ft_strncpy(matches[match_count], entry_name, 64);
+                        match_is_dir[match_count] = 0;
+                        match_count++;
+                    }
+                }
+                // Skip past: name + type_byte + null
+                off += nlen + 2;
+            }
+        }
+    } else {
+        // File/directory completion in current directory
+        // Check if prefix contains a path
+        int dir_id = current_dir_id;
+        char name_prefix[128];
+        ft_strcpy(name_prefix, prefix);
+        
+        // If prefix contains '/', resolve the directory part
+        int last_slash = -1;
+        for (int i = 0; name_prefix[i]; i++) {
+            if (name_prefix[i] == '/') last_slash = i;
+        }
+        if (last_slash >= 0) {
+            // Split into dir path and name prefix
+            char dir_path[128];
+            for (int i = 0; i <= last_slash; i++) dir_path[i] = name_prefix[i];
+            dir_path[last_slash + 1] = '\0';
+            
+            int new_dir = sys_get_dir_id(dir_path, (dir_path[0] == '/') ? 0 : current_dir_id);
+            if (new_dir >= 0) {
+                dir_id = new_dir;
+                // Shift name_prefix to after the last slash
+                int j = 0;
+                for (int i = last_slash + 1; name_prefix[i]; i++) name_prefix[j++] = name_prefix[i];
+                name_prefix[j] = '\0';
+                prefix_len = j;
+            }
+        }
+        
+        char dir_buf[2048];
+        int bytes = sys_readdir(dir_id, dir_buf, sizeof(dir_buf));
+        int off = 0;
+        while (off < bytes) {
+            char *name = &dir_buf[off];
+            int nlen = 0;
+            while (name[nlen] != 1 && name[nlen] != 2 && name[nlen] != '\0') nlen++;
+            int is_dir = (name[nlen] == 1);
+            char entry_name[64];
+            for (int j = 0; j < nlen && j < 63; j++) entry_name[j] = name[j];
+            entry_name[nlen] = '\0';
+            
+            int nplen = ft_strlen(name_prefix);
+            if (nplen == 0 || ft_strncmp(entry_name, name_prefix, nplen) == 0) {
+                if (match_count < 32) {
+                    ft_strncpy(matches[match_count], entry_name, 64);
+                    match_is_dir[match_count] = is_dir;
+                    match_count++;
+                }
+            }
+            off += nlen + 2;
+        }
+    }
+    
+    if (match_count == 0) return;  // No matches
+    
+    if (match_count == 1) {
+        // Single match: auto-complete
+        char *match = matches[0];
+        int match_len = ft_strlen(match);
+        // Erase the current prefix from display
+        // Then write the full match
+        for (int i = prefix_len; i < match_len && *idx < 254; i++) {
+            char ch[2] = { match[i], '\0' };
+            printk(ch);
+            buf[(*idx)++] = match[i];
+        }
+        // Add trailing / for directories or space for files/commands
+        if (match_is_dir[0]) {
+            if (*idx < 254) {
+                printk("/");
+                buf[(*idx)++] = '/';
+            }
+        } else {
+            if (*idx < 254) {
+                printk(" ");
+                buf[(*idx)++] = ' ';
+            }
+        }
+    } else {
+        // Multiple matches: find common prefix first
+        int common_len = ft_strlen(matches[0]);
+        for (int m = 1; m < match_count; m++) {
+            int k = 0;
+            while (k < common_len && matches[0][k] == matches[m][k] && matches[m][k] != '\0') k++;
+            common_len = k;
+        }
+        
+        // If common prefix is longer than what's typed, complete to it
+        if (common_len > prefix_len) {
+            for (int i = prefix_len; i < common_len && *idx < 254; i++) {
+                char ch[2] = { matches[0][i], '\0' };
+                printk(ch);
+                buf[(*idx)++] = matches[0][i];
+            }
+        } else {
+            // Show all matches
+            printk("\n");
+            for (int m = 0; m < match_count; m++) {
+                printk(matches[m]);
+                if (match_is_dir[m]) printk("/");
+                printk("  ");
+            }
+            
+            // Redraw prompt and current input
+            printk("\n");
+            printk(current_username);
+            printk("@esdumanOS ");
+            printk(current_path);
+            if (current_uid == 0) printk(" # ");
+            else printk(" $ ");
+            buf[*idx] = '\0';
+            printk(buf);
+        }
+    }
+}
+
 /**
  * @brief Main entry point for the shell process.
  * 
@@ -810,6 +1031,7 @@ void main(void) {
             char c = get_keyboard_char();
             if (c == '\n' || c == '\r') { cmd_buf[idx] = '\0'; printk("\n"); break; } 
             else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } } 
+            else if (c == '\t') { cmd_buf[idx] = '\0'; handle_tab_completion(cmd_buf, &idx); }
             else if (c >= 32 && c <= 126 && idx < 254) {
                 char str[2] = {c, '\0'}; printk(str); cmd_buf[idx++] = c;
             }

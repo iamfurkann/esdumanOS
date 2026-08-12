@@ -1,6 +1,17 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 
+/**
+ * @brief Encoded length of the syscall trap instruction (int 0x80 is CD 80).
+ *
+ * The processor pushes the address *after* the trap, so a syscall that has to
+ * block must resume this many bytes earlier to run again. This is the only
+ * place that assumption lives: syscall_handler() converts it into a recorded
+ * entry address once, and every blocking site uses that recorded value instead
+ * of subtracting from EIP itself.
+ */
+#define SYSCALL_INSN_LEN 2
+
 /** @brief Terminate current process */
 #define SYSCALL_EXIT            1
 /** @brief Execute a new process */
@@ -71,12 +82,7 @@
 /** @brief Halt the system */
 #define SYSCALL_HALT            21
 
-/** @brief Encrypt data using crypto subsystem */
-#define SYSCALL_CRYPTO_ENCRYPT  30
-/** @brief Decrypt data using crypto subsystem */
-#define SYSCALL_CRYPTO_DECRYPT  31
-/** @brief Generate a cryptographic key */
-#define SYSCALL_CRYPTO_KEYGEN   32
+// Syscall numbers 30-32 are reserved for future crypto API.
 /** @brief Set system security level */
 #define SYSCALL_SET_SEC_LEVEL   33
 /** @brief Output raw file contents bypassing text formatting */
@@ -99,4 +105,18 @@
 #define SYSCALL_GET_ARGS        42
 /** @brief Get user ID of current process */
 #define SYSCALL_GETUID          43
+/** @brief Read directory entries into user buffer */
+#define SYSCALL_READDIR         44
+/** @brief Write every dirty block-cache sector out to disk */
+#define SYSCALL_SYNC            45
+
+// ==========================================================
+// Test-build-only syscalls (>= 200)
+//
+// Present in every build so user-space test payloads compile against a single
+// header, but only serviced when the kernel was linked with the test modules
+// AND booted with kernel_pass=selftest. Production kernels answer -ENOSYS.
+// ==========================================================
+/** @brief Report one Ring 3 self-test result to the kernel test framework */
+#define SYSCALL_KTEST_REPORT    200
 #endif // SYSCALL_H

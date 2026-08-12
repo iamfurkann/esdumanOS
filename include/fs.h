@@ -188,6 +188,15 @@ void fs_list_dir(uint8_t parent_id);
 int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id);
 
 
+/**
+ * @brief Checks that a parent id names a directory that actually exists.
+ *
+ * @param parent_id Candidate parent entry id (0 is the root).
+ * @return 1 when the id names an existing directory, 0 otherwise.
+ */
+int fs_dir_exists(uint8_t parent_id);
+
+
 // --- Added by Refactor Script ---
 extern int fs_get_entry_idx(const char *name, uint8_t parent_id);
 extern disk_file_entry_t dir_table[];

@@ -21,6 +21,31 @@ uint32_t file_allocation_table[4096];
 int fs_get_entry_idx(const char *name, uint8_t parent_id);
 
 /**
+ * @brief Checks that a parent id names a directory that actually exists.
+ *
+ * Entry ids arrive from user space as a raw byte, and fs_mkdir()/
+ * fs_create_file_raw() store whatever they are given. Accepting an arbitrary id
+ * let a process create an entry whose parent is itself, and the parent walk in
+ * check_vfs_access() then never terminated.
+ *
+ * @param parent_id Candidate parent entry id. 0 is the root, which has no
+ *                  directory table entry of its own.
+ * @return 1 when the id names an existing directory, 0 otherwise.
+ */
+int fs_dir_exists(uint8_t parent_id) {
+    if (parent_id == 0) return 1;
+
+    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        if (dir_table[i].is_used &&
+            dir_table[i].file_type == FT_DIR &&
+            dir_table[i].entry_id == parent_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
  * @brief safe_strcpy
  * @param dest
  * @param src
@@ -233,7 +258,16 @@ void fs_list_files(void) {
  */
 int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) {
-        rwlock_acquire_read(&inode_locks[file->inode_idx], current_task ? &current_task->regs : 0);
+        /*
+         * No interrupt frame is passed. This runs several frames below the
+         * syscall entry and does not have the live one; handing over
+         * &current_task->regs instead - a saved copy that merely looks like a
+         * frame - let the lock's sleep path write through the task's stored
+         * context and desynchronise current_task from CR3. With 0 the lock
+         * degrades to spinning, which never happens because the kernel is not
+         * preemptible.
+         */
+        rwlock_acquire_read(&inode_locks[file->inode_idx], 0);
     }
     if (file->current_offset >= file->file_size) { 
         if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) rwlock_release_read(&inode_locks[file->inode_idx]); 
@@ -248,7 +282,11 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     uint32_t sectors_to_skip = file->current_offset / 512;
     
     for (uint32_t i = 0; i < sectors_to_skip; i++) {
-        if (current_sector == FAT_EOF || current_sector >= 4096) { vfs_unlock(); return 0; }
+        if (current_sector == FAT_EOF || current_sector >= 4096) {
+            if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR)
+                rwlock_release_read(&inode_locks[file->inode_idx]);
+            return 0;
+        }
         current_sector = file_allocation_table[current_sector];
     }
 
@@ -288,6 +326,13 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
  */
 int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
+        /* LOCKDOWN destroys the key but outranks CRYPTO_ENFORCED, so this
+         * branch is still taken afterwards. Refuse rather than decrypt with
+         * zeroes and hand the caller plausible-looking garbage. */
+        if (!crypto_fs_key_is_usable()) {
+            klog(LOG_LEVEL_ERROR, "VFS", "Encrypted read refused: master key destroyed.");
+            return E_ACCES;
+        }
         return fs_read_encrypted(file, buffer, size, kernel_master_key);
     }
     return fs_read_raw(file, buffer, size);
@@ -303,6 +348,12 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
  */
 int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
     vfs_lock();
+
+    if (!fs_dir_exists(parent_id)) {
+        klog_int(LOG_LEVEL_WARN, "VFS", "Rejected file creation under a non-existent parent", parent_id);
+        vfs_unlock(); return E_NOENT;
+    }
+
 uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
     
     if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
@@ -390,7 +441,13 @@ int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint
         return E_ROFS;
     }
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
-return fs_create_encrypted(name, content, size, kernel_master_key, parent_id);
+        /* Writing with a zeroed key would produce a file nobody can ever read
+         * back - a silent, permanent loss. Refuse instead. */
+        if (!crypto_fs_key_is_usable()) {
+            klog(LOG_LEVEL_ERROR, "VFS", "Encrypted write refused: master key destroyed.");
+            return E_ACCES;
+        }
+        return fs_create_encrypted(name, content, size, kernel_master_key, parent_id);
     }
     return fs_create_file_raw(name, content, size, parent_id);
 }
@@ -515,6 +572,13 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
  * @return int
  */
 int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
+        klog(LOG_LEVEL_WARN, "VFS", "fs_atomic_update: Blocked by IMMUTABLE security level");
+        return E_ACCES;
+    }
+    // CRYPTO_ENFORCED: atomic updates also go through encrypted path
+    // This is handled by using fs_create_file() instead of fs_create_file_raw()
+    // (see Fix 2 above - already addressed by calling fs_create_file)
     vfs_lock();
     
     int orig_idx = -1;
@@ -538,7 +602,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
 
     vfs_unlock();
     fs_delete(tmp_name, parent_id);
-    int res = fs_create_file_raw(tmp_name, content, size, parent_id);
+    int res = fs_create_file(tmp_name, content, size, parent_id);
     if (res != E_OK) return res;
 
     vfs_lock(); // Lock again for the swap operation
@@ -551,13 +615,19 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
         }
     }
 
-    if (orig_idx == -1 || tmp_idx == -1) { vfs_unlock(); return E_NOENT; }
+    if (orig_idx == -1 || tmp_idx == -1) {
+        vfs_unlock();
+        // Clean up leaked temporary file
+        fs_delete(tmp_name, parent_id);
+        return E_NOENT;
+    }
 
     uint32_t old_sector = dir_table[orig_idx].start_sector;
     uint32_t old_size = dir_table[orig_idx].file_size;
 
     if (orig_idx >= 0 && orig_idx < MAX_FILES_IN_DIR && tmp_idx >= 0 && tmp_idx < MAX_FILES_IN_DIR) {
-        rwlock_acquire_write(&inode_locks[orig_idx], current_task ? &current_task->regs : 0);
+        /* No live interrupt frame here either; see fs_read_raw(). */
+        rwlock_acquire_write(&inode_locks[orig_idx], 0);
         
         dir_table[orig_idx].start_sector = dir_table[tmp_idx].start_sector;
         dir_table[orig_idx].file_size = dir_table[tmp_idx].file_size;
@@ -603,7 +673,12 @@ int fs_get_entry_idx(const char *name, uint8_t parent_id) {
 int fs_mkdir(const char *name, uint8_t parent_id) {
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) { vfs_unlock(); return E_ROFS; }
-    
+
+    if (!fs_dir_exists(parent_id)) {
+        klog_int(LOG_LEVEL_WARN, "VFS", "Rejected mkdir under a non-existent parent", parent_id);
+        vfs_unlock(); return E_NOENT;
+    }
+
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
             vfs_unlock(); return E_EXIST;

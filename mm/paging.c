@@ -86,13 +86,27 @@ int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags) {
 
     if ((pd_virt[pd_index] & 1) == 0) {
         uint32_t new_table_phys = pmm_alloc_frame();
-        if (new_table_phys == 0xFFFFFFFF) { 
+        if (new_table_phys == 0xFFFFFFFF) {
             klog(LOG_LEVEL_ERROR, "VMM", "Failed to create page table: Out of memory.");
             return E_NOMEM;
         }
-        pd_virt[pd_index] = new_table_phys | PAGE_USER_ACCESS;
+        /* The directory entry must match the privilege the caller asked for.
+         * Creating every new page table as user-accessible left the U/S bit set
+         * on directory entries covering kernel-only regions; the page table
+         * entries still denied access, but the outer gate was open for no
+         * reason. */
+        uint32_t pde_flags = (flags & 0x04) ? PAGE_USER_ACCESS : PAGE_KERNEL_ONLY;
+        pd_virt[pd_index] = new_table_phys | pde_flags;
         asm volatile("invlpg (%0)" ::"r"(pt_virt) : "memory");
         for (int i = 0; i < 1024; i++) pt_virt[i] = 0;
+    } else if ((flags & 0x04) && !(pd_virt[pd_index] & 0x04)) {
+        /* A user page is going into a table that was created for kernel use.
+         * On x86 the effective privilege is the AND of the directory and table
+         * entries, so the directory entry has to be opened or Ring 3 could not
+         * reach the page at all. Kernel entries in the same table keep their own
+         * U/S bit clear and stay protected. */
+        pd_virt[pd_index] |= 0x04;
+        asm volatile("invlpg (%0)" ::"r"(pt_virt) : "memory");
     }
 
     if (pt_virt[pt_index] & 1) {
@@ -129,15 +143,22 @@ void unmap_page(uint32_t virtual_addr) {
 
 /**
  * @brief Clones the current page directory for a new process.
- * 
- * @return The physical address of the new page directory.
+ *
+ * The new directory shares the kernel half (entries 768..1022) with the caller
+ * and starts out with no user-space mappings at all. Callers populate it through
+ * map_page() once it is loaded into CR3.
+ *
+ * @return The physical address of the new page directory, or 0 on failure.
+ *         It must be 0 and not a negative errno: the result goes straight into
+ *         CR3, so any non-zero error value is loaded as a page directory base
+ *         and triple-faults the machine.
  */
 uint32_t clone_page_directory(void) {
     klog(LOG_LEVEL_DEBUG, "VMM", "Cloning Page Directory for the new process.");
     uint32_t new_pd_phys = pmm_alloc_frame();
     if (new_pd_phys == 0xFFFFFFFF) {
         klog(LOG_LEVEL_ERROR, "PMM", "Failed to clone PD: Out of memory.");
-        return E_NOMEM;
+        return 0;
     }
 
     uint32_t eflags;
@@ -157,24 +178,31 @@ uint32_t clone_page_directory(void) {
         // [SECURITY PATCH 2]: Memory Leak Fixed
         // Since the operation is aborted, free the allocated physical page.
 pmm_free_frame(new_pd_phys);
-        
-        return E_NOMEM;
+
+        return 0;
     }
 
     uint32_t *new_pd = (uint32_t *)TEMP_MAP_VADDR;
     uint32_t *current_pd = (uint32_t *)RECURSIVE_PD_VADDR;
 
     for (int i = 0; i < 1024; i++) {
-        if (i < 4) {
+        if (i >= 768 && i < 1023) {
+            /* Kernel half: share the caller's page tables, with the user bit
+             * cleared so Ring 3 cannot reach them. */
             new_pd[i] = (current_pd[i] & ~0x04) | PAGE_KERNEL_ONLY;
         }
-        else if (i >= 768 && i < 1023) {
-            new_pd[i] = (current_pd[i] & ~0x04) | PAGE_KERNEL_ONLY;
-        } 
         else if (i == 1023) {
             new_pd[i] = new_pd_phys | PAGE_KERNEL_ONLY;
-        } 
+        }
         else {
+            /* Everything below the kernel split starts unmapped, entries 0..3
+             * included. They used to be copied from the caller with the present
+             * bit forced on: since those entries read back as PAGE_NOT_PRESENT
+             * (2), "(2 & ~4) | 3" produced 3 - present, read/write, page table
+             * base 0. Physical page zero, the real-mode interrupt vector table,
+             * was therefore used as the page table for the first 16 MB of every
+             * address space, shared by every process, and a stray kernel
+             * pointer in that range translated through it instead of faulting. */
             new_pd[i] = PAGE_NOT_PRESENT;
         }
     }

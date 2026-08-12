@@ -10,9 +10,22 @@
 #include "arch.h"
 #include "process.h"
 #include "libft.h"
+#include "fs.h"
+#include "elf.h"
+#include "errno.h"
+#include "registers.h"
+#include "uaccess.h"
+#include "syscall.h"
 
 int tests_passed = 0;
 int tests_failed = 0;
+
+/*
+ * Ring 3 test payload, built from tests/user/ktest_user.c, encrypted with the
+ * build-time ELF key and embedded by the Makefile. Only linked into $(TEST_BIN).
+ */
+extern unsigned char ktest_user_elf[];
+extern unsigned int ktest_user_elf_len;
 
 
 
@@ -45,6 +58,143 @@ void qemu_shutdown(int is_success) {
 }
 
 /**
+ * @brief Prints the aggregated pass/fail tally to both the VGA console and COM1.
+ *
+ * @expected A single summary block is emitted on both sinks.
+ */
+static void ktest_print_summary(void) {
+    char pass_str[16]; ktest_itoa(tests_passed, pass_str);
+    char fail_str[16]; ktest_itoa(tests_failed, fail_str);
+
+    printk("\n======================================================\n");
+    printk("RESULT: %s PASSED | %s FAILED\n", pass_str, fail_str);
+    printk("======================================================\n");
+
+    serial_print("\n======================================================\n");
+    serial_print("RESULT: "); serial_print(pass_str);
+    serial_print(" PASSED | "); serial_print(fail_str); serial_print(" FAILED\n");
+    serial_print("======================================================\n");
+}
+
+/**
+ * @brief Ends the suite: prints the tally and hands the verdict to QEMU.
+ *
+ * Split out of run_all_selftests() because the Ring 3 half of the suite finishes
+ * inside a syscall on a different stack, and has to be able to terminate the run
+ * from there.
+ *
+ * @expected QEMU exits with code 33 when nothing failed, 35 otherwise.
+ */
+void ktest_finish(void) {
+    ktest_print_summary();
+    qemu_shutdown(tests_failed == 0);
+    /* isa-debug-exit has already terminated us; park the CPU if it did not. */
+    while (1) { asm volatile("cli; hlt"); }
+}
+
+/**
+ * @brief SYSCALL_KTEST_REPORT handler: records one result sent up from Ring 3.
+ *
+ * Deliberately reachable only from test builds. syscall.c resolves this through
+ * a weak symbol, so production kernels answer SYSCALL_KTEST_REPORT with -ENOSYS.
+ *
+ * Register protocol:
+ *   ebx = KT_REPORT_FAIL(0) | KT_REPORT_PASS(1) | KT_REPORT_DONE(2)
+ *   ecx = pointer to a NUL-terminated description (ignored for DONE)
+ *
+ * The message itself arrives through copy_string_from_user(), so every reported
+ * assertion also exercises the uaccess string path against a real Ring 3 pointer.
+ *
+ * @param regs Saved register state of the calling user process.
+ * @expected Counters advance and the result is echoed to VGA and COM1; DONE ends the run.
+ */
+void sys_ktest_report(arch_regs_t *regs) {
+    int kind = (int)regs->ebx;
+
+    if (kind == KT_REPORT_DONE) {
+        /*
+         * Last chance to check the syscall restart bookkeeping, and the only
+         * place it means anything: we are inside a real Ring 3 syscall, on the
+         * live interrupt frame, with the entry address recorded by the
+         * dispatcher a few instructions ago.
+         */
+        KTEST_ASSERT(current_task != 0 && current_task->in_syscall,
+                     "[SYSCALL] in_syscall is set while a syscall is running");
+        KTEST_ASSERT(trap_frame_is_live(regs),
+                     "[SYSCALL] the dispatcher was handed the live interrupt frame");
+        KTEST_ASSERT(current_task != 0 &&
+                     current_task->syscall_entry_eip == regs->eip - SYSCALL_INSN_LEN,
+                     "[STRICT] [SYSCALL] recorded entry EIP points at the trap instruction");
+
+        regs->eax = 0;
+        ktest_finish();
+        return;
+    }
+
+    char msg[128];
+    int res = copy_string_from_user(msg, (const char *)regs->ecx, sizeof(msg));
+
+    if (res != E_OK && res != E_NAMETOOLONG) {
+        /* A payload that cannot hand us a readable string is itself a failure. */
+        ft_strlcpy(msg, "(unreadable message pointer from Ring 3)", sizeof(msg));
+        kind = KT_REPORT_FAIL;
+    }
+
+    if (kind == KT_REPORT_FAIL) {
+        printk("  [FAIL] %s\n", msg);
+        serial_print("  [FAIL] "); serial_print(msg); serial_print("\n");
+        tests_failed++;
+    } else {
+        printk("  [PASS] %s\n", msg);
+        serial_print("  [PASS] "); serial_print(msg); serial_print("\n");
+        tests_passed++;
+    }
+
+    regs->eax = 0;
+}
+
+/**
+ * @brief Installs the Ring 3 payload in /bin and transfers control to it.
+ *
+ * Everything before this point runs at CPL=0 against a synthetic task, so the
+ * privilege boundary itself is never crossed. This hands the rest of the suite
+ * to a real user process; start_first_task() iret's into Ring 3 and does not
+ * return, so the payload's SYSCALL_KTEST_REPORT/DONE is what ends the run.
+ *
+ * @expected Control reaches Ring 3; anything else is reported as a failure and
+ *           the suite terminates rather than hanging.
+ */
+static void run_user_mode_tests(void) {
+    printk("\n--- Ring 3 (User Mode) Boundary Tests ---\n");
+    serial_print("\n--- Ring 3 (User Mode) Boundary Tests ---\n");
+
+    int bin_idx = fs_get_entry_idx("bin", 0);
+    KTEST_ASSERT(bin_idx != -1, "[RING3] /bin is present to install the payload into");
+    if (bin_idx == -1) return;
+
+    uint8_t bin_id = dir_table[bin_idx].entry_id;
+
+    /* Drop any copy left by an earlier boot on a persistent disk image. */
+    fs_delete("ktest_user", bin_id);
+
+    int wres = fs_create_file_raw("ktest_user", ktest_user_elf, ktest_user_elf_len, bin_id);
+    KTEST_ASSERT(wres == E_OK, "[RING3] user-mode payload written to /bin/ktest_user");
+    if (wres != E_OK) return;
+
+    asm volatile("sti");
+
+    int pid = load_and_exec_elf("ktest_user", bin_id);
+    KTEST_ASSERT(pid > 0, "[RING3] user-mode payload loaded into its own address space");
+    if (pid <= 0) return;
+
+    foreground_task = pid;
+    start_first_task();
+
+    /* start_first_task() iret's into Ring 3 and never comes back. */
+    KTEST_ASSERT(0, "[RING3] control transferred to the user-mode payload");
+}
+
+/**
  * @brief The master execution routine for the kernel test suite.
  *
  * Orchestrates the sequential initialization and execution of all modular kernel tests, 
@@ -61,6 +211,19 @@ void run_all_selftests(void) {
     // Map 4 consecutive simulated user-space pages for integration tests (0x500000 - 0x503000)
     extern uint32_t pmm_alloc_frame(void);
     extern int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+    /*
+     * init_multitasking() has already built the real task list (the idle task).
+     * The kernel-mode modules below run against a synthetic task instead, so
+     * stash the real one and put it back before the Ring 3 half starts.
+     */
+    process_t *saved_current = current_task;
+    process_t *saved_head    = task_list_head;
+
+    /* CR4.SMAP decides whether the kernel-mode half can run at all; see below. */
+    uint32_t cr4_now;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4_now));
+    int smap_active = (cr4_now >> 21) & 1;
+
     // Create a mock task structure so syscalls have valid fd_table and uid
     static process_t dummy_task;
     static file_descriptor_t dummy_fds[16];
@@ -78,50 +241,91 @@ void run_all_selftests(void) {
     task_list_head = &dummy_task;
     task_list_tail = &dummy_task;
 
+    /*
+     * Zero the scratch pages while they are still kernel-only, then hand them
+     * to the modules as user memory. Mapping them user-accessible first and
+     * memsetting them afterwards is a supervisor write to a user page, which
+     * faults the moment SMAP is active.
+     */
     for (int i = 0; i < 4; i++) {
         uint32_t vaddr = 0x500000 + (i * 4096);
         uint32_t sim_phys = pmm_alloc_frame();
-        map_page(vaddr, sim_phys, 7); // PAGE_PRESENT | PAGE_READ_WRITE | PAGE_USER_ACCESS
+        map_page(vaddr, sim_phys, 3); // Present | Read/Write, kernel only
         ft_memset((void *)vaddr, 0, 4096);
+        map_page(vaddr, sim_phys, 7); // ...then Present | Read/Write | User
     }
 
     printk("\n======================================================\n");
     printk("       KFS COMPREHENSIVE KERNEL TEST SUITE            \n");
     printk("======================================================\n");
-    
-    run_string_tests();
-    run_memory_tests();
-    run_pipe_tests();
-    run_vfs_tests();
-    run_devfs_tests();
-    run_passwd_tests();
-    run_security_tests();
-    run_stress_tests();
-    run_adversarial_tests();
-    run_integration_tests();
-    run_regression_tests();
-    run_concurrency_tests();
-    run_paging_tests();
-    run_pmm_tests();
-    run_syscall_tests();
-    run_process_tests();
-    run_signal_tests();
-    run_crypto_tests();
-    run_bcache_tests();
-    
-    printk("\n======================================================\n");
-    
-    char pass_str[16]; ktest_itoa(tests_passed, pass_str);
-    char fail_str[16]; ktest_itoa(tests_failed, fail_str);
-    
-    printk("RESULT: "); printk(pass_str); printk(" PASSED | "); 
-    printk(fail_str); printk(" FAILED\n");
-    printk("======================================================\n");
-    printk("\n*** ALL KERNEL SELF-TESTS FINISHED SUCCESSFULLY! ***\n\n");
 
-    current_task = 0; // Restore before exiting selftests
-    task_list_head = 0;
-    task_list_tail = 0;
+    if (smap_active) {
+        /*
+         * The kernel-mode modules stand in for user space: they keep their test
+         * buffers in the user-accessible scratch window above and then read and
+         * write them directly from Ring 0. That is exactly the access pattern
+         * SMAP exists to stop, so with SMAP on they cannot run as written -
+         * roughly twenty sites across test_vfs, test_passwd, test_security,
+         * test_pipe, test_stress and test_paging.
+         *
+         * They are skipped rather than worked around. Bracketing them with
+         * EFLAGS.AC would disable SMAP for the whole kernel-mode half, which
+         * would defeat the point of running under it, and would not survive the
+         * syscalls they make anyway: uaccess_end() clears AC unconditionally.
+         *
+         * The Ring 3 payload below covers the same boundary from the correct
+         * side, and is the part worth running under SMAP.
+         */
+        printk("\n[KTEST] SMAP active: kernel-mode modules skipped.\n");
+        printk("        They simulate user space from Ring 0, which SMAP forbids.\n");
+        printk("        The Ring 3 payload exercises the boundary properly.\n");
+        serial_print("\n[KTEST] SMAP active: kernel-mode modules skipped.\n");
+        serial_print("        They simulate user space from Ring 0, which SMAP forbids.\n");
+        serial_print("        The Ring 3 payload exercises the boundary properly.\n");
+    } else {
+        run_string_tests();
+        run_memory_tests();
+        run_pipe_tests();
+        run_vfs_tests();
+        run_devfs_tests();
+        run_passwd_tests();
+        run_security_tests();
+        run_stress_tests();
+        run_adversarial_tests();
+        run_integration_tests();
+        run_regression_tests();
+        run_concurrency_tests();
+        run_paging_tests();
+        run_pmm_tests();
+        run_lifecycle_tests();
+        run_fault_tests();
+        run_syscall_tests();
+        run_process_tests();
+        run_signal_tests();
+        run_elf_tests();
+        run_crypto_tests();
+        run_entropy_tests();
+        run_bcache_tests();
 
-    qemu_shutdown(tests_failed == 0);
+        printk("\n*** KERNEL-MODE SELF-TESTS FINISHED ***\n");
+    }
+
+    /*
+     * Put the real task list back. init_multitasking() left exactly one task in
+     * it, so rebuild it as that singleton: the stress module appends processes
+     * to whatever list head is current, and those entries must not survive into
+     * the Ring 3 run.
+     */
+    current_task   = saved_current;
+    task_list_head = saved_head;
+    task_list_tail = saved_head;
+    if (saved_head) {
+        saved_head->prev = 0;
+        saved_head->next = 0;
+    }
+
+    run_user_mode_tests();
+
+    /* Only reached when the Ring 3 handoff failed; report what we have. */
+    ktest_finish();
 }

@@ -48,9 +48,9 @@ void run_regression_tests(void) {
     // =========================================================
     // BUG-02: PID and Array Index (Slot) Confusion
     // =========================================================
-    // Past Bug Description: The kernel scheduler occasionally confused the hardcoded index 
-    // of the task in the `tasks[]` array (e.g., 0, 1, 2) with the dynamically assigned PID 
-    // (e.g., 1005). This resulted in terminating the wrong tasks.
+    // Past Bug Description: The kernel scheduler occasionally confused the internal process
+    // slot identifier with the dynamically assigned PID (e.g., 1005).
+    // This resulted in terminating the wrong tasks.
     int dummy_pid = create_process(0,0,0);
     KTEST_ASSERT(dummy_pid > 0, "[STRICT] REG-02: Process created successfully");
     if (dummy_pid > 0) {

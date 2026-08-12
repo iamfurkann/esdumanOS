@@ -9,9 +9,41 @@
 
 #include "types.h"
 #include "stdio.h"
+#include "registers.h"
 
 extern int tests_passed;
 extern int tests_failed;
+
+/*
+ * SYSCALL_KTEST_REPORT protocol, shared with the Ring 3 payload in
+ * tests/user/ktest_user.c. Keep the two sides in sync.
+ */
+#define KT_REPORT_FAIL 0
+#define KT_REPORT_PASS 1
+#define KT_REPORT_DONE 2
+
+/**
+ * @brief Terminates QEMU with the suite's verdict.
+ * @param is_success Non-zero when every assertion passed.
+ */
+void qemu_shutdown(int is_success);
+
+/**
+ * @brief Prints the pass/fail tally and ends the run.
+ *
+ * Callable from the Ring 3 half of the suite, which finishes inside a syscall
+ * rather than on the boot path.
+ */
+void ktest_finish(void);
+
+/**
+ * @brief SYSCALL_KTEST_REPORT handler; records one result reported from Ring 3.
+ *
+ * Linked only into test builds. syscall.c reaches it through a weak symbol.
+ *
+ * @param regs Saved register state of the calling user process.
+ */
+void sys_ktest_report(arch_regs_t *regs);
 
 /**
  * @brief Transmits a single character to the primary serial port.
@@ -91,9 +123,13 @@ void run_devfs_tests(void);
 void run_passwd_tests(void);
 void run_paging_tests(void);
 void run_pmm_tests(void);
+void run_lifecycle_tests(void);
+void run_fault_tests(void);
 void run_syscall_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
 void run_crypto_tests(void);
+void run_entropy_tests(void);
 void run_bcache_tests(void);
+void run_elf_tests(void);
 #endif // KTEST_H

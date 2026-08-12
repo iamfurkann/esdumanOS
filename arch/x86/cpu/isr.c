@@ -79,8 +79,13 @@ void page_fault_handler(arch_regs_t *regs) {
         if (current_task) current_task->state = TASK_DEAD; 
         schedule(regs);
     } else {
-        extern uint32_t current_fault_handler;
+        extern volatile uint32_t current_fault_handler;
+        extern void uaccess_note_fault(void);
         if (current_fault_handler != 0) {
+            /* A user copy faulted. Record it before redirecting, because the
+             * copy helper reports its verdict from that flag rather than from
+             * which exit path it lands on. */
+            uaccess_note_fault();
             regs->eip = current_fault_handler;
             return;
         }

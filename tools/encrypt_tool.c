@@ -41,13 +41,11 @@ void hmac_sha256_local(const unsigned char *key, size_t key_len, const unsigned 
  * @return 0 on success, 1 on error.
  */
 int main(int argc, char **argv) {
-    if (argc < 5) {
-        printf("Usage: %s <input_elf> <output_encrypted_elf> <passphrase> <salt>\n", argv[0]);
+    if (argc < 4) {
+        printf("Usage: %s <input> <output> <hex_key_64chars>\n", argv[0]);
         return 1;
     }
-    
-    char *passphrase = argv[3];
-    char *host_salt = argv[4];
+
 
     FILE *fin = fopen(argv[1], "rb");
     if (!fin) { perror("Failed to open input file"); return 1; }
@@ -60,31 +58,19 @@ int main(int argc, char **argv) {
     fclose(fin);
 
 
-    char buffer[128] = {0};
-    int idx = 0;
-
-    // Combine Password and Salt
-    while(passphrase[idx] && idx < 64) { buffer[idx] = passphrase[idx]; idx++; }
-    int s_idx = 0;
-    while(host_salt[s_idx] && idx < 127) { buffer[idx++] = host_salt[s_idx++]; }
-    buffer[idx] = '\0';
-
-    // [SECURITY PATCH]: KDF logic is exactly the same as the kernel (Raw Binary Entropy)
-    uint8_t raw_hash[32];
-    uint32_t buf_len = strlen(buffer);
-    
-    // 1. First round (Password + Salt)
-    sha256_binary_local((const unsigned char*)buffer, buf_len, raw_hash);
-    
-    // 2. KDF iterations (5000 rounds - direct binary hash without hex conversion)
-    for(int round = 0; round < 5000; round++) {
-        sha256_binary_local(raw_hash, 32, raw_hash);
+    // Direct hex key — no KDF needed. Key must be exactly 64 hex chars (32 bytes).
+    char *hex_key = argv[3];
+    if (strlen(hex_key) != 64) {
+        printf("ERROR: Key must be exactly 64 hex characters (32 bytes).\n");
+        free(file_data);
+        return 1;
     }
-
-    // 3. Assign the generated key as AES Master Key
+    
     uint8_t master_key[32];
-    for(int i = 0; i < 32; i++) {
-        master_key[i] = raw_hash[i];
+    for (int i = 0; i < 32; i++) {
+        unsigned int byte_val;
+        sscanf(&hex_key[i * 2], "%2x", &byte_val);
+        master_key[i] = (uint8_t)byte_val;
     }
 
     uint32_t payload_len = 40 + file_size;
@@ -126,6 +112,6 @@ int main(int argc, char **argv) {
     free(padded_data);
     free(encrypted_data);
 
-    printf("[+] %s successfully encrypted with AES-256 (5000-Round Binary SHA256 KDF).\n", argv[1]);
+    printf("[+] %s successfully encrypted with AES-256 (direct hex key).\n", argv[1]);
     return 0;
 }

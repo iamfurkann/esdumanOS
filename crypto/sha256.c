@@ -1,8 +1,15 @@
 /**
  * @file sha256.c
  * @brief Implementation of the SHA256 hash function
+ *
+ * Both the one-shot helpers and HMAC are built on one incremental context, so
+ * the padding and length encoding exist in a single place. The incremental form
+ * is what lets HMAC hash "key_pad || message" without first assembling the two
+ * into a contiguous buffer - which is what used to force an allocation on every
+ * single call, and therefore on every one of PBKDF2's iterations.
  */
 #include "types.h"
+#include "crypto.h"
 
 #define ROTRIGHT(word,bits) (((word) >> (bits)) | ((word) << (32-(bits))))
 #define CH(x,y,z) (((x) & (y)) ^ (~(x) & (z)))
@@ -46,66 +53,86 @@ static void sha256_transform(uint32_t state[8], const uint8_t data[64]) {
 }
 
 /**
- * @brief Compute SHA256 hash and return as hex string
- * @param input Pointer to the null-terminated input string
- * @param output_hex Pointer to the output buffer for the hex string
- * @return None
+ * @brief Starts a new incremental SHA-256 computation.
+ * @param ctx Context to initialise.
  */
-void sha256_to_hex(const char *input, char *output_hex) {
-    uint32_t state[8] = {
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-    };
+void sha256_init(sha256_ctx_t *ctx) {
+    ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
+    ctx->total_len = 0;
+    ctx->buffer_len = 0;
+}
 
-    uint32_t len = 0;
-    while(input[len]) len++;
-    
-    uint32_t offset = 0;
+/**
+ * @brief Feeds more data into a SHA-256 computation.
+ *
+ * @param ctx  Context previously passed to sha256_init().
+ * @param data Bytes to absorb; ignored when len is 0.
+ * @param len  Number of bytes.
+ */
+void sha256_update(sha256_ctx_t *ctx, const uint8_t *data, uint32_t len) {
+    if (data == 0 || len == 0) return;
 
-    while (len - offset >= 64) {
-        sha256_transform(state, (const uint8_t*)(input + offset));
-        offset += 64;
-    }
+    ctx->total_len += len;
 
-    uint8_t buffer[64];
-    uint32_t rem = len - offset;
-    for (uint32_t i = 0; i < rem; i++) {
-        buffer[i] = input[offset + i];
-    }
-    
-    buffer[rem++] = 0x80;
+    while (len > 0) {
+        uint32_t space = 64 - ctx->buffer_len;
+        uint32_t take = (len < space) ? len : space;
 
-    if (rem > 56) {
-        while (rem < 64) buffer[rem++] = 0x00;
-        sha256_transform(state, buffer);
-        rem = 0;
-    }
-    
-    while (rem < 56) buffer[rem++] = 0x00;
-    
-    uint32_t bitlen_hi = (len >> 29);
-    uint32_t bitlen_lo = (len << 3);
-    
-    buffer[56] = (bitlen_hi >> 24) & 0xFF;
-    buffer[57] = (bitlen_hi >> 16) & 0xFF;
-    buffer[58] = (bitlen_hi >> 8) & 0xFF;
-    buffer[59] = (bitlen_hi) & 0xFF;
-    buffer[60] = (bitlen_lo >> 24) & 0xFF;
-    buffer[61] = (bitlen_lo >> 16) & 0xFF;
-    buffer[62] = (bitlen_lo >> 8) & 0xFF;
-    buffer[63] = (bitlen_lo) & 0xFF;
-    
-    sha256_transform(state, buffer);
+        for (uint32_t i = 0; i < take; i++) {
+            ctx->buffer[ctx->buffer_len + i] = data[i];
+        }
+        ctx->buffer_len += take;
+        data += take;
+        len  -= take;
 
-    const char hex_chars[] = "0123456789abcdef";
-    for(int i = 0; i < 8; i++) {
-        for(int j = 0; j < 4; j++) {
-            uint8_t byte = (state[i] >> (24 - (j * 8))) & 0xFF;
-            output_hex[(i*8) + (j*2)] = hex_chars[byte >> 4];
-            output_hex[(i*8) + (j*2) + 1] = hex_chars[byte & 0x0F];
+        if (ctx->buffer_len == 64) {
+            sha256_transform(ctx->state, ctx->buffer);
+            ctx->buffer_len = 0;
         }
     }
-    output_hex[64] = '\0';
+}
+
+/**
+ * @brief Appends the padding and produces the digest.
+ *
+ * @param ctx Context to finalise; not reusable afterwards without sha256_init().
+ * @param output_binary 32-byte output buffer.
+ */
+void sha256_final(sha256_ctx_t *ctx, uint8_t *output_binary) {
+    uint32_t rem = ctx->buffer_len;
+
+    ctx->buffer[rem++] = 0x80;
+
+    if (rem > 56) {
+        while (rem < 64) ctx->buffer[rem++] = 0x00;
+        sha256_transform(ctx->state, ctx->buffer);
+        rem = 0;
+    }
+    while (rem < 56) ctx->buffer[rem++] = 0x00;
+
+    uint32_t bitlen_hi = (ctx->total_len >> 29);
+    uint32_t bitlen_lo = (ctx->total_len << 3);
+
+    ctx->buffer[56] = (bitlen_hi >> 24) & 0xFF;
+    ctx->buffer[57] = (bitlen_hi >> 16) & 0xFF;
+    ctx->buffer[58] = (bitlen_hi >> 8) & 0xFF;
+    ctx->buffer[59] = (bitlen_hi) & 0xFF;
+    ctx->buffer[60] = (bitlen_lo >> 24) & 0xFF;
+    ctx->buffer[61] = (bitlen_lo >> 16) & 0xFF;
+    ctx->buffer[62] = (bitlen_lo >> 8) & 0xFF;
+    ctx->buffer[63] = (bitlen_lo) & 0xFF;
+
+    sha256_transform(ctx->state, ctx->buffer);
+
+    for (int i = 0; i < 8; i++) {
+        output_binary[(i*4)]     = (ctx->state[i] >> 24) & 0xFF;
+        output_binary[(i*4) + 1] = (ctx->state[i] >> 16) & 0xFF;
+        output_binary[(i*4) + 2] = (ctx->state[i] >> 8)  & 0xFF;
+        output_binary[(i*4) + 3] = (ctx->state[i])       & 0xFF;
+    }
 }
 
 /**
@@ -116,52 +143,29 @@ void sha256_to_hex(const char *input, char *output_hex) {
  * @return None
  */
 void sha256_binary(const uint8_t *input, uint32_t len, uint8_t *output_binary) {
-    uint32_t state[8] = {
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-    };
-    
-    uint32_t offset = 0;
-    
-    while (len - offset >= 64) {
-        sha256_transform(state, (const uint8_t*)(input + offset));
-        offset += 64;
-    }
-    
-    uint8_t buffer[64];
-    uint32_t rem = len - offset;
-    for (uint32_t i = 0; i < rem; i++) {
-        buffer[i] = input[offset + i];
-    }
-    
-    buffer[rem++] = 0x80;
-    
-    if (rem > 56) {
-        while (rem < 64) buffer[rem++] = 0x00;
-        sha256_transform(state, buffer);
-        rem = 0; 
-    }
-    
-    while (rem < 56) buffer[rem++] = 0x00;
-    
-    uint32_t bitlen_hi = (len >> 29);
-    uint32_t bitlen_lo = (len << 3); 
-    
-    buffer[56] = (bitlen_hi >> 24) & 0xFF;
-    buffer[57] = (bitlen_hi >> 16) & 0xFF;
-    buffer[58] = (bitlen_hi >> 8) & 0xFF;
-    buffer[59] = (bitlen_hi) & 0xFF;
-    buffer[60] = (bitlen_lo >> 24) & 0xFF;
-    buffer[61] = (bitlen_lo >> 16) & 0xFF;
-    buffer[62] = (bitlen_lo >> 8) & 0xFF;
-    buffer[63] = (bitlen_lo) & 0xFF;
-    
-    sha256_transform(state, buffer);
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, input, len);
+    sha256_final(&ctx, output_binary);
+}
 
-    for(int i = 0; i < 8; i++) {
-        output_binary[(i*4)]     = (state[i] >> 24) & 0xFF;
-        output_binary[(i*4) + 1] = (state[i] >> 16) & 0xFF;
-        output_binary[(i*4) + 2] = (state[i] >> 8)  & 0xFF;
-        output_binary[(i*4) + 3] = (state[i])       & 0xFF;
+/**
+ * @brief Compute SHA256 hash and return as hex string
+ * @param input Pointer to the null-terminated input string
+ * @param output_hex Pointer to the output buffer for the hex string
+ * @return None
+ */
+void sha256_to_hex(const char *input, char *output_hex) {
+    uint32_t len = 0;
+    while (input[len]) len++;
+
+    uint8_t digest[32];
+    sha256_binary((const uint8_t *)input, len, digest);
+
+    const char hex_chars[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        output_hex[i * 2]     = hex_chars[digest[i] >> 4];
+        output_hex[i * 2 + 1] = hex_chars[digest[i] & 0x0F];
     }
+    output_hex[64] = '\0';
 }

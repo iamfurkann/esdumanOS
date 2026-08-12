@@ -7,6 +7,8 @@
 // sys_utils.c
 /** @brief Validates if a user-space pointer is safe to access */
 int validate_user_pointer(const void *ptr, size_t size);
+/** @brief Validates that a user-space range is present, user-accessible, and writable */
+int validate_user_writable_pointer(const void *ptr, size_t size);
 /** @brief Validates if a user-space string is safely null-terminated within max_len */
 int validate_string_pointer(const char *str, size_t max_len);
 /** @brief Validates if a file descriptor is valid for the current task */
@@ -106,5 +108,7 @@ void sys_reboot(arch_regs_t *regs);
 void sys_halt(arch_regs_t *regs);
 /** @brief Syscall handler for displaying diagnostic messages */
 void sys_dmesg(arch_regs_t *regs);
+/** @brief Syscall handler for flushing the block cache to disk */
+void sys_sync(arch_regs_t *regs);
 
 #endif // SYSCALLS_INTERNAL_H

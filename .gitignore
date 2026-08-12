@@ -18,6 +18,12 @@
 *.so
 *.elf
 *.bin
+# ...except the fuzzer corpus. The named seeds there are inputs that once found a
+# real bug (bug_01_elf_integer_overflow.bin reproduces the ELF program-header
+# integer overflow), so they are test data, not build output. Without this the
+# blanket *.bin rule silently dropped them from the repo while the hash-named
+# seeds beside them stayed tracked.
+!tests/host/corpus/*.bin
 *.img
 *.iso
 *.map
@@ -81,3 +87,4 @@ gizli.txt
 
 # Generated resource files
 src/resources/*_data.c
+.claude/

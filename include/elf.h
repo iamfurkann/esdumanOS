@@ -57,4 +57,11 @@ typedef struct {
  */
 int load_and_exec_elf(const char *filename, uint8_t parent_id);
 
+/**
+ * @brief Validates an in-memory 32-bit i386 ELF executable before loading it.
+ *
+ * @return E_OK when the image is safe to load, otherwise E_NOEXEC.
+ */
+int elf_validate_image(const uint8_t *image, uint32_t image_len);
+
 #endif

@@ -49,7 +49,7 @@ multitasking_enabled = 0;
     char u_file[] = "int_test.txt";
     char u_data[] = "Integration Test Data";
     char u_elf_name[] = "dummy.elf";
-    uint8_t u_elf_data[64];
+    uint8_t u_elf_data[sizeof(elf32_ehdr_t) + sizeof(elf32_phdr_t) + 1];
 
     // =========================================================================
     // VFS-INT: Disk Writing, Deletion, and Recreation Integration
@@ -68,13 +68,31 @@ multitasking_enabled = 0;
     // PROC-INT: Process Loader (ELF) and VFS Integration
     // =========================================================================
     
-    for (int i = 0; i < 64; i++) u_elf_data[i] = 0;
-    u_elf_data[0] = 0x7F; u_elf_data[1] = 'E'; u_elf_data[2] = 'L'; u_elf_data[3] = 'F'; // ELF Magic Bytes
-    u_elf_data[4] = 1;   // 32-bit architecture flag
-    u_elf_data[16] = 2;  // Executable file type
-    u_elf_data[18] = 3;  // Target machine (x86)
+    ft_memset(u_elf_data, 0, sizeof(u_elf_data));
+    elf32_ehdr_t *ehdr = (elf32_ehdr_t *)u_elf_data;
+    ehdr->e_ident[0] = 0x7F; ehdr->e_ident[1] = 'E';
+    ehdr->e_ident[2] = 'L';  ehdr->e_ident[3] = 'F';
+    ehdr->e_ident[4] = 1;    ehdr->e_ident[5] = 1;
+    ehdr->e_ident[6] = 1;
+    ehdr->e_type = 2;
+    ehdr->e_machine = 3;
+    ehdr->e_version = 1;
+    ehdr->e_entry = 0x00400000;
+    ehdr->e_phoff = sizeof(elf32_ehdr_t);
+    ehdr->e_ehsize = sizeof(elf32_ehdr_t);
+    ehdr->e_phentsize = sizeof(elf32_phdr_t);
+    ehdr->e_phnum = 1;
+
+    elf32_phdr_t *phdr = (elf32_phdr_t *)(u_elf_data + ehdr->e_phoff);
+    phdr->p_type = 1;
+    phdr->p_offset = sizeof(elf32_ehdr_t) + sizeof(elf32_phdr_t);
+    phdr->p_vaddr = 0x00400000;
+    phdr->p_filesz = 1;
+    phdr->p_memsz = 1;
+    phdr->p_flags = 5;
+    u_elf_data[phdr->p_offset] = 0xF4; // HLT, if this fixture is ever scheduled.
     
-    int res4 = fs_create_file(u_elf_name, u_elf_data, 64, 0);
+    int res4 = fs_create_file(u_elf_name, u_elf_data, sizeof(u_elf_data), 0);
     KTEST_ASSERT(res4 >= 0, "[STRICT] PROC-INT: Valid minimal ELF written to disk for testing");
 
     int p_idx = load_and_exec_elf(u_elf_name, 0);

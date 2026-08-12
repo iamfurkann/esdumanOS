@@ -13,6 +13,7 @@
 #include "devfs.h"
 #include "errno.h"
 #include "kernel.h"
+#include "uaccess.h"
 /**
  * @brief Function print_hexdump
  */
@@ -86,7 +87,7 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
                     }
                 }
                 else {
-int idx = fs_get_entry_idx(token, current_id);
+                    int idx = fs_get_entry_idx(token, current_id);
                     if (idx == -1) {
                         klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Directory not found");
                         return E_NOENT;
@@ -120,7 +121,21 @@ int check_vfs_access(int entry_id, int needs_write) {
     int curr = entry_id;
     int is_in_tmp = 0;
 
+    /*
+     * Bounded walk. fs_dir_exists() now keeps user space from creating an entry
+     * whose parent does not exist, so a self-parented entry can no longer be
+     * made through the syscall interface - but the directory table is read
+     * straight off the disk, and a crafted or corrupted image can still contain
+     * a cycle. A chain longer than the table cannot be acyclic.
+     */
+    int hops = 0;
+
     while (curr != 0) {
+        if (++hops > MAX_FILES_IN_DIR) {
+            klog_int(LOG_LEVEL_ERROR, "VFS", "Cycle in the directory tree; denying access to entry", entry_id);
+            return 0;
+        }
+
         int found = 0;
         for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
             if (dir_table[i].entry_id == curr && dir_table[i].is_used) {
@@ -171,13 +186,15 @@ int check_vfs_access(int entry_id, int needs_write) {
 /**
  * @brief Function validate_user_pointer
  */
-int validate_user_pointer(const void *ptr, size_t size) {
+static int validate_user_pointer_access(const void *ptr, size_t size, int requires_write) {
     uint32_t start_addr = (uint32_t)ptr;
     uint32_t end_addr = start_addr + size;
 
     if (end_addr < start_addr) {
         return 0;
     }
+
+    if (size == 0) return 1;
 
     if (start_addr < 0x400000 || end_addr > 0xC0000000) {
         return 0;
@@ -193,14 +210,26 @@ int validate_user_pointer(const void *ptr, size_t size) {
         }
 
         uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (pd_index * 0x1000));
-if ((pt_virt[pt_index] & 0x05) != 0x05) {
-            if (!(is_test_mode && (pt_virt[pt_index] & 0x01))) {
-                return 0;
-            }
+        /* Must be Present and User-accessible. No test-mode exemption: the
+         * self-test suite now drives these paths from a real Ring 3 process,
+         * so relaxing the check here would only hide boundary regressions. */
+        if ((pt_virt[pt_index] & 0x05) != 0x05) {
+            return 0;
+        }
+        if (requires_write && !(pt_virt[pt_index] & 0x02)) {
+            return 0;
         }
     }
 
     return 1;
+}
+
+int validate_user_pointer(const void *ptr, size_t size) {
+    return validate_user_pointer_access(ptr, size, 0);
+}
+
+int validate_user_writable_pointer(const void *ptr, size_t size) {
+    return validate_user_pointer_access(ptr, size, 1);
 }
 
 /**
@@ -221,13 +250,16 @@ int validate_string_pointer(const char *str, size_t max_len) {
             if (!(pd_virt[pd_index] & 1)) return 0;
             
             uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (pd_index * 0x1000));
-if ((pt_virt[pt_index] & 0x05) != 0x05) {
-                if (!(is_test_mode && (pt_virt[pt_index] & 0x01))) {
-                    return 0; 
-                }
+            /* Present + User, with no test-mode exemption (see above). */
+            if ((pt_virt[pt_index] & 0x05) != 0x05) {
+                return 0;
             }
         }
-        if (*((char *)curr_addr) == '\0') {
+        char ch;
+        if (copy_from_user(&ch, (const void *)curr_addr, 1) != E_OK) {
+            return 0;
+        }
+        if (ch == '\0') {
             return 1;
         }
     }

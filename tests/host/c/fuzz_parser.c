@@ -61,6 +61,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
     // Dangerous header reading portion in the load_and_exec_elf() function.
     // Will paging crash if the fuzzer provides correct Magic Number but corrupted offsets?
     
+    // Exercise the exact validation routine used by the kernel loader.
+    if (Size <= 0xFFFFFFFF) {
+        (void)elf_validate_image(Data, (uint32_t)Size);
+    }
+
     // Ensure the fuzz payload is at least as large as an ELF header before attempting to parse it.
     if (Size >= sizeof(elf32_ehdr_t)) {
         // Cast the raw fuzz data directly into an ELF header structure to simulate in-memory loading.

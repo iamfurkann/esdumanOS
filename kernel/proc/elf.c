@@ -17,6 +17,9 @@
 #include  "klog.h"
 #include "kheap.h"
 #include "pmm.h"
+#include "uaccess.h"
+
+static const uint8_t zero_page[4096] = {0};
 /**
  * @brief Loads and executes a 32-bit ELF file.
  *
@@ -26,6 +29,17 @@
  */
 int load_and_exec_elf(const char *filename, uint8_t parent_id)
 {
+    /*
+     * LOCKDOWN is documented as blocking new task creation, but nothing
+     * enforced it - set_security_level() only zeroed the key and logged. This
+     * is the choke point every new program passes through.
+     */
+    if (current_sec_level >= SEC_LEVEL_LOCKDOWN)
+    {
+        klog(LOG_LEVEL_WARN, "ELF", "Refused to start a new program: system is in LOCKDOWN.");
+        return E_ACCES;
+    }
+
     if (!check_free_task_slot())
     {
         klog(LOG_LEVEL_ERROR, "ELF", "Maximum task limit reached!");
@@ -54,27 +68,13 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
         return E_IO;
     }
 
-    elf32_ehdr_t *ehdr = (elf32_ehdr_t *)file_buffer;
-    
-    // Basic ELF signature and architecture check.
-    if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' || 
-        ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
-        klog(LOG_LEVEL_ERROR, "ELF", "Not a valid ELF file!");
+    if (elf_validate_image(file_buffer, (uint32_t)read_bytes) != E_OK) {
+        klog(LOG_LEVEL_ERROR, "ELF", "Malformed or unsupported ELF image rejected!");
         kfree(file_buffer);
         return E_NOEXEC;
     }
 
-    // [CRITICAL SECURITY PATCH]: Only accept 32-bit x86 (i386) files!
-    if (ehdr->e_ident[4] != 1) { // 1 = ELFCLASS32
-        klog(LOG_LEVEL_ERROR, "ELF", "File is not 32-bit (ELFCLASS32)!");
-        kfree(file_buffer);
-        return E_NOEXEC;
-    }
-    if (ehdr->e_machine != 3) { // 3 = EM_386 (Intel 80386)
-        klog(LOG_LEVEL_ERROR, "ELF", "File does not match x86 (i386) architecture!");
-        kfree(file_buffer);
-        return E_NOEXEC;
-    }
+    elf32_ehdr_t *ehdr = (elf32_ehdr_t *)file_buffer;
 
     uint32_t new_pd = clone_page_directory();
     if (!new_pd) {
@@ -91,7 +91,7 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
     asm volatile("mov %0, %%cr3" :: "r"(new_pd) : "memory");
 
     for (int i = 0; i < ehdr->e_phnum; i++) {
-        uint32_t chunk_size = i * ehdr->e_phentsize;
+        uint32_t chunk_size = i * sizeof(elf32_phdr_t);
         uint32_t offset = ehdr->e_phoff + chunk_size;
         
         if (offset < ehdr->e_phoff || offset >= (uint32_t)read_bytes || (uint32_t)read_bytes - offset < sizeof(elf32_phdr_t)) {
@@ -102,11 +102,6 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
         elf32_phdr_t *phdr = (elf32_phdr_t *)(file_buffer + offset);
 
         if (phdr->p_type == 1) {
-            if (phdr->p_offset > file.file_size || phdr->p_filesz > file.file_size - phdr->p_offset) {
-                printk("[ELF SECURITY] Error: Program header exceeds file bounds!\n");
-                goto cleanup_and_fail;
-            }
-
             uint32_t start_addr = phdr->p_vaddr;
             uint32_t end_addr = phdr->p_vaddr + phdr->p_memsz;
             
@@ -117,7 +112,14 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
                 goto cleanup_and_fail;
             }
 
-            uint32_t flags = (phdr->p_flags & 2) ? 7 : 5; // 7 = RW (Writable), 5 = Read-Only
+            /*
+             * Load every segment writable, whatever its final permissions are.
+             * CR0.WP makes the read/write bit apply to Ring 0 too, so the
+             * kernel cannot fill a page it has already mapped read-only. The
+             * real permissions are applied in the pass after this loop, once
+             * all the segment data is in place.
+             */
+            uint32_t load_flags = 7; // Present | User | Writable
 
             // Page-by-page mapping loop
             for (uint32_t page = (start_addr & 0xFFFFF000); page < end_addr; page += 4096) {
@@ -137,25 +139,37 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
 
                 if (!is_mapped) {
                     uint32_t phys = pmm_alloc_frame();
-                    map_page(page, phys, flags); 
-                    ft_memset((void *)page, 0, 4096);
-                } else {
-                    if ((flags & 2) && pt_virt) {
-                        pt_virt[pt_index] |= 2; 
-                        asm volatile("invlpg (%0)" ::"r"(page) : "memory");
+                    if (phys == 0xFFFFFFFF || map_page(page, phys, load_flags) != E_OK ||
+                        copy_to_user((void *)page, zero_page, sizeof(zero_page)) != E_OK) {
+                        printk("[ELF LOADER] Failed to map a user program page!\n");
+                        goto cleanup_and_fail;
                     }
+                } else if (pt_virt) {
+                    /* Shared with a segment already loaded: it has to be
+                     * writable for this segment's copy as well. */
+                    pt_virt[pt_index] |= 0x02;
+                    asm volatile("invlpg (%0)" ::"r"(page) : "memory");
                 }
             }
             
             if (phdr->p_filesz > 0) {
-                ft_memcpy((void *)phdr->p_vaddr, file_buffer + phdr->p_offset, phdr->p_filesz);
+                if (copy_to_user((void *)phdr->p_vaddr, file_buffer + phdr->p_offset, phdr->p_filesz) != E_OK) {
+                    printk("[ELF LOADER] Failed to copy program data to user memory!\n");
+                    goto cleanup_and_fail;
+                }
             }
             if (phdr->p_memsz > phdr->p_filesz) {
                 uint32_t bss_start = phdr->p_vaddr + phdr->p_filesz;
                 uint32_t bss_size = phdr->p_memsz - phdr->p_filesz;
 
-                if (bss_start >= 0x400000) {
-                    ft_memset((void *)bss_start, 0, bss_size);
+                while (bss_size > 0) {
+                    uint32_t chunk = bss_size > sizeof(zero_page) ? sizeof(zero_page) : bss_size;
+                    if (copy_to_user((void *)bss_start, zero_page, chunk) != E_OK) {
+                        printk("[ELF LOADER] Failed to zero user BSS!\n");
+                        goto cleanup_and_fail;
+                    }
+                    bss_start += chunk;
+                    bss_size -= chunk;
                 }
             }
         }
@@ -174,14 +188,61 @@ cleanup_process_memory(new_pd);
 
 load_success:
 
+    /*
+     * Apply the real segment permissions now that every byte is in place.
+     *
+     * Two passes, because segments whose file offsets are not 4 KB apart can
+     * share a page and the union of their permissions has to win. Pass 0
+     * tightens the read-only segments; pass 1 re-opens any page a writable
+     * segment also covers. Running them in this order means a shared page ends
+     * up writable, which is the safe direction: a page that should have been
+     * read-only stays writable, rather than a writable page being locked and
+     * faulting the program on its first store.
+     *
+     * The program header table was bounds-checked by elf_validate_image() and
+     * again in the loop above, so re-deriving the entries here is in range.
+     */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < ehdr->e_phnum; i++) {
+            elf32_phdr_t *ph = (elf32_phdr_t *)(file_buffer + ehdr->e_phoff +
+                                                ((uint32_t)i * sizeof(elf32_phdr_t)));
+
+            if (ph->p_type != 1 || ph->p_memsz == 0) continue;
+
+            int writable = (ph->p_flags & 2) != 0;
+            if (writable != pass) continue;
+
+            uint32_t seg_end = ph->p_vaddr + ph->p_memsz;
+            for (uint32_t page = (ph->p_vaddr & 0xFFFFF000); page < seg_end; page += 4096) {
+                uint32_t pd_index = page >> 22;
+                uint32_t pt_index = (page >> 12) & 0x3FF;
+                uint32_t *pd_virt = (uint32_t *)0xFFFFF000;
+
+                if (!(pd_virt[pd_index] & 1)) continue;
+
+                uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (pd_index * 0x1000));
+                if (!(pt_virt[pt_index] & 1)) continue;
+
+                if (writable) {
+                    pt_virt[pt_index] |= 0x02;
+                } else {
+                    pt_virt[pt_index] &= ~0x02u;
+                }
+                asm volatile("invlpg (%0)" ::"r"(page) : "memory");
+            }
+        }
+    }
+
     // User Stack Allocation
     uint32_t esp_addr = 0xB0000000;
     for (int j = 1; j <= 32; j++)
     {
         uint32_t page_addr = esp_addr - (j * 4096);
         uint32_t phys = pmm_alloc_frame();
-        map_page(page_addr, phys, 7); // 7 = User, RW, Present
-        ft_memset((void *)page_addr, 0, 4096);
+        if (phys == 0xFFFFFFFF || map_page(page_addr, phys, 7) != E_OK ||
+            copy_to_user((void *)page_addr, zero_page, sizeof(zero_page)) != E_OK) {
+            goto cleanup_and_fail;
+        }
     }
 
     // Guard Page to catch stack overflows

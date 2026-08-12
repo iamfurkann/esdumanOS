@@ -8,8 +8,13 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    0
-#define OS_VERSION_MINOR    1
+#define OS_VERSION_MINOR    2
 #define OS_VERSION_PATCH    0
+
+/**
+ * @brief Pre-release qualifier, or "" for a final release.
+ */
+#define OS_VERSION_PRE      "-alpha"
 
 /**
  * @brief Helper macros for stringifying version numbers
@@ -24,7 +29,7 @@
 /**
  * @brief Formatted OS version string
  */
-#define OS_VERSION_STR "  v" STRINGIFY(OS_VERSION_MAJOR) "." STRINGIFY(OS_VERSION_MINOR) "." STRINGIFY(OS_VERSION_PATCH) " "
+#define OS_VERSION_STR "  v" STRINGIFY(OS_VERSION_MAJOR) "." STRINGIFY(OS_VERSION_MINOR) "." STRINGIFY(OS_VERSION_PATCH) OS_VERSION_PRE " "
 
 #include "types.h"
 #include "tty.h"
@@ -74,13 +79,6 @@ void spinlock_acquire(spinlock_t *lock);
  * @param lock Pointer to the spinlock
  */
 void spinlock_init(spinlock_t *lock);
-
-/**
- * @brief Switches execution context to user mode (Ring 3)
- * @param eip Instruction pointer for user mode
- * @param esp Stack pointer for user mode
- */
-extern void switch_to_user_mode(uint32_t eip, uint32_t esp);
 
 /**
  * @brief Array containing the initialization ELF binary

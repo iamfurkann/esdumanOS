@@ -16,6 +16,9 @@
 #include "process.h"
 #include "security.h"
 #include "tss.h"
+#include "uaccess.h"
+#include "entropy.h"
+#include "pbkdf2.h"
 uint32_t kernel_stack_ring0[1024];
 multiboot_info_t global_mboot_info;
 char global_cmdline[256];
@@ -26,21 +29,10 @@ int is_test_mode = 0;
  * @return static char
  */
 static char early_get_kbd_char(void) {
-    const char scancode_ascii[58] = {
-        0, 27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
-        '\t', 'q','w','e','r','t','y','u','i','o','p','[',']','\n',
-        0, 'a','s','d','f','g','h','j','k','l',';','\'','`',
-        0, '\\','z','x','c','v','b','n','m',',','.','/', 0, '*', 0, ' '
-    };
     while(1) {
-        if (inb(0x64) & 1) {
-            uint8_t scancode = inb(0x60);
-            if (!(scancode & 0x80)) {
-                if (scancode < 58 && scancode_ascii[scancode] != 0) {
-                    return scancode_ascii[scancode];
-                }
-            }
-        }
+        char c = get_keyboard_char();  // Read from IRQ-filled ring buffer
+        if (c != 0) return c;
+        asm volatile("hlt");  // Wait for next interrupt (keyboard IRQ fills buffer)
     }
 }
 
@@ -134,32 +126,81 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
     init_stack_protect();
 
     // --- SEC-2: ENABLE SMEP & SMAP ---
+    //
+    // EBX is bound explicitly with "=b". The previous form asked for "=r" and
+    // guarded EBX by hand:
+    //
+    //     "pushl %%ebx; cpuid; movl %%ebx, %1; popl %%ebx"
+    //
+    // which lets the compiler pick %ebx itself for %1. When it does, the movl
+    // is a no-op and the popl restores the pre-CPUID value over the result, so
+    // the feature word read back as whatever happened to be in EBX. Detection
+    // silently failed and neither bit was ever set, on any CPU. The hand-rolled
+    // save is only needed for PIC code, and this kernel is built -fno-pic.
     uint32_t eax, ebx, ecx, edx;
-    asm volatile("pushl %%ebx; cpuid; movl %%ebx, %1; popl %%ebx"
-                 : "=a"(eax), "=r"(ebx), "=c"(ecx), "=d"(edx)
+    asm volatile("cpuid"
+                 : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                  : "a"(0), "c"(0));
-    if (eax >= 7) {
-        asm volatile("pushl %%ebx; cpuid; movl %%ebx, %1; popl %%ebx"
-                     : "=a"(eax), "=r"(ebx), "=c"(ecx), "=d"(edx)
+
+    uint32_t max_leaf = eax;
+    if (max_leaf >= 7) {
+        asm volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                      : "a"(7), "c"(0));
-        
+
         uint32_t cr4;
         asm volatile("mov %%cr4, %0" : "=r"(cr4));
         int cr4_updated = 0;
-        
+
         if (ebx & (1 << 7)) { // SMEP
             cr4 |= (1 << 20);
             cr4_updated = 1;
-            serial_print("[KERNEL] SMEP Activated.\n");
         }
         if (ebx & (1 << 20)) { // SMAP
             cr4 |= (1 << 21);
             cr4_updated = 1;
-            serial_print("[KERNEL] SMAP Activated.\n");
         }
-        
+
         if (cr4_updated) {
             asm volatile("mov %0, %%cr4" :: "r"(cr4));
+        }
+
+        // Report what the hardware actually accepted, not what was requested.
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        printk("  CPU Protections     : SMEP %s | SMAP %s (CPUID.7:EBX=0x%x CR4=0x%x)\n",
+               (cr4 & (1 << 20)) ? "ON " : "off",
+               (cr4 & (1 << 21)) ? "ON " : "off",
+               ebx, cr4);
+
+        uaccess_set_smap_enabled((cr4 & (1 << 21)) != 0);
+    } else {
+        printk("  CPU Protections     : SMEP/SMAP unavailable (CPUID max leaf %d < 7)\n", max_leaf);
+        uaccess_set_smap_enabled(0);
+    }
+
+    // --- SEC-3: ENABLE CR0.WP ---
+    // With WP clear, the read/write bit in a page table entry is ignored for
+    // supervisor accesses: a read-only user mapping is then only read-only for
+    // Ring 3, and any kernel write through a user pointer silently corrupts the
+    // page instead of faulting. Unlike SMEP/SMAP this needs no CPU feature bit
+    // and is therefore always available.
+    //
+    // Every kernel mapping is created read/write (boot.asm's tables, the page
+    // tables built by init_paging(), and the heap), so nothing the kernel writes
+    // to itself is affected. The one caller that relied on the old behaviour is
+    // the ELF loader, which now maps segments writable while copying and applies
+    // the real permissions afterwards.
+    {
+        uint32_t cr0_wp;
+        asm volatile("mov %%cr0, %0" : "=r"(cr0_wp));
+        cr0_wp |= (1u << 16);
+        asm volatile("mov %0, %%cr0" :: "r"(cr0_wp));
+
+        asm volatile("mov %%cr0, %0" : "=r"(cr0_wp));
+        if (cr0_wp & (1u << 16)) {
+            serial_print("[KERNEL] CR0.WP Activated.\n");
+        } else {
+            serial_print("[KERNEL] WARNING: CR0.WP could not be enabled!\n");
         }
     }
 
@@ -184,6 +225,7 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
 
     // --- SECURITY AND PASSWORD SCREEN ---
     init_security(mboot_info);
+    init_elf_master_key();
 
     if (mboot_info->flags & 0x00000004) {
         char *cmd = (char *)mboot_info->cmdline;
@@ -191,50 +233,6 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
         while (cmd[i] && i < 255) { global_cmdline[i] = cmd[i]; i++; }
         global_cmdline[i] = '\0';
         global_mboot_info.cmdline = (uint32_t)global_cmdline;
-        
-        if (ft_strstr(global_cmdline, "lock_kernel")) {
-            terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-            printk("\n=======================================================\n");
-            printk(" [SYSTEM LOCKED] PASSWORD REQUIRED TO CONTINUE!        \n");
-            printk("=======================================================\n");
-            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-            printk("Kernel Password: ");
-            
-            char input_pass[64];
-            int pass_idx = 0;
-            while (1) {
-                char c = early_get_kbd_char();
-                if (c == '\n' || c == '\r') break;
-                
-                if (c == '\b' && pass_idx > 0) {
-                    pass_idx--;
-                    terminal_putchar('\b'); terminal_putchar(' '); terminal_putchar('\b');
-                }
-                else if (c != 0 && c != '\b' && pass_idx < 63) {
-                    input_pass[pass_idx++] = c;
-                    terminal_putchar('*');
-                }
-            }
-            input_pass[pass_idx] = '\0';
-            printk("\n");
-
-            char hash_out[65];
-            sha256_to_hex(input_pass, hash_out);
-            if (ft_strcmp(hash_out, KERNEL_PASSWORD_HASH) != 0) {
-                terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-                printk("\n[ERROR] INCORRECT PASSWORD! KERNEL SELF-DESTRUCTING...\n");
-                while(1) { asm volatile("cli; hlt"); }
-            }
-            derive_master_key(input_pass);
-            for (int z = 0; z < 64; z++) input_pass[z] = 0;
-            
-            terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            printk("[OK] Password verified. Entering system...\n\n");
-            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-            
-            for(int cl=0; cl<10000000; cl++) { asm volatile("pause"); }
-            terminal_initialize(); 
-        }
     }
 
     // --- OPERATING SYSTEM INITIALIZATION ---
@@ -278,6 +276,14 @@ static int init_memory_subsystem(void) {
         return -1;
     }
     
+    /*
+     * Now that the kernel page directory exists, arm the double fault task. It
+     * has to come after paging because the TSS carries the CR3 the handler runs
+     * under; before this point a kernel stack overflow triple faults and the
+     * machine simply resets with nothing on the wire.
+     */
+    init_double_fault_handler();
+
     serial_print("[MAIN-DBG] Checked CR0. Now printing OK...\n");
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
@@ -290,8 +296,172 @@ static int init_memory_subsystem(void) {
     if (!heap_test) return -1;
     kfree(heap_test);
 
-    init_timer(100);
+    init_timer(TIMER_HZ);
     return 0;
+}
+/**
+ * @brief Early boot keyboard character reader for password input.
+ * Reads one character, echoes '*' for password hiding.
+ */
+static void early_read_password(char *buf, int max_len) {
+    int idx = 0;
+    while (1) {
+        char c = early_get_kbd_char();
+        if (c == '\n' || c == '\r') {
+            buf[idx] = '\0';
+            printk("\n");
+            break;
+        } else if (c == '\b' && idx > 0) {
+            idx--;
+            terminal_putchar('\b'); terminal_putchar(' '); terminal_putchar('\b');
+        } else if (c >= 32 && c <= 126 && idx < max_len - 1) {
+            buf[idx++] = c;
+            terminal_putchar('*');
+        }
+    }
+}
+
+/**
+ * @brief First boot setup: creates /etc/passwd and /etc/shadow with user-chosen passwords.
+ *
+ * Called when /etc/setup_complete does not exist.
+ * Creates root (UID 0) and esduman (UID 1000) accounts.
+ * Passwords are hashed with PBKDF2-HMAC-SHA256 + random salt.
+ *
+ * @param etc_id The entry ID of the /etc directory
+ */
+static void first_boot_setup(int etc_id) {
+    terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_BLUE);
+    printk("\n");
+    printk("  =====================================================\n");
+    printk("    esdumanOS First Boot Setup                         \n");
+    printk("    Set passwords for system accounts                  \n");
+    printk("  =====================================================\n");
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    printk("\n");
+
+    char pass1[64], pass2[64];
+    char shadow_buf[512];
+    char shadow_content[1024];
+    int shadow_offset = 0;
+    
+    // === ROOT PASSWORD ===
+    int root_set = 0;
+    for (int attempt = 0; attempt < 3 && !root_set; attempt++) {
+        printk("  Set root password: ");
+        early_read_password(pass1, 64);
+        printk("  Confirm root password: ");
+        early_read_password(pass2, 64);
+        
+        int match = 1;
+        for (int i = 0; i < 64; i++) {
+            if (pass1[i] != pass2[i]) { match = 0; break; }
+            if (pass1[i] == '\0') break;
+        }
+        
+        if (!match) {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            printk("  Passwords do not match. Try again.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            continue;
+        }
+        
+        if (pass1[0] == '\0') {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            printk("  Password cannot be empty. Try again.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            continue;
+        }
+        
+        if (create_shadow_entry("root", pass1, 0, shadow_buf, sizeof(shadow_buf)) == 0) {
+            // Copy to shadow_content
+            int len = 0;
+            while (shadow_buf[len]) { shadow_content[shadow_offset++] = shadow_buf[len++]; }
+            shadow_content[shadow_offset++] = '\n';
+            root_set = 1;
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            printk("  [OK] Root password set.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        }
+    }
+    
+    if (!root_set) {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        printk("\n  [ERROR] Failed to set root password after 3 attempts.\n");
+        printk("  System cannot continue. Please reboot.\n");
+        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        while(1) { asm volatile("cli; hlt"); }
+    }
+    
+    // === ESDUMAN PASSWORD ===
+    printk("\n");
+    int esduman_set = 0;
+    for (int attempt = 0; attempt < 3 && !esduman_set; attempt++) {
+        printk("  Set esduman password: ");
+        early_read_password(pass1, 64);
+        printk("  Confirm esduman password: ");
+        early_read_password(pass2, 64);
+        
+        int match = 1;
+        for (int i = 0; i < 64; i++) {
+            if (pass1[i] != pass2[i]) { match = 0; break; }
+            if (pass1[i] == '\0') break;
+        }
+        
+        if (!match) {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            printk("  Passwords do not match. Try again.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            continue;
+        }
+        
+        if (pass1[0] == '\0') {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            printk("  Password cannot be empty. Try again.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            continue;
+        }
+        
+        if (create_shadow_entry("esduman", pass1, 1000, shadow_buf, sizeof(shadow_buf)) == 0) {
+            int len = 0;
+            while (shadow_buf[len]) { shadow_content[shadow_offset++] = shadow_buf[len++]; }
+            shadow_content[shadow_offset++] = '\n';
+            esduman_set = 1;
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            printk("  [OK] esduman password set.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        }
+    }
+    
+    if (!esduman_set) {
+        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        printk("\n  [ERROR] Failed to set esduman password after 3 attempts.\n");
+        printk("  System cannot continue. Please reboot.\n");
+        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        while(1) { asm volatile("cli; hlt"); }
+    }
+    
+    shadow_content[shadow_offset] = '\0';
+    
+    // Create /etc/passwd
+    char *passwd_content = "root:x:0:/root\nesduman:x:1000:/home/esduman\n";
+    fs_create_file("passwd", (uint8_t*)passwd_content, ft_strlen(passwd_content), etc_id);
+    
+    // Create /etc/shadow
+    fs_create_file("shadow", (uint8_t*)shadow_content, shadow_offset, etc_id);
+    
+    // Create /etc/setup_complete (format version flag)
+    char *setup_flag = "format=v1";
+    fs_create_file("setup_complete", (uint8_t*)setup_flag, ft_strlen(setup_flag), etc_id);
+    
+    printk("\n[VFS] /etc/passwd and /etc/shadow created with PBKDF2-HMAC-SHA256.\n");
+    
+    // Zero sensitive buffers
+    volatile char *vp;
+    vp = pass1; for (int i = 0; i < 64; i++) vp[i] = 0;
+    vp = pass2; for (int i = 0; i < 64; i++) vp[i] = 0;
+    vp = shadow_buf; for (int i = 0; i < 512; i++) vp[i] = 0;
+    vp = shadow_content; for (int i = 0; i < 1024; i++) vp[i] = 0;
 }
 
 static int init_filesystem_and_vfs(void) {
@@ -316,11 +486,41 @@ static int init_filesystem_and_vfs(void) {
 
         int etc_id = get_vfs_id("etc", 0);
         if (etc_id != -1) {
-            char *passwd_content = "root:x:0:/root\nesduman:x:1000:/home/esduman\n";
-            fs_create_file("passwd", (uint8_t*)passwd_content, ft_strlen(passwd_content), etc_id);
-            char *shadow_content = "root:3a9f30b13ed32aca36440492078b0dd63f6cb89947da7a7f70ff036b790fdba9:0\nesduman:a1269a9e20da104354604184eef3a9116f29e6c8f57bfb5fbee3461d9f83deb5:1000\n";
-            fs_create_file("shadow", (uint8_t*)shadow_content, ft_strlen(shadow_content), etc_id);
-            printk("[VFS] /etc/passwd and /etc/shadow secure databases sealed.\n");
+            // Check if this is first boot (no setup_complete file)
+            int setup_idx = fs_get_entry_idx("setup_complete", etc_id);
+            if (setup_idx == -1) {
+                if (is_test_mode) {
+                    // Test mode: auto-create accounts with fixed test password (no keyboard)
+                    char shadow_buf[512];
+                    char shadow_content[1024];
+                    int shadow_offset = 0;
+
+                    if (create_shadow_entry("root", "test", 0, shadow_buf, sizeof(shadow_buf)) == 0) {
+                        int len = 0;
+                        while (shadow_buf[len]) { shadow_content[shadow_offset++] = shadow_buf[len++]; }
+                        shadow_content[shadow_offset++] = '\n';
+                    }
+                    if (create_shadow_entry("esduman", "test", 1000, shadow_buf, sizeof(shadow_buf)) == 0) {
+                        int len = 0;
+                        while (shadow_buf[len]) { shadow_content[shadow_offset++] = shadow_buf[len++]; }
+                        shadow_content[shadow_offset++] = '\n';
+                    }
+                    shadow_content[shadow_offset] = '\0';
+
+                    char *passwd_content = "root:x:0:/root\nesduman:x:1000:/home/esduman\n";
+                    fs_create_file("passwd", (uint8_t*)passwd_content, ft_strlen(passwd_content), etc_id);
+                    fs_create_file("shadow", (uint8_t*)shadow_content, shadow_offset, etc_id);
+                    char *setup_flag = "format=v1";
+                    fs_create_file("setup_complete", (uint8_t*)setup_flag, ft_strlen(setup_flag), etc_id);
+                    printk("[TEST] Auto-created accounts (password: test)\n");
+                } else {
+                    // First boot: run interactive password setup
+                    first_boot_setup(etc_id);
+                }
+            } else {
+                // Verify shadow format version
+                printk("[VFS] /etc/setup_complete found. Existing user accounts loaded.\n");
+            }
         }
 
         int home_id = get_vfs_id("home", 0);
@@ -397,24 +597,20 @@ static int init_userspace(void) {
     set_kernel_stack(k_stack_top);
 
     terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    printk("Boot process completed. Decrypting encrypted Minishell...\n");
+    printk("Boot process completed. Dropping to User Mode (Ring 3)...\n");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
-    if (global_mboot_info.flags & 0x00000004) {
-        char *cmdline = (char *)global_mboot_info.cmdline;
-        if (ft_strstr(cmdline, "selftest") != NULL) {
-            is_test_mode = 1;
+
+    // is_test_mode was already set early in kernel_main (before filesystem init)
+    if (is_test_mode) {
+        if (run_all_selftests) {
+            run_all_selftests();
+        } else {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            printk("\n[WARNING] TEST MODE: Test modules not included in this Kernel (Production Build).\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         }
-        if (is_test_mode) {
-            if (run_all_selftests) {
-                run_all_selftests();
-            } else {
-                terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-                printk("\n[WARNING] TEST MODE: Test modules not included in this Kernel (Production Build).\n");
-                terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-            }
-            while(1) { asm volatile("cli; hlt"); }
-        }
+        while(1) { asm volatile("cli; hlt"); }
     }
     asm volatile("sti");
     int shell_idx = load_and_exec_elf("init.elf", 0); 
@@ -432,6 +628,15 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
     if (init_boot_verify(&global_mboot_info) != 0) {
         kernel_panic("Boot verification failed!");
     }
+
+    // Parse kernel command line early (before filesystem init needs is_test_mode)
+    if (global_mboot_info.flags & 0x00000004) {
+        char *cmdline = (char *)global_mboot_info.cmdline;
+        if (ft_strstr(cmdline, "selftest") != NULL) {
+            is_test_mode = 1;
+        }
+    }
+
     if (init_memory_subsystem() != 0) {
         kernel_panic("Memory subsystem initialization failed!");
     }

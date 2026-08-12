@@ -24,6 +24,13 @@ int next_pid = 0;
 int foreground_task = -1;
 process_t *zombie_tasks_head = 0;
 
+/*
+ * The idle task. Created by init_multitasking(), never exits, and always
+ * runnable - it is the guarantee that the scheduler always has something to
+ * pick. Kept as a named pointer rather than assumed to be task_list_head.
+ */
+process_t *idle_task = 0;
+
 /**
  * @brief Initialize the multitasking system.
  */
@@ -36,14 +43,29 @@ void init_multitasking(void) {
     cpus[0].active_task = 0;
 
     uint32_t idle_phys = pmm_alloc_frame();
-    map_page(0x80000000, idle_phys, 7); // 7 = User, RW, Present
-    
+    if (idle_phys == 0xFFFFFFFF) {
+        kernel_panic("init_multitasking: out of memory allocating the idle page");
+    }
+
+    /*
+     * Fill the idle loop in while the page is still kernel-only, and only then
+     * hand it to Ring 3.
+     *
+     * Mapping it user-accessible first and writing the code afterwards is a
+     * supervisor write to a user page. That works with SMAP off, which is why
+     * it went unnoticed, but faults the instant SMAP is enabled - a page fault
+     * at 0x80000000 with error code 3 (present, write, supervisor) during boot.
+     */
+    map_page(0x80000000, idle_phys, 3); // Present | Read/Write, kernel only
+
     // Asm: mov eax, 99 (B8 63 00 00 00) | int 0x80 (CD 80) | jmp short -9 (EB F7)
     uint8_t idle_code[] = { 0xB8, 0x63, 0x00, 0x00, 0x00, 0xCD, 0x80, 0xEB, 0xF7 };
     uint8_t *idle_page = (uint8_t *)0x80000000;
     for(int i = 0; i < 9; i++) {
         idle_page[i] = idle_code[i];
     }
+
+    map_page(0x80000000, idle_phys, 7); // ...then Present | Read/Write | User
 
     uint32_t kernel_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
@@ -52,6 +74,7 @@ void init_multitasking(void) {
     if (task_list_head) {
         task_list_head->base_priority = 0;
         task_list_head->current_priority = 0;
+        idle_task = task_list_head;
     }
 }
 
@@ -115,7 +138,7 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     new_task->msg_count = 0;
 
     uint8_t *kstack_ptr = (uint8_t *)new_task->kstack;
-    for (int j = 0; j < 4096; j++) {
+    for (int j = 0; j < KERNEL_STACK_SIZE; j++) {
         kstack_ptr[j] = 0;
     }
 
@@ -136,6 +159,8 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
 
     new_task->fpu_initialized = 0;
     new_task->auth_fail_ticks = 0;
+    new_task->in_syscall = 0;
+    new_task->syscall_entry_eip = 0;
     new_task->next = 0;
     new_task->prev = 0;
 
@@ -226,37 +251,56 @@ int receive_message(uint32_t *sender_out, uint32_t *payload_out) {
 void cleanup_process_memory(uint32_t page_directory_phys) {
     uint32_t curr_pd = 0;
     asm volatile("mov %%cr3, %0" : "=r"(curr_pd));
-    if (page_directory_phys != 0 && page_directory_phys != curr_pd) {
-        
-        uint32_t old_cr3;
-        asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    curr_pd &= 0xFFFFF000;
+    page_directory_phys &= 0xFFFFF000;
 
-        asm volatile("mov %0, %%cr3" :: "r"(page_directory_phys));
-
-        uint32_t *pd_virt = (uint32_t *)0xFFFFF000;
-        for (int i = 4; i < 768; i++) {
-            if (pd_virt[i] & 1) {
-                uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (i * 0x1000));
-                for (int j = 0; j < 1024; j++) {
-                    if (pt_virt[j] & 1) {
-                        pmm_free_frame(pt_virt[j] & 0xFFFFF000);
-                    }
-                }
-                pmm_free_frame(pd_virt[i] & 0xFFFFF000);
-                pd_virt[i] = 0;
-            }
-        }
-
-        if ((old_cr3 & 0xFFFFF000) == (page_directory_phys & 0xFFFFF000)) {
-            if (current_task) asm volatile("mov %0, %%cr3" :: "r"((uint32_t)current_task->page_directory));
-        } else {
-            asm volatile("mov %0, %%cr3" :: "r"(old_cr3));
-        }
-
-        pmm_free_frame(page_directory_phys);
-        
-        klog(LOG_LEVEL_INFO, "PMM", "User process memory (PD, PT, PTE) fully reclaimed.");
+    if (page_directory_phys == 0) {
+        return;
     }
+
+    /* Tearing down the live address space would pull the page tables out from
+     * under the running code. Callers must switch CR3 away first. */
+    if (page_directory_phys == curr_pd) {
+        klog(LOG_LEVEL_ERROR, "PMM", "Refused to reclaim the address space currently in CR3.");
+        return;
+    }
+
+    /* The kernel directory is shared by the idle task and by every early boot
+     * path; freeing it would take the whole system with it. */
+    if (page_directory_phys == ((uint32_t)page_directory & 0xFFFFF000)) {
+        klog(LOG_LEVEL_ERROR, "PMM", "Refused to reclaim the kernel page directory.");
+        return;
+    }
+
+    asm volatile("mov %0, %%cr3" :: "r"(page_directory_phys));
+
+    /*
+     * Entries 0..767 are this process's own; entries 768..1022 are the kernel
+     * half, shared with every other address space, and entry 1023 is the
+     * recursive slot pointing at the directory itself. Only the first range may
+     * be freed. The scan starts at 0, not 4: user space begins at 4 MB, which
+     * falls inside directory entry 1, so entries 1..3 hold real user page
+     * tables and skipping them leaked one frame per table.
+     */
+    uint32_t *pd_virt = (uint32_t *)0xFFFFF000;
+    for (int i = 0; i < 768; i++) {
+        if (pd_virt[i] & 1) {
+            uint32_t *pt_virt = (uint32_t *)(0xFFC00000 + (i * 0x1000));
+            for (int j = 0; j < 1024; j++) {
+                if (pt_virt[j] & 1) {
+                    pmm_free_frame(pt_virt[j] & 0xFFFFF000);
+                }
+            }
+            pmm_free_frame(pd_virt[i] & 0xFFFFF000);
+            pd_virt[i] = 0;
+        }
+    }
+
+    asm volatile("mov %0, %%cr3" :: "r"(curr_pd));
+
+    pmm_free_frame(page_directory_phys);
+
+    klog(LOG_LEVEL_DEBUG, "PMM", "User process memory (PD, PT, PTE) fully reclaimed.");
 }
 
 /**
@@ -301,8 +345,13 @@ void exit_current_process(arch_regs_t *regs) {
         curr->fd_table = 0;
     }
 
-    cleanup_process_memory(curr->page_directory);
-
+    /*
+     * The address space is NOT reclaimed here. This code is still executing on
+     * curr's kernel stack with curr's directory in CR3, so freeing its page
+     * tables would unmap the ground we are standing on. The task is handed to
+     * the zombie list below and the reaper in schedule() releases both the
+     * process_t and the address space once another task's directory is live.
+     */
     int parent_pid = curr->parent_pid;
     curr->state = TASK_DEAD; 
     curr->wait_mutex = 0;
@@ -373,6 +422,38 @@ void sleep_current_task(arch_regs_t *regs, int reason) {
 }
 
 /**
+ * @brief Blocks the current task so that its syscall re-runs when it wakes.
+ *
+ * @param regs   Live interrupt frame of the calling task.
+ * @param reason Why the task is blocking.
+ * @return 1 when the task was blocked, 0 when it could not be.
+ */
+int syscall_block_and_restart(arch_regs_t *regs, wait_reason_t reason) {
+    /*
+     * All three conditions are necessary:
+     *
+     *  - in_syscall: the frame has to belong to a syscall. An interrupt frame
+     *    from Ring 3 looks identical here, and rewinding one drops the user's
+     *    EIP into the middle of whatever instruction was running.
+     *  - trap_frame_is_live: it has to be the frame on this task's kernel
+     *    stack, not a saved copy of one (see trap_frame_is_live).
+     *  - CPL 3: resuming it has to re-enter the kernel through the trap.
+     */
+    if (current_task == 0 || !current_task->in_syscall) return 0;
+    if (!trap_frame_is_live(regs) || (regs->cs & 0x03) == 0) return 0;
+
+    /*
+     * Resume on the trap instruction rather than after it, using the address
+     * recorded at syscall entry. The syscall simply runs again and this time
+     * finds whatever it was waiting for.
+     */
+    regs->eip = current_task->syscall_entry_eip;
+
+    sleep_current_task(regs, (int)reason);
+    return 1;
+}
+
+/**
  * @brief Wake up tasks that are sleeping for a specific reason.
  * 
  * @param reason The reason to wake up tasks for.
@@ -397,31 +478,59 @@ void schedule(arch_regs_t *regs) {
     uint32_t current_esp;
     asm volatile("mov %%esp, %0" : "=r"(current_esp));
 
+    /*
+     * Reap exited tasks. A zombie is skipped while we are still running on its
+     * kernel stack (exit_current_process() calls schedule() from exactly that
+     * position); it is picked up on the next switch, when some other task's
+     * stack and directory are live.
+     *
+     * CR3 still holds the directory of whichever task entered schedule(), and a
+     * zombie that is not the one we are standing on is never that task, so
+     * cleanup_process_memory() can safely tear its address space down here.
+     */
     process_t *prev_zombie = 0;
     process_t *zombie = zombie_tasks_head;
-    
+
     while (zombie != 0) {
         uint32_t stack_start = (uint32_t)zombie->kstack;
-        uint32_t stack_end = stack_start + 4096;
-        
+        uint32_t stack_end = stack_start + KERNEL_STACK_SIZE;
+
         if (current_esp >= stack_start && current_esp < stack_end) {
             prev_zombie = zombie;
             zombie = zombie->next;
         } else {
             process_t *to_free = zombie;
             zombie = zombie->next;
-            
+
             if (prev_zombie) prev_zombie->next = zombie;
             else zombie_tasks_head = zombie;
-            
+
+            cleanup_process_memory(to_free->page_directory);
             kfree(to_free);
         }
     }
 
     if (!multitasking_enabled || task_list_head == 0) return;
 
+    /*
+     * The kernel is deliberately not preemptible: a task that entered the
+     * kernel runs until it returns to user mode or blocks of its own accord.
+     * A frame from Ring 0 is therefore never rescheduled.
+     *
+     * This is what makes kernel code implicitly atomic with respect to other
+     * tasks, and most of the kernel depends on it - bcache, the pipe pool and
+     * the ATA driver have no locks at all, the task list is edited without
+     * masking interrupts, pmm_lock spins without disabling them, and the
+     * uaccess fault state is a single global. Removing this guard alone would
+     * not add preemption, it would remove that guarantee.
+     *
+     * arch_regs_t is also unable to describe a Ring 0 frame: the processor does
+     * not push SS:ESP on a same-privilege interrupt, so the last two fields
+     * alias the interrupted kernel stack. Preemption needs the frame layout
+     * fixed before anything else.
+     */
     if (regs && (regs->cs & 0x03) == 0) {
-        return; 
+        return;
     }
     
     if (current_task != 0 && regs) {
@@ -465,9 +574,23 @@ void schedule(arch_regs_t *regs) {
 
     if (next_task != 0) {
         next_task->current_priority = next_task->base_priority;
+    } else if (current_task && current_task->state == TASK_RUNNING) {
+        next_task = current_task;
+    } else if (idle_task && idle_task->state == TASK_RUNNING) {
+        /*
+         * Nothing else is runnable, so fall back to the idle task.
+         *
+         * This used to be "sti; hlt; return". Returning leaves *regs untouched,
+         * so the iret at the end of the interrupt stub resumed the very task
+         * that had just been found unrunnable: a task that had blocked would
+         * carry on executing as though it never had. The idle task exists
+         * precisely so there is always somewhere to go instead.
+         */
+        next_task = idle_task;
     } else {
-        if (current_task && current_task->state == TASK_RUNNING) next_task = current_task;
-        else next_task = task_list_head; // fallback to idle task
+        /* No runnable task and no idle task: the invariant init_multitasking()
+         * establishes has been broken, and there is nothing safe to resume. */
+        kernel_panic("schedule: no runnable task and no idle task");
     }
 
     if (current_task == next_task) return; 
@@ -485,7 +608,7 @@ void schedule(arch_regs_t *regs) {
         asm volatile("fxrstor %0" : : "m"(current_task->fpu_state));
     }
 
-    uint32_t k_stack_top = (((uint32_t)current_task->kstack + 4096) & 0xFFFFFFF0) - 4;
+    uint32_t k_stack_top = (((uint32_t)current_task->kstack + KERNEL_STACK_SIZE) & 0xFFFFFFF0) - 4;
     set_kernel_stack(k_stack_top); 
     asm volatile ("mov %0, %%cr3" : : "r"(current_task->page_directory));
 
@@ -507,10 +630,38 @@ void mutex_init(mutex_t *m) {
 }
 
 /**
+ * @brief Tells a live interrupt frame from a saved copy of one.
+ *
+ * Only the frame the ISR stub pushed on the current task's kernel stack can be
+ * used for sleeping: going to sleep rewinds its EIP and hands it to schedule(),
+ * which overwrites it in place with the incoming task's context.
+ *
+ * A saved copy looks identical field for field. &current_task->regs in
+ * particular used to be passed here by the VFS, and the result was silent
+ * corruption: sleep_current_task() copied the frame onto itself, schedule()
+ * wrote the next task's context into the *previous* task's PCB, and CR3 and
+ * current_task ended up describing different tasks while the real frame on the
+ * kernel stack went untouched. Callers without the live frame must pass 0.
+ *
+ * @param regs Candidate frame.
+ * @return 1 when regs lies wholly inside the current task's kernel stack.
+ */
+int trap_frame_is_live(const arch_regs_t *regs) {
+    if (regs == 0 || current_task == 0) return 0;
+
+    uint32_t addr = (uint32_t)regs;
+    uint32_t base = (uint32_t)current_task->kstack;
+
+    return addr >= base && (addr + sizeof(arch_regs_t)) <= (base + KERNEL_STACK_SIZE);
+}
+
+/**
  * @brief Acquire a lock on a mutex.
- * 
+ *
  * @param m Pointer to the mutex to lock.
- * @param regs Pointer to the current CPU registers.
+ * @param regs Live interrupt frame of the calling task, or 0 when the caller
+ *             does not have one. A frame that is not on the current kernel
+ *             stack is treated as absent rather than trusted.
  */
 void mutex_lock(mutex_t *m, arch_regs_t *regs) {
     if (!multitasking_enabled || current_task == 0) return;
@@ -532,22 +683,26 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs) {
             return;
         }
 
-        if (regs != 0 && (regs->cs & 0x03) != 0) {
-            regs->eip -= 2;
-            asm volatile("sti");
-            
-            current_task->wait_mutex = m;
-            sleep_current_task(regs, WAIT_MUTEX);
+        asm volatile("sti");
+
+        /*
+         * Prefer to sleep. syscall_block_and_restart() refuses unless this is
+         * genuinely a Ring 3 syscall frame belonging to this task, so a frame
+         * that arrived any other way can never have its EIP rewound.
+         */
+        current_task->wait_mutex = m;
+        if (syscall_block_and_restart(regs, WAIT_MUTEX)) {
             return;
-        } else {
-            asm volatile("sti"); 
-            asm volatile("nop");
-            spin_count++;
-            if (spin_count > 100000000) { 
-                klog_int(LOG_LEVEL_CRITICAL, "MUTEX", "Spinlock Deadlock! Mutex owner PID", m->owner_pid);
-                klog_int(LOG_LEVEL_CRITICAL, "MUTEX", "Locked Kernel PID", current_task->pid);
-                kernel_panic("Kernel Mutex Deadlock");
-            }
+        }
+        current_task->wait_mutex = 0;
+
+        /* Cannot block here: spin, and report if it is clearly a deadlock. */
+        asm volatile("nop");
+        spin_count++;
+        if (spin_count > 100000000) {
+            klog_int(LOG_LEVEL_CRITICAL, "MUTEX", "Spinlock Deadlock! Mutex owner PID", m->owner_pid);
+            klog_int(LOG_LEVEL_CRITICAL, "MUTEX", "Locked Kernel PID", current_task->pid);
+            kernel_panic("Kernel Mutex Deadlock");
         }
     }
 }
@@ -679,13 +834,28 @@ void restore_signal_context(arch_regs_t *regs) {
 }
 
 /**
- * @brief Check if there is a free task slot available.
- * 
- * @return 1 if available, 0 otherwise.
+ * @brief Check whether another process may be created.
+ *
+ * The task list is a dynamically allocated linked list, so there is no fixed
+ * table to run out of — but a ceiling is still enforced. Every process costs a
+ * process_t on the kernel heap (~5 KB, including its 4 KB kernel stack and FPU
+ * save area) plus a page directory, its page tables and 32 pages of user stack.
+ * Without a cap an unprivileged loop of exec() exhausts the kernel heap, and a
+ * kmalloc() failure there is far harder to survive than a rejected exec.
+ *
+ * Only live tasks count: exit_current_process() unlinks a task before handing it
+ * to the zombie reaper, so slots come back as processes terminate.
+ *
+ * @return 1 when another process fits, 0 once MAX_TASKS live tasks exist.
  */
 int check_free_task_slot(void) {
-    // We are dynamic now! Always space (unless OOM).
-    return 1;
+    int live = 0;
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->state != TASK_EMPTY && p->state != TASK_DEAD) {
+            live++;
+        }
+    }
+    return live < MAX_TASKS;
 }
 
 /**
@@ -722,7 +892,7 @@ void start_first_task(void) {
     current_task = first_task; 
     if (!current_task) kernel_panic("No tasks found!");
     
-    uint32_t k_stack_top = (((uint32_t)current_task->kstack + 4096) & 0xFFFFFFF0) - 4;
+    uint32_t k_stack_top = (((uint32_t)current_task->kstack + KERNEL_STACK_SIZE) & 0xFFFFFFF0) - 4;
     set_kernel_stack(k_stack_top); 
 
     asm volatile ("mov %0, %%cr3" : : "r"(current_task->page_directory));
@@ -761,6 +931,33 @@ void rwlock_init(rwlock_t *lock) {
     mutex_init(&lock->mutex);
 }
 
+/** Spins tolerated on a contended rwlock before declaring a deadlock. */
+#define RWLOCK_MAX_SPINS 1000000u
+
+/**
+ * @brief Waits for a contended read/write lock.
+ *
+ * Contention cannot happen while the kernel is non-preemptible: whoever holds
+ * one of these locks runs to completion before another task can look at it. The
+ * only way to arrive here is a path re-entering a lock it already holds, which
+ * is a deadlock however it is spelled - so it is reported instead of spinning
+ * forever and looking like a hang.
+ *
+ * Sleeping is deliberately not attempted. It needs the live interrupt frame,
+ * and the VFS call sites sit several frames below the syscall entry without
+ * one; the previous code manufactured a frame from the PCB, which corrupted
+ * the caller's saved context. Once the kernel becomes preemptible this is the
+ * place to grow a real wait queue.
+ *
+ * @param spins Caller's spin counter.
+ */
+static void rwlock_wait(uint32_t *spins) {
+    if (++(*spins) > RWLOCK_MAX_SPINS) {
+        kernel_panic("rwlock: contended in a non-preemptible kernel (recursive acquire?)");
+    }
+    asm volatile("pause");
+}
+
 /**
  * @brief Acquire a read lock on a read-write lock.
  * 
@@ -768,52 +965,70 @@ void rwlock_init(rwlock_t *lock) {
  * @param regs Pointer to the current CPU registers.
  */
 void rwlock_acquire_read(rwlock_t *lock, arch_regs_t *regs) {
-    mutex_lock(&lock->mutex, regs);
-    lock->readers++;
-    mutex_unlock(&lock->mutex);
+    uint32_t spins = 0;
+
+    while (1) {
+        mutex_lock(&lock->mutex, regs);
+        /* Readers used to walk straight past writer_active, so a reader and a
+         * writer could hold the lock at the same time and the "exclusion" was
+         * decorative. */
+        if (!lock->writer_active) {
+            lock->readers++;
+            mutex_unlock(&lock->mutex);
+            return;
+        }
+        mutex_unlock(&lock->mutex);
+        rwlock_wait(&spins);
+    }
 }
 
 /**
  * @brief Release a read lock on a read-write lock.
- * 
+ *
  * @param lock Pointer to the read-write lock.
  */
 void rwlock_release_read(rwlock_t *lock) {
     mutex_lock(&lock->mutex, 0);
-    lock->readers--;
+    if (lock->readers > 0) {
+        lock->readers--;
+    }
     mutex_unlock(&lock->mutex);
 }
 
 /**
  * @brief Acquire a write lock on a read-write lock.
- * 
+ *
  * @param lock Pointer to the read-write lock.
- * @param regs Pointer to the current CPU registers.
+ * @param regs Live interrupt frame, or 0 when the caller does not have one.
  */
 void rwlock_acquire_write(rwlock_t *lock, arch_regs_t *regs) {
-    mutex_lock(&lock->mutex, regs);
-    // Simple implementation: wait until readers are 0.
-    while (lock->readers > 0) {
-        mutex_unlock(&lock->mutex);
-        if (regs != 0 && (regs->cs & 0x03) != 0) {
-            regs->eip -= 2;
-            sleep_current_task(regs, WAIT_MUTEX); 
-            return;
-        } else {
-            // Kernel thread busy wait
-            for (int i = 0; i < 1000; i++) asm volatile("pause");
-        }
+    uint32_t spins = 0;
+
+    while (1) {
         mutex_lock(&lock->mutex, regs);
+        if (!lock->writer_active && lock->readers == 0) {
+            lock->writer_active = 1;
+            mutex_unlock(&lock->mutex);
+            return;
+        }
+        mutex_unlock(&lock->mutex);
+        /*
+         * The old code slept here and then returned - without the lock, and
+         * without setting writer_active. The caller went on to mutate the
+         * resource believing it was protected, and its matching release
+         * unlocked a mutex it did not own.
+         */
+        rwlock_wait(&spins);
     }
-    lock->writer_active = 1;
 }
 
 /**
  * @brief Release a write lock on a read-write lock.
- * 
+ *
  * @param lock Pointer to the read-write lock.
  */
 void rwlock_release_write(rwlock_t *lock) {
+    mutex_lock(&lock->mutex, 0);
     lock->writer_active = 0;
     mutex_unlock(&lock->mutex);
 }

@@ -17,6 +17,27 @@
 #define EFLAGS_DEFAULT 0x202 // IF (Interrupt Enable)
 
 /**
+ * @brief Number of descriptors in the GDT.
+ * 0 null, 1-3 kernel code/data/stack, 4-6 user code/data/stack,
+ * 7 main TSS, 8 double fault TSS.
+ */
+#define GDT_ENTRIES 9
+
+/** @brief Selector of the main TSS (GDT index 7). */
+#define GDT_TSS_SEL 0x38
+
+/**
+ * @brief Selector of the double fault TSS (GDT index 8).
+ *
+ * #DF is dispatched through a task gate rather than an interrupt gate. The
+ * usual cause of a double fault is kernel stack exhaustion, and an interrupt
+ * gate would try to push the fault frame onto the very stack that overflowed -
+ * turning a reportable double fault into a silent triple fault and a reset. A
+ * task gate makes the processor load a completely fresh stack from this TSS.
+ */
+#define GDT_DF_TSS_SEL 0x40
+
+/**
  * @brief Global Descriptor Table entry structure defining a single memory segment
  */
 struct gdt_entry_struct {

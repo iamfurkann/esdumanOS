@@ -46,6 +46,19 @@ typedef int                int32_t;
  */
 typedef long long          int64_t;
 
+/*
+ * Boolean type.
+ *
+ * C23 promoted bool, true and false to keywords, so defining them is no longer
+ * merely redundant - "typedef _Bool bool" is a syntax error there, and GCC 15
+ * defaults to C23. The kernel build pins no -std, so it inherits whatever the
+ * host compiler defaults to and this file decides whether the tree still
+ * compiles at all.
+ *
+ * Defined only for the standards that lack them.
+ */
+#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
+
 /**
  * @brief Boolean type
  */
@@ -60,6 +73,8 @@ typedef _Bool bool;
  * @brief Boolean false value
  */
 #define false 0
+
+#endif
 
 /**
  * @brief Null pointer definition

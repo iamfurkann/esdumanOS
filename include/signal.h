@@ -29,25 +29,48 @@ typedef struct {
  */
 void init_signals(void);
 
-/**
- * @brief Registers a callback handler for a specific signal.
- * @param sig_num Signal number to register.
- * @param handler Callback function pointer.
+/*
+ * These three were declared here under their pre-rename names - register_signal,
+ * schedule_signal and signal_tick_handler - long after signal.c had renamed them.
+ * Three translation units included this header and so were compiled against an
+ * API that existed nowhere; the real schedule_kernel_timer() meanwhile had a
+ * second, invented declaration in process.h with different parameters AND a
+ * different return type, which is what its only caller was actually built
+ * against. The names and signatures below are the ones signal.c defines.
  */
-void register_signal(int sig_num, signal_handler_t handler);
 
 /**
- * @brief Schedules a signal to be triggered after a specific delay.
- * @param sig_num Signal number to schedule.
- * @param delay_ticks Number of timer ticks before the signal triggers.
+ * @brief Registers a callback for a kernel timer slot.
+ * @param timer_id Slot to register, 0 to MAX_SIGNALS-1.
+ * @param handler Callback invoked once the delay expires.
  */
-void schedule_signal(int sig_num, uint32_t delay_ticks);
+void register_kernel_timer(int timer_id, signal_handler_t handler);
 
 /**
- * @brief Kernel timer tick handler for signals.
- * Decrements active signal delays and triggers handlers if they expire.
+ * @brief Arms a kernel timer slot.
+ *
+ * Silently does nothing when timer_id is out of range or no handler has been
+ * registered for it, so a caller that passes the arguments in the wrong order
+ * gets no diagnostic - see the note above.
+ *
+ * @param timer_id Slot to arm; must already have a handler.
+ * @param delay_ticks Timer ticks before the callback becomes due; TIMER_HZ ticks
+ *                    is one second.
  */
-void signal_tick_handler(void);
+void schedule_kernel_timer(int timer_id, uint32_t delay_ticks);
+
+/**
+ * @brief Counts down every armed kernel timer. Called from the timer interrupt.
+ *
+ * Only decrements; the handlers themselves run later from
+ * process_pending_kernel_timers(), off the interrupt path.
+ */
+void kernel_timer_tick_handler(void);
+
+/**
+ * @brief Runs the callbacks of every kernel timer whose delay has expired.
+ */
+void process_pending_kernel_timers(void);
 
 /**
  * @brief Demo callback function to test the alarm signal.

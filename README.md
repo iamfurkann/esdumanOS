@@ -378,7 +378,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.2.0-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -401,13 +401,18 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS.iso \
+    -cdrom esdumanOS-v0.2.0-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
 
 Add `-device isa-debug-exit,iobase=0xf4,iosize=0x04` only if you want the kernel
 to be able to terminate QEMU with an exit code, as the self-test targets do.
+
+The ISO filename carries the version, and the Makefile derives it from the
+`OS_VERSION_*` macros in `include/kernel.h` — so it changes on a version bump and
+there is no second place to update. Run `make -pn | grep '^ISO ='` if you are not
+sure what the current build produces.
 
 ### Keyboard Shortcuts (Inside the OS)
 

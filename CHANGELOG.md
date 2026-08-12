@@ -62,6 +62,10 @@ and RDRAND configurations.
 
 **API**
 - `TIMER_HZ` in `rtc.h`, replacing a literal and three prose restatements of the PIT rate.
+- The ISO is now named `esdumanOS-v<version>.iso`, with the version derived by the
+  Makefile from the `OS_VERSION_*` macros in `include/kernel.h` — so a version bump
+  touches one file. The kernel binary stays `myos.bin`, because `grub/grub.cfg` names it
+  and a mismatch there yields an ISO that fails to boot rather than a build error.
 - Incremental SHA-256 (`sha256_init`/`update`/`final`), PBKDF2-HMAC-SHA256
   (`crypto/pbkdf2.c`), standalone ELF validation (`kernel/proc/elf_validate.c`, also
   fuzzed), `trap_frame_is_live()`, `syscall_block_and_restart()`, `fs_dir_exists()`,

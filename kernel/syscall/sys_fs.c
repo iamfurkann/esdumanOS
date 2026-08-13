@@ -51,6 +51,24 @@ static int copy_user_string(char *destination, const char *source, size_t max_le
     if (!validate_string_pointer(source, max_len)) return 0;
     return copy_string_from_user(destination, source, max_len) == E_OK;
 }
+
+/**
+ * @brief Splits a path into its parent directory and final component.
+ *
+ * Relative paths resolve against the calling process's working directory, which
+ * lives in the PCB. Before this, each syscall took the base directory from a
+ * register the caller filled in - so a process chose where its own relative
+ * lookups started, and every /bin tool passed a hardcoded 0, which is why they
+ * all operated on the root directory no matter where the shell had cd'd to.
+ *
+ * @param path     Path already copied into kernel memory.
+ * @param basename Receives the final component; MAX_FILENAME bytes.
+ * @return Parent directory entry id, or a negative errno.
+ */
+static int split_from_cwd(const char *path, char *basename) {
+    uint8_t base = current_task ? current_task->cwd_id : 0;
+    return vfs_resolve_path(path, base, basename);
+}
 /**
  * @brief Function sys_read
  */
@@ -290,8 +308,8 @@ void sys_open(arch_regs_t *regs) {
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
     char basename[MAX_FILENAME];
     for (int k = 0; k < MAX_FILENAME; k++) basename[k] = '\0';
-    int parent_id = vfs_resolve_path(path, (uint8_t)regs->ecx, basename);
-    
+    int parent_id = split_from_cwd(path, basename);
+
     if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
     int dev_idx_vfs = fs_get_entry_idx("dev", 0);
@@ -357,14 +375,16 @@ void sys_create_file(arch_regs_t *regs) {
         kfree(content);
         regs->eax = E_FAULT; return; 
     }
-    uint8_t parent_id = (uint8_t)regs->edx;
+    char basename[MAX_FILENAME];
+    int parent_id = split_from_cwd(filename, basename);
+    if (parent_id < 0 || basename[0] == '\0') { kfree(content); regs->eax = E_NOENT; return; }
 
-    if (!check_vfs_access(parent_id, 1)) {
+    if (!check_vfs_access((uint8_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: No write access to this location!");
         kfree(content);
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_create_file(filename, (uint8_t *)content, ft_strlen(content), parent_id);
+    regs->eax = fs_create_file(basename, (uint8_t *)content, ft_strlen(content), (uint8_t)parent_id);
     kfree(content);
 }
 
@@ -374,13 +394,15 @@ void sys_create_file(arch_regs_t *regs) {
 void sys_rm_file(arch_regs_t *regs) {
     char filename[MAX_FILENAME];
     if (!copy_user_string(filename, (const char *)regs->ebx, sizeof(filename))) { regs->eax = E_FAULT; return; }
-    uint8_t parent_id = (uint8_t)regs->ecx; 
+    char basename[MAX_FILENAME];
+    int parent_id = split_from_cwd(filename, basename);
+    if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
-    if (!check_vfs_access(parent_id, 1)) {
+    if (!check_vfs_access((uint8_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "rm: Permission denied. Cannot delete this file!");
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_delete(filename, parent_id);
+    regs->eax = fs_delete(basename, (uint8_t)parent_id);
 }
 
 /**
@@ -393,13 +415,31 @@ void sys_mv_file(arch_regs_t *regs) {
         !copy_user_string(new_name, (const char *)regs->ecx, sizeof(new_name))) {
         regs->eax = E_FAULT; return; 
     }
-    uint8_t parent_id = (uint8_t)regs->edx; 
+    char old_base[MAX_FILENAME];
+    char new_base[MAX_FILENAME];
+    int old_parent = split_from_cwd(old_name, old_base);
+    int new_parent = split_from_cwd(new_name, new_base);
 
-    if (!check_vfs_access(parent_id, 1)) {
+    if (old_parent < 0 || new_parent < 0 || old_base[0] == '\0' || new_base[0] == '\0') {
+        regs->eax = E_NOENT; return;
+    }
+
+    /*
+     * fs_rename() renames within a single directory - it has no notion of moving
+     * an entry between parents. Refuse the cross-directory case rather than
+     * silently dropping the destination directory and renaming in place, which
+     * is what ignoring new_parent would do.
+     */
+    if (old_parent != new_parent) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "mv: moving between directories is not supported.");
+        regs->eax = E_INVAL; return;
+    }
+
+    if (!check_vfs_access((uint8_t)old_parent, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mv: Permission denied. Cannot rename this file!");
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_rename(old_name, new_name, parent_id);
+    regs->eax = fs_rename(old_base, new_base, (uint8_t)old_parent);
 }
 
 /**
@@ -408,13 +448,15 @@ void sys_mv_file(arch_regs_t *regs) {
 void sys_mkdir(arch_regs_t *regs) {
     char name[MAX_FILENAME];
     if (!copy_user_string(name, (const char *)regs->ebx, sizeof(name))) { regs->eax = E_FAULT; return; }
-    uint8_t parent_id = (uint8_t)regs->ecx;
-    
-    if (!check_vfs_access(parent_id, 1)) {
+    char basename[MAX_FILENAME];
+    int parent_id = split_from_cwd(name, basename);
+    if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
+
+    if (!check_vfs_access((uint8_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mkdir: Permission denied. No directory creation access!");
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_mkdir(name, parent_id);
+    regs->eax = fs_mkdir(basename, (uint8_t)parent_id);
 }
 
 /**
@@ -435,20 +477,16 @@ void sys_ls_dir(arch_regs_t *regs) {
  * Shared by sys_get_dir_id() and sys_chdir(), which need exactly the same
  * resolution - the "." and ".." cases and the access check included.
  *
- * The base is a parameter rather than always the PCB's cwd because the two
- * callers disagree for now: chdir() is new and resolves against the process's
- * working directory, while get_dir_id() still takes its base from the caller
- * until the rest of the syscalls make the same move. Once they do, this
- * parameter goes away and every path resolves against the PCB.
+ * Relative paths resolve against the calling process's working directory; see
+ * split_from_cwd() for why the base is no longer something the caller chooses.
  *
  * @param path User-supplied path, already copied into kernel memory.
- * @param base Directory the resolution starts from for relative paths.
  * @return Directory entry id on success, or a negative errno.
  */
-static int resolve_dir_from(const char *path, uint8_t base) {
+static int resolve_dir_from_cwd(const char *path) {
     char basename[MAX_FILENAME];
 
-    int parent = vfs_resolve_path(path, base, basename);
+    int parent = split_from_cwd(path, basename);
     if (parent < 0) return E_NOENT;
 
     int target;
@@ -485,7 +523,7 @@ void sys_get_dir_id(arch_regs_t *regs) {
     char path[MAX_FILENAME];
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
 
-    regs->eax = resolve_dir_from(path, (uint8_t)regs->ecx);
+    regs->eax = resolve_dir_from_cwd(path);
 }
 
 /**
@@ -500,7 +538,7 @@ void sys_chdir(arch_regs_t *regs) {
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
     if (current_task == 0) { regs->eax = E_FAULT; return; }
 
-    int target = resolve_dir_from(path, current_task->cwd_id);
+    int target = resolve_dir_from_cwd(path);
     if (target < 0) { regs->eax = target; return; }
 
     current_task->cwd_id = (uint8_t)target;
@@ -582,11 +620,16 @@ void sys_list_files(arch_regs_t *regs) {
 void sys_cat_raw(arch_regs_t *regs) {
     char target_file[MAX_FILENAME];
     if (!copy_user_string(target_file, (const char *)regs->ebx, sizeof(target_file))) { regs->eax = E_FAULT; return; }
-    uint8_t parent_id = (uint8_t)regs->ecx;
+
+    char basename[MAX_FILENAME];
+    int resolved = split_from_cwd(target_file, basename);
+    if (resolved < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
+    uint8_t parent_id = (uint8_t)resolved;
+
     vfs_file_t file;
-    
-    if (fs_open(target_file, parent_id, &file) == 0) {
-        int file_idx = fs_get_entry_idx(target_file, parent_id);
+
+    if (fs_open(basename, parent_id, &file) == 0) {
+        int file_idx = fs_get_entry_idx(basename, parent_id);
         if (file_idx != -1) {
             if (!check_vfs_access(dir_table[file_idx].entry_id, 0)) {
                 printk("Error: No permission to read file '%s'!\n", target_file);
@@ -619,11 +662,16 @@ void sys_cat_raw(arch_regs_t *regs) {
 void sys_cat_file(arch_regs_t *regs) {
     char target_file[MAX_FILENAME];
     if (!copy_user_string(target_file, (const char *)regs->ebx, sizeof(target_file))) { regs->eax = E_FAULT; return; }
-    uint8_t parent_id = (uint8_t)regs->ecx;
+
+    char basename[MAX_FILENAME];
+    int resolved = split_from_cwd(target_file, basename);
+    if (resolved < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
+    uint8_t parent_id = (uint8_t)resolved;
+
     vfs_file_t file;
-    
-    if (fs_open(target_file, parent_id, &file) == 0) {
-        int file_idx = fs_get_entry_idx(target_file, parent_id);
+
+    if (fs_open(basename, parent_id, &file) == 0) {
+        int file_idx = fs_get_entry_idx(basename, parent_id);
         if (file_idx != -1) {
             if (!check_vfs_access(dir_table[file_idx].entry_id, 0)) {
                 printk("Error: Permission denied!\n");

@@ -170,11 +170,11 @@ void main(void) {
     }
 
     // [CRITICAL]: If authentication is successful, start the Shell (sh)!
-    // sys_get_dir_id and syscall(5) = EXEC to execute the /bin/sh.elf file
-    int bin_id = syscall(29, (int)"bin", 0, 0); 
-    
-    // If the Shell is executable, this function will never return; the Shell takes over.
-    int res = syscall(5, (int)"sh", bin_id, (int)user_buf);
+    //
+    // Absolute path: exec() resolves relative names against the process's working
+    // directory, and init starts at root. Looking up a bare "sh" from there finds
+    // nothing, so the shell would never launch.
+    int res = syscall(SYSCALL_EXEC, (int)"/bin/sh", 0, (int)user_buf);
     
     if (res == -1) {
         printk("\n[CRITICAL ERROR] /bin/sh could not be found or executed!\n");

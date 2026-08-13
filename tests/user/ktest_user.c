@@ -191,15 +191,23 @@ void main(void) {
     KT_ASSERT(dirid > 0, "[VFS] get_dir_id() resolves the directory just created");
 
     /*
-     * Parent ids are a raw byte from user space and used to be stored without
-     * being checked. An entry could therefore be created whose parent was
-     * itself, and the parent walk in check_vfs_access() then spun forever.
-     * Entry 250 is far above anything a normal boot allocates.
+     * K-10 was that parent ids arrived as a raw byte from user space and were
+     * stored without being checked, so an entry could be created under a parent
+     * that did not exist - and the parent walk in check_vfs_access() then spun
+     * forever. That register is no longer consulted: the parent comes from the
+     * process's working directory. The bug class is gone rather than guarded, so
+     * what these assert now is that a garbage value in the old argument slot has
+     * no effect at all, rather than being rejected.
+     *
+     * 250 is far above anything a normal boot allocates, so if it were still
+     * being honoured the entry would land somewhere unreachable.
      */
-    KT_ASSERT(syscall(SYSCALL_MKDIR, (int)"orphan", 250, 0) < 0,
-              "[VFS] mkdir() rejects a parent id that names no directory");
-    KT_ASSERT(syscall(SYSCALL_CREATE_FILE, (int)"orphanfile", (int)"x", 250) < 0,
-              "[VFS] create_file() rejects a parent id that names no directory");
+    KT_ASSERT(syscall(SYSCALL_MKDIR, (int)"ktestdir2", 250, 0) == E_OK,
+              "[VFS] mkdir() ignores the obsolete parent-id argument");
+    KT_ASSERT(syscall(SYSCALL_GET_DIR_ID, (int)"/ktestdir2", 0, 0) > 0,
+              "[STRICT] [VFS] the entry landed in the working directory, not under the bogus id");
+    KT_ASSERT(syscall(SYSCALL_CREATE_FILE, (int)"ktestfile", (int)"x", 250) == E_OK,
+              "[VFS] create_file() ignores the obsolete parent-id argument");
 
     /* ------------------------------------------------------------------
      * 6. DevFS.
@@ -300,6 +308,76 @@ void main(void) {
         if (rd_probe.canary[i] != 0x7E) canary_intact = 0;
     }
     KT_ASSERT(canary_intact, "[VFS] readdir() did not write past the caller's buffer");
+
+    /*
+     * Working directory, from Ring 3.
+     *
+     * This is the only place the round trip means anything: the value lives in
+     * the PCB, so a kernel-mode test would be inspecting the same struct it just
+     * wrote. Here the payload can only reach it through the syscall boundary,
+     * which is what has to work.
+     */
+    char cwd[128];
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 128, 0) > 0,
+              "[CWD] getcwd() reports a path from Ring 3");
+    KT_ASSERT(cwd[0] == '/', "[CWD] the reported path is absolute");
+
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/etc", 0, 0) == E_OK,
+              "[CWD] chdir() into an existing directory succeeds");
+
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+    int cwd_len = syscall(SYSCALL_GETCWD, (int)cwd, 128, 0);
+    KT_ASSERT(cwd_len == 4 && cwd[0] == '/' && cwd[1] == 'e' && cwd[2] == 't' && cwd[3] == 'c',
+              "[STRICT] [CWD] getcwd() reflects the directory chdir() moved to");
+
+    /*
+     * The assertion the whole change exists for.
+     *
+     * "passwd" carries no directory information at all, and the third syscall
+     * argument is 0. If the kernel were still taking its base directory from the
+     * caller this would look in the root directory and fail; it succeeds only
+     * because the lookup started from the cwd chdir() set.
+     */
+    int rel_fd = syscall(SYSCALL_OPEN, (int)"passwd", 0, 0);
+    KT_ASSERT(rel_fd >= 0,
+              "[STRICT] [CWD] a bare relative name resolves against the working directory");
+    if (rel_fd >= 0) syscall(SYSCALL_CLOSE, rel_fd, 0, 0);
+
+    /* And the same name must not resolve from root, where no such file exists. */
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/", 0, 0) == E_OK,
+              "[CWD] chdir(\"/\") returns to root");
+    KT_ASSERT(syscall(SYSCALL_OPEN, (int)"passwd", 0, 0) < 0,
+              "[STRICT] [CWD] the same relative name fails from a directory that lacks it");
+
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/etc", 0, 0) == E_OK,
+              "[CWD] chdir() back into /etc for the parent-walk check");
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"..", 0, 0) == E_OK,
+              "[CWD] chdir(\"..\") walks back toward root");
+
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 128, 0) == 1 && cwd[0] == '/',
+              "[STRICT] [CWD] \"..\" from /etc lands at root");
+
+    /*
+     * A failed chdir must not move the process. Checked explicitly because the
+     * resolution and the commit are separate steps, and a version that wrote
+     * cwd_id before validating would pass every assertion above.
+     */
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/no_such_directory", 0, 0) < 0,
+              "[CWD] chdir() to a missing directory is refused");
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/etc/passwd", 0, 0) < 0,
+              "[STRICT] [CWD] chdir() to a regular file is refused, not accepted as a directory");
+
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 128, 0) == 1 && cwd[0] == '/',
+              "[STRICT] [CWD] a refused chdir left the process where it was");
+
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 0, 0) < 0,
+              "[CWD] getcwd() rejects a zero-sized buffer");
+    KT_ASSERT(syscall(SYSCALL_GETCWD, ADDR_KERNEL_HEAP, 128, 0) < 0,
+              "[UACCESS] getcwd() rejects a kernel destination buffer");
 
     /*
      * sync() from Ring 3. The block cache is write-back, and the automatic policy

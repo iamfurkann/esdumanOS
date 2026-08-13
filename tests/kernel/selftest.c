@@ -57,6 +57,82 @@ void qemu_shutdown(int is_success) {
     outb(0xf4, is_success ? 0x10 : 0x11);
 }
 
+/*
+ * Collected failures, reprinted as one block at the end of the run.
+ *
+ * A full run emits several hundred lines across both sinks, so a handful of
+ * [FAIL] markers scattered through it are easy to miss and tedious to find. The
+ * text is copied rather than referenced: results coming from Ring 3 arrive in a
+ * stack buffer inside the syscall handler, which is gone by the time the summary
+ * prints.
+ *
+ * Bounded on purpose. Past the cap the count still climbs, and the summary says
+ * how many it could not list - better than growing a buffer inside a kernel that
+ * is already failing.
+ */
+#define KTEST_MAX_LOGGED_FAILURES 40
+#define KTEST_FAILURE_TEXT_MAX    112
+
+static char ktest_failures[KTEST_MAX_LOGGED_FAILURES][KTEST_FAILURE_TEXT_MAX];
+static int ktest_failure_count = 0;
+
+void ktest_record_failure(const char *message, const char *file, int line) {
+    if (ktest_failure_count >= KTEST_MAX_LOGGED_FAILURES) {
+        ktest_failure_count++;   /* still counted, just not stored */
+        return;
+    }
+
+    char *slot = ktest_failures[ktest_failure_count++];
+    uint32_t pos = 0;
+
+    for (uint32_t i = 0; message[i] != '\0' && pos < KTEST_FAILURE_TEXT_MAX - 1; i++) {
+        slot[pos++] = message[i];
+    }
+
+    if (file) {
+        const char *sep = " (";
+        for (uint32_t i = 0; sep[i] != '\0' && pos < KTEST_FAILURE_TEXT_MAX - 1; i++) slot[pos++] = sep[i];
+        for (uint32_t i = 0; file[i] != '\0' && pos < KTEST_FAILURE_TEXT_MAX - 1; i++) slot[pos++] = file[i];
+        if (pos < KTEST_FAILURE_TEXT_MAX - 1) slot[pos++] = ':';
+
+        char line_str[16];
+        ktest_itoa(line, line_str);
+        for (uint32_t i = 0; line_str[i] != '\0' && pos < KTEST_FAILURE_TEXT_MAX - 1; i++) slot[pos++] = line_str[i];
+        if (pos < KTEST_FAILURE_TEXT_MAX - 1) slot[pos++] = ')';
+    } else {
+        const char *tag = " (ring3)";
+        for (uint32_t i = 0; tag[i] != '\0' && pos < KTEST_FAILURE_TEXT_MAX - 1; i++) slot[pos++] = tag[i];
+    }
+
+    slot[pos] = '\0';
+}
+
+/**
+ * @brief Reprints every recorded failure as one block.
+ */
+static void ktest_print_failures(void) {
+    if (ktest_failure_count == 0) return;
+
+    int listed = ktest_failure_count;
+    if (listed > KTEST_MAX_LOGGED_FAILURES) listed = KTEST_MAX_LOGGED_FAILURES;
+
+    printk("\n---------------- FAILURES ----------------\n");
+    serial_print("\n---------------- FAILURES ----------------\n");
+
+    for (int i = 0; i < listed; i++) {
+        char num[16]; ktest_itoa(i + 1, num);
+        printk("  %s. %s\n", num, ktest_failures[i]);
+        serial_print("  "); serial_print(num); serial_print(". ");
+        serial_print(ktest_failures[i]); serial_print("\n");
+    }
+
+    if (ktest_failure_count > KTEST_MAX_LOGGED_FAILURES) {
+        char extra[16]; ktest_itoa(ktest_failure_count - KTEST_MAX_LOGGED_FAILURES, extra);
+        printk("  ... and %s more not listed\n", extra);
+        serial_print("  ... and "); serial_print(extra); serial_print(" more not listed\n");
+    }
+}
+
 /**
  * @brief Prints the aggregated pass/fail tally to both the VGA console and COM1.
  *
@@ -65,6 +141,8 @@ void qemu_shutdown(int is_success) {
 static void ktest_print_summary(void) {
     char pass_str[16]; ktest_itoa(tests_passed, pass_str);
     char fail_str[16]; ktest_itoa(tests_failed, fail_str);
+
+    ktest_print_failures();
 
     printk("\n======================================================\n");
     printk("RESULT: %s PASSED | %s FAILED\n", pass_str, fail_str);
@@ -143,6 +221,7 @@ void sys_ktest_report(arch_regs_t *regs) {
     if (kind == KT_REPORT_FAIL) {
         printk("  [FAIL] %s\n", msg);
         serial_print("  [FAIL] "); serial_print(msg); serial_print("\n");
+        ktest_record_failure(msg, 0, 0);
         tests_failed++;
     } else {
         printk("  [PASS] %s\n", msg);

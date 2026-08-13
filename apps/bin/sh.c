@@ -187,39 +187,34 @@ char get_keyboard_char(void) { char c = 0; syscall(SYSCALL_READ, 0, (int)&c, 1);
  * @brief Creates a new file via system call.
  * @param name File name.
  * @param content File content.
- * @param parent_id ID of the parent directory.
  * @return System call status.
  */
-int sys_create_file(const char *name, const char *content, int parent_id) { return syscall(8, (int)name, (int)content, parent_id); }
+int sys_create_file(const char *name, const char *content) { return syscall(8, (int)name, (int)content, 0); }
 /**
  * @brief Deletes a file via system call.
  * @param name File name.
- * @param parent_id ID of the parent directory.
  * @return System call status.
  */
-int sys_delete_file(const char *name, int parent_id) { return syscall(22, (int)name, parent_id, 0); }
+int sys_delete_file(const char *name) { return syscall(22, (int)name, 0, 0); }
 /**
  * @brief Reads a file content via system call.
  * @param name File name.
- * @param parent_id ID of the parent directory.
  * @return System call status.
  */
-int sys_cat_file(const char *name, int parent_id) { return syscall(11, (int)name, parent_id, 0); }
+int sys_cat_file(const char *name) { return syscall(11, (int)name, 0, 0); }
 /**
  * @brief Reads raw file content via system call.
  * @param name File name.
- * @param parent_id ID of the parent directory.
  * @return System call status.
  */
-int sys_cat_raw_file(const char *name, int parent_id) { return syscall(34, (int)name, parent_id, 0); } // 34 = SYSCALL_CAT_RAW 
+int sys_cat_raw_file(const char *name) { return syscall(34, (int)name, 0, 0); } // 34 = SYSCALL_CAT_RAW 
 /**
  * @brief Renames a file via system call.
  * @param old_name Current name.
  * @param new_name New name.
- * @param parent_id ID of the parent directory.
  * @return System call status.
  */
-int sys_rename_file(const char *old_name, const char *new_name, int parent_id) { return syscall(23, (int)old_name, (int)new_name, parent_id); }
+int sys_rename_file(const char *old_name, const char *new_name) { return syscall(23, (int)old_name, (int)new_name, 0); }
 /**
  * @brief Receives an IPC message.
  * @param sender Pointer to store sender ID.
@@ -263,10 +258,9 @@ int sys_setuid(int uid, const char *password) { return syscall(SYSCALL_SETUID, u
 /**
  * @brief Creates a directory.
  * @param name Directory name.
- * @param parent_id ID of the parent directory.
  * @return System call status.
  */
-int sys_mkdir(const char *name, int parent_id) { return syscall(26, (int)name, parent_id, 0); }
+int sys_mkdir(const char *name) { return syscall(26, (int)name, 0, 0); }
 /**
  * @brief Lists directory contents.
  * @param parent_id ID of the directory to list.
@@ -275,10 +269,9 @@ void sys_ls_dir(int parent_id) { syscall(28, parent_id, 0, 0); }
 /**
  * @brief Gets the directory ID.
  * @param name Directory name.
- * @param parent_id ID of the parent directory.
  * @return Directory ID.
  */
-int sys_get_dir_id(const char *name, int parent_id) { return syscall(29, (int)name, parent_id, 0); }
+int sys_get_dir_id(const char *name) { return syscall(29, (int)name, 0, 0); }
 /**
  * @brief Reads directory entries into buffer.
  * @param dir_id Directory ID to read.
@@ -313,16 +306,25 @@ void sys_dmesg(void) { syscall(SYSCALL_DMESG, 0, 0, 0); }
 /**
  * @brief Opens a file.
  * @param name File name.
- * @param parent_id ID of the parent directory.
  * @return File descriptor.
  */
-int sys_open(const char *name, int parent_id) { return syscall(SYSCALL_OPEN, (int)name, parent_id, 0); }
+int sys_open(const char *name) { return syscall(SYSCALL_OPEN, (int)name, 0, 0); }
+/**
+ * @brief Changes the working directory. The kernel resolves the path.
+ * @param path Absolute or relative path.
+ * @return E_OK, or a negative errno.
+ */
+int sys_chdir(const char *path) { return syscall(SYSCALL_CHDIR, (int)path, 0, 0); }
+/**
+ * @brief Reads the working directory into buf.
+ * @return Path length on success, or a negative errno.
+ */
+int sys_getcwd(char *buf, int size) { return syscall(SYSCALL_GETCWD, (int)buf, size, 0); }
 /* --- 4. ENVIRONMENT VARIABLES (ENV) --- */
 char env_keys[20][32];
 char env_vals[20][64];
 int env_count = 0;
 int last_exit_status = 0; 
-int current_dir_id = 0; 
 char current_path[64] = "/";
 int current_uid = -1;
 char current_username[32];
@@ -428,10 +430,9 @@ void show_help(void) {
  * @brief Built-in cat command to display file contents.
  * 
  * @param args Array of command-line arguments.
- * @param current_dir_id ID of the current directory.
  * @return Exit status of the command.
  */
-int builtin_cat(char **args, int current_dir_id) {
+int builtin_cat(char **args) {
     int flag_n = 0, flag_b = 0, flag_E = 0, flag_s = 0, flag_T = 0;
     int file_args_start = 1;
     
@@ -461,7 +462,7 @@ int builtin_cat(char **args, int current_dir_id) {
     }
 
     for (int i = file_args_start; args[i] != 0; i++) {
-        int fd = sys_open(args[i], current_dir_id); 
+        int fd = sys_open(args[i]); 
         if (fd < 0) { 
             printk("cat: "); printk(args[i]); printk(": No such file or directory.\n"); 
             continue; 
@@ -552,7 +553,7 @@ void execute_command(char **args, char *redirect_file) {
     if (!args[0]) return;
 
     if (ft_strcmp(args[0], "cat") == 0) {
-        last_exit_status = builtin_cat(args, current_dir_id);
+        last_exit_status = builtin_cat(args);
     }
     else if (ft_strcmp(args[0], "pwd") == 0) { printk(current_path); printk("\n"); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "env") == 0) {
@@ -564,9 +565,9 @@ void execute_command(char **args, char *redirect_file) {
         else { printk("Error. Example: export LANG EN\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "help") == 0) { show_help(); last_exit_status = 0; }
-    else if (ft_strcmp(args[0], "ls") == 0) { sys_ls_dir(current_dir_id); last_exit_status = 0; }
+    else if (ft_strcmp(args[0], "ls") == 0) { sys_ls_dir(sys_get_dir_id(".")); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "mkdir") == 0) {
-        if (args[1]) sys_mkdir(args[1], current_dir_id); else printk("Usage: mkdir <directory>\n");
+        if (args[1]) sys_mkdir(args[1]); else printk("Usage: mkdir <directory>\n");
     }
     else if (ft_strcmp(args[0], "cd") == 0) {
         static char old_path[256] = {0};
@@ -588,83 +589,51 @@ void execute_command(char **args, char *redirect_file) {
             printk(target); printk("\n");
         }
 
-        // 1. Construct raw absolute path
-        char raw_path[512];
-        if (target[0] == '/') {
-            ft_strcpy(raw_path, target);
-        } else {
-            ft_strcpy(raw_path, current_path);
-            if (ft_strcmp(current_path, "/") != 0) {
-                ft_strcpy(&raw_path[ft_strlen(raw_path)], "/");
-            }
-            ft_strcpy(&raw_path[ft_strlen(raw_path)], target);
-        }
+        /*
+         * The kernel owns the working directory now, so it also owns resolving
+         * the path. This used to build an absolute path by hand and then
+         * canonicalize it here - splitting on '/', pushing and popping tokens to
+         * fold "." and ".." - all of which vfs_resolve_path() already does, and
+         * did even then. The shell's copy could disagree with the kernel's view;
+         * now there is only one.
+         */
+        int rc = sys_chdir(target);
+        if (rc == E_OK) {
+            ft_strcpy(old_path, current_path);   /* OLDPWD, for "cd -" */
 
-        // 2. Canonicalize the raw path (resolve . and .. and //)
-        char tokens[32][64];
-        int token_count = 0;
-        
-        int i = 0;
-        while (raw_path[i]) {
-            if (raw_path[i] == '/') { i++; continue; }
-            int j = 0;
-            while (raw_path[i] && raw_path[i] != '/') {
-                if (j < 63) tokens[token_count][j++] = raw_path[i];
-                i++;
-            }
-            tokens[token_count][j] = '\0';
-            
-            if (ft_strcmp(tokens[token_count], ".") == 0) {
-                // skip .
-            } else if (ft_strcmp(tokens[token_count], "..") == 0) {
-                if (token_count > 0) token_count--; // pop
-            } else {
-                token_count++; // push
-            }
-        }
+            /* Re-read rather than predict: the prompt should show where the
+             * kernel actually put us, not where we asked to go. */
+            char resolved[64];
+            int len = sys_getcwd(resolved, sizeof(resolved));
+            if (len > 0) ft_strcpy(current_path, resolved);
 
-        // Reconstruct canonical path
-        char canon_path[256];
-        canon_path[0] = '/';
-        canon_path[1] = '\0';
-        for (int k = 0; k < token_count; k++) {
-            if (k > 0 || canon_path[1] != '\0') {
-                ft_strcpy(&canon_path[ft_strlen(canon_path)], "/");
-            }
-            ft_strcpy(&canon_path[ft_strlen(canon_path)], tokens[k]);
-        }
-
-        // 3. Try to change directory in kernel using the canonical path
-        int new_id = sys_get_dir_id(canon_path, 0); // use absolute path from root
-        if (new_id >= 0) { 
-            ft_strcpy(old_path, current_path); // Save current to OLDPWD
-            current_dir_id = new_id;
-            ft_strcpy(current_path, canon_path);
             last_exit_status = 0;
-        } else { 
-            if (new_id == E_ACCES) {
-                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": Permission denied\n"); 
+        } else {
+            if (rc == E_ACCES) {
+                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": Permission denied\n");
+            } else if (rc == E_NOTDIR) {
+                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": Not a directory\n");
             } else {
-                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": No such file or directory\n"); 
+                printk("sh: cd: "); printk(args[1] ? args[1] : "~"); printk(": No such file or directory\n");
             }
-            last_exit_status = 1; 
+            last_exit_status = 1;
         }
     }
     else if (ft_strcmp(args[0], "write") == 0) {
         if (args[1] && args[2]) {
             char *content = args[2];
             for(int i = 2; args[i] != 0; i++) { if (args[i+1] != 0) args[i][ft_strlen(args[i])] = ' '; }
-            int res = sys_create_file(args[1], content, current_dir_id);
+            int res = sys_create_file(args[1], content);
             if (res == E_OK) printk("File written successfully!\n");
             else if (res == E_ACCES) printk("write: Permission denied\n");
             else { printk("write: Failed to create file\n"); }
         } else { printk("Usage: write <file> <content>\n"); }
     }
     else if (ft_strcmp(args[0], "rm") == 0) {
-        if (args[1]) sys_delete_file(args[1], current_dir_id); else printk("Usage: rm <file>\n");
+        if (args[1]) sys_delete_file(args[1]); else printk("Usage: rm <file>\n");
     }
     else if (ft_strcmp(args[0], "mv") == 0) {
-        if (args[1] && args[2]) sys_rename_file(args[1], args[2], current_dir_id); else printk("Usage: mv <old> <new>\n");
+        if (args[1] && args[2]) sys_rename_file(args[1], args[2]); else printk("Usage: mv <old> <new>\n");
     }
     else if (ft_strcmp(args[0], "layout") == 0) {
         if (args[1] && ft_strcmp(args[1], "tr") == 0) syscall(12, 1, 0, 0);
@@ -728,10 +697,10 @@ void execute_command(char **args, char *redirect_file) {
     else if (ft_strcmp(args[0], "panic") == 0) { syscall(19, 0, 0, 0); }
     else if (ft_strcmp(args[0], "reboot") == 0) { syscall(20, 0, 0, 0); }
     else if (ft_strcmp(args[0], "halt") == 0) { syscall(21, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "exec") == 0) { if (args[1]) syscall(5, (int)args[1], current_dir_id, 0); }
+    else if (ft_strcmp(args[0], "exec") == 0) { if (args[1]) syscall(5, (int)args[1], 0, 0); }
     else if (ft_strcmp(args[0], "exit") == 0) { printk("exit\n"); syscall(1, 0, 0, 0); while(1); }
     else if (ft_strcmp(args[0], "cat_raw") == 0) {
-        if (args[1]) sys_cat_raw_file(args[1], current_dir_id); else printk("Usage: cat_raw <file>\n");
+        if (args[1]) sys_cat_raw_file(args[1]); else printk("Usage: cat_raw <file>\n");
     }
     else if (ft_strcmp(args[0], "kill") == 0) {
         if (args[1] && args[2]) sys_kill(hex_to_int(args[1]), hex_to_int(args[2]));
@@ -772,7 +741,7 @@ void execute_command(char **args, char *redirect_file) {
             ft_strcpy(&arg_str[ft_strlen(arg_str)], args[i]);
         }
 
-        int exec_res = syscall(5, (int)exec_path, current_dir_id, (int)arg_str); // SYSCALL_EXEC
+        int exec_res = syscall(5, (int)exec_path, 0, (int)arg_str); // SYSCALL_EXEC
         if (exec_res < 0) {
             printk("sh: command not found: "); printk(args[0]); printk("\n");
             last_exit_status = 127;
@@ -834,7 +803,7 @@ static void handle_tab_completion(char *buf, int *idx) {
             }
         }
         // Also match /bin/ executables
-        int bin_id = sys_get_dir_id("/bin", 0);
+        int bin_id = sys_get_dir_id("/bin");
         if (bin_id >= 0) {
             char dir_buf[2048];
             int bytes = sys_readdir(bin_id, dir_buf, sizeof(dir_buf));
@@ -867,7 +836,7 @@ static void handle_tab_completion(char *buf, int *idx) {
     } else {
         // File/directory completion in current directory
         // Check if prefix contains a path
-        int dir_id = current_dir_id;
+        int dir_id = sys_get_dir_id(".");
         char name_prefix[128];
         ft_strcpy(name_prefix, prefix);
         
@@ -882,7 +851,7 @@ static void handle_tab_completion(char *buf, int *idx) {
             for (int i = 0; i <= last_slash; i++) dir_path[i] = name_prefix[i];
             dir_path[last_slash + 1] = '\0';
             
-            int new_dir = sys_get_dir_id(dir_path, (dir_path[0] == '/') ? 0 : current_dir_id);
+            int new_dir = sys_get_dir_id(dir_path);
             if (new_dir >= 0) {
                 dir_id = new_dir;
                 // Shift name_prefix to after the last slash
@@ -1007,9 +976,14 @@ void main(void) {
         set_env("HOME", current_path);
     }
     
-    current_dir_id = syscall(SYSCALL_GET_DIR_ID, (int)current_path, 0, 0);
-    if (current_dir_id == -1) {
-        current_dir_id = 0;
+    /*
+     * Move the process itself into the home directory rather than just recording
+     * a string. Everything the shell runs from here - including the /bin tools,
+     * which never took a directory argument of their own - resolves relative
+     * paths against this.
+     */
+    if (sys_chdir(current_path) != E_OK) {
+        sys_chdir("/");
         ft_strcpy(current_path, "/");
     }
 

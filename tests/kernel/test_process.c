@@ -52,6 +52,46 @@ void run_process_tests(void) {
         ptask->state = TASK_EMPTY;
     }
 
+    /* ------------------------------------------------------------------
+     * Working directory inheritance.
+     *
+     * cwd_id lives in the PCB rather than in user space, so relative paths are
+     * resolved against a directory the kernel chose. That only holds if a new
+     * task actually picks the value up from its creator - otherwise every
+     * exec'd program would silently land back at root, and "cd somewhere &&
+     * run something" would not work.
+     *
+     * Checked against the creating task rather than a constant, so the
+     * assertion still means something if the default ever changes.
+     * ------------------------------------------------------------------ */
+    uint8_t saved_cwd = current_task->cwd_id;
+
+    current_task->cwd_id = 7;
+    int child_pid = create_process(0x1000, 0x2000, 0x3000);
+    process_t *child = 0;
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->pid == child_pid) { child = p; break; }
+    }
+
+    KTEST_ASSERT(child != 0, "[CWD] child task created for the inheritance check");
+    KTEST_ASSERT(child != 0 && child->cwd_id == 7,
+                 "[STRICT] [CWD] a new task inherits the creator's working directory");
+
+    /* A second child from a root-standing parent must land at root, not keep 7. */
+    current_task->cwd_id = 0;
+    int root_child_pid = create_process(0x1000, 0x2000, 0x3000);
+    process_t *root_child = 0;
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->pid == root_child_pid) { root_child = p; break; }
+    }
+
+    KTEST_ASSERT(root_child != 0 && root_child->cwd_id == 0,
+                 "[STRICT] [CWD] inheritance tracks the creator, it is not sticky");
+
+    if (child) child->state = TASK_EMPTY;
+    if (root_child) root_child->state = TASK_EMPTY;
+    current_task->cwd_id = saved_cwd;
+
     asm volatile("sti");
 
     /* ------------------------------------------------------------------

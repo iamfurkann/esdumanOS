@@ -109,13 +109,17 @@
 #define SYSCALL_READDIR         44
 /** @brief Write every dirty block-cache sector out to disk */
 #define SYSCALL_SYNC            45
+/** @brief Change the calling process's working directory */
+#define SYSCALL_CHDIR           46
+/** @brief Write the calling process's working directory into a user buffer */
+#define SYSCALL_GETCWD          47
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)
 //
 // Present in every build so user-space test payloads compile against a single
 // header, but only serviced when the kernel was linked with the test modules
-// AND booted with kernel_pass=selftest. Production kernels answer -ENOSYS.
+// AND booted with kernel_pass=selftest. Production kernels answer-ENOSYS.
 // ==========================================================
 /** @brief Report one Ring 3 self-test result to the kernel test framework */
 #define SYSCALL_KTEST_REPORT    200

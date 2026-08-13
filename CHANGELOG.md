@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-alpha] - 2026-08-13
+
+Moves the working directory into the kernel. Until now the shell kept it in a userspace
+global and passed a directory id into every syscall that touched a path, so a process
+chose where its own relative lookups started — and every `/bin` tool passed a hardcoded
+0, which meant they all operated on the root directory regardless of where the shell had
+`cd`'d to. `cd /home && touch foo` created `/foo`.
+
+Test coverage: 321 → 341 assertions.
+
+### Added
+
+- **`chdir` (46) and `getcwd` (47).** `chdir` validates that the target is a directory
+  the caller may read and only then commits, so a failed call leaves the process where
+  it was. `getcwd` renders the path by walking the parent chain, bounded so a corrupted
+  `parent_id` reports `E_NAMETOOLONG` instead of spinning inside a syscall.
+- **`cwd_id` in the PCB**, inherited from the creating process alongside `uid`. `fork()`
+  will rely on the same inheritance when it lands.
+- Failures are now collected and reprinted as a block just before the tally, with
+  `file:line` for kernel-mode assertions and a `ring3` tag for results reported across
+  the syscall boundary. A full run prints several hundred lines and hunting the `[FAIL]`
+  markers out of that scrollback was its own chore.
+
+### Changed
+
+- **`open`, `create_file`, `rm`, `mv`, `mkdir`, `cat`, `cat_raw`, `get_dir_id` and
+  `exec` resolve relative paths against the PCB's working directory.** They no longer
+  read a base directory from a register the caller filled in. This is an ABI change: the
+  argument that used to carry the directory id is ignored.
+- The `/bin` tools are fixed as a side effect, with no changes of their own — they were
+  already passing 0 in that slot.
+- The shell drops its `current_dir_id` global and roughly 45 lines of hand-rolled path
+  canonicalisation — splitting on `/`, pushing and popping tokens to fold `.` and `..` —
+  all of which `vfs_resolve_path()` already did. The prompt is refreshed from `getcwd()`
+  rather than predicted, so the shell's idea of where it is cannot drift from the
+  kernel's.
+- `mv` across directories is now refused explicitly. `fs_rename()` renames within one
+  directory and has no notion of moving between parents; ignoring the destination
+  directory and renaming in place would have been the silent alternative.
+- `init` execs an absolute `/bin/sh`. A bare name would resolve from init's own working
+  directory — root — and never find the shell.
+
+### Fixed
+
+- **A VFS test had been asserting nothing since the test-mode pointer relaxation was
+  removed.** `test_vfs_boundary_and_depth` passed kernel addresses to syscalls: a stack
+  array for the directory name, string literals for the out-of-bounds cases.
+  `validate_string_pointer` rejects those, so every `sys_mkdir` returned `E_FAULT`, the
+  nesting loop broke on its first iteration, and the two assertions that followed passed
+  vacuously — a backtrack starting at root has nothing to walk.
+- Fixing that exposed a second bug the empty loop had been hiding: the parent walk
+  scanned only the first 32 `dir_table` entries, with a comment claiming
+  `MAX_FILES_IN_DIR` was 32 when it is 256, so it missed every directory a boot places
+  past that index.
+- Removed a djb2 checksum in `fs_create_encrypted()` that was computed over the plaintext
+  on every encrypted write and never read. The HMAC-SHA256 tag is what detects tampering.
+
+### Security
+
+- User space can no longer nominate the directory a relative lookup starts from. The
+  K-10 hardening added validation of the caller-supplied `parent_id`; this removes the
+  input instead. The two regression tests that asserted a bogus id was rejected now
+  assert that it has no effect, since the rejection they checked for can no longer occur.
+
 ## [0.2.0-alpha] - 2026-08-12
 
 A security and correctness release. It is the result of a full read-only audit of the

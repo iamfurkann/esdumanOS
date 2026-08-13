@@ -110,5 +110,9 @@ void sys_halt(arch_regs_t *regs);
 void sys_dmesg(arch_regs_t *regs);
 /** @brief Syscall handler for flushing the block cache to disk */
 void sys_sync(arch_regs_t *regs);
+/** @brief Syscall handler for changing the working directory */
+void sys_chdir(arch_regs_t *regs);
+/** @brief Syscall handler for reading the working directory */
+void sys_getcwd(arch_regs_t *regs);
 
 #endif // SYSCALLS_INTERNAL_H

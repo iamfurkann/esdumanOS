@@ -42,9 +42,17 @@ void run_passwd_tests(void) {
     char *u_hacked = (char *)0x502200;
     char *u_content = (char *)0x502300;
 
-    ft_strcpy(u_etc, "etc");
-    ft_strcpy(u_passwd, "passwd");
-    ft_strcpy(u_hacked, "passwd_hacked");
+    /*
+     * Full paths, not bare names with a directory id alongside. The VFS syscalls
+     * resolve relative names against the calling process's working directory and
+     * no longer accept a parent id, so "passwd" would name /passwd here - and
+     * these assertions would then be checking that a normal user cannot write a
+     * file in root, which is true for the wrong reason and tests nothing about
+     * /etc/passwd.
+     */
+    ft_strcpy(u_etc, "/etc");
+    ft_strcpy(u_passwd, "/etc/passwd");
+    ft_strcpy(u_hacked, "/etc/passwd_hacked");
     ft_strcpy(u_content, "root:x:0:0:root:/root:/bin/sh");
 
     // =========================================================================

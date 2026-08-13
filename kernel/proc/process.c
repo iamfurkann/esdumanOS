@@ -98,12 +98,20 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     }
     new_task->pid = next_pid++;
 
+    /*
+     * cwd_id is inherited alongside uid. The very first task has no creator to
+     * inherit from and starts at root; every later task starts where its creator
+     * was standing, which is what makes "cd somewhere && run something" behave the
+     * way a shell user expects.
+     */
     if (current_task == 0) {
         new_task->parent_pid = -1;
         new_task->uid = 0;
+        new_task->cwd_id = 0;
     } else {
         new_task->parent_pid = current_task->pid;
         new_task->uid = current_task->uid;
+        new_task->cwd_id = current_task->cwd_id;
     }
 
     klog_int(LOG_LEVEL_DEBUG, "PROCESS", "New process created", new_task->pid);

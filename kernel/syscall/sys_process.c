@@ -41,7 +41,12 @@ void sys_exec(arch_regs_t *regs) {
         regs->eax = E_FAULT; 
         return; 
     }
-    uint8_t calling_dir_id = (uint8_t)regs->ecx;
+    /*
+     * The base directory for a relative program path is the caller's cwd, taken
+     * from the PCB. It used to come from regs->ecx, which meant the caller chose
+     * where its own lookup started.
+     */
+    uint8_t calling_dir_id = current_task ? current_task->cwd_id : 0;
 
     char temp_args[128];
     for (int k = 0; k < 128; k++) temp_args[k] = '\0';

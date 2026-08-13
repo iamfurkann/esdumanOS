@@ -734,10 +734,25 @@ void execute_command(char **args, char *redirect_file) {
         char arg_str[256];
         for(int k=0; k<256; k++) arg_str[k] = '\0';
         
-        ft_strcpy(arg_str, current_path); // Pass CWD as first implicit argument
-
+        /*
+         * Only the user's arguments.
+         *
+         * The current directory used to be pasted on the front as an implicit
+         * first token, from when the kernel had no idea where a process was and
+         * every tool had to be told. It was joined with a space rather than a
+         * '/', so "touch notes.txt" in /home produced the argument string
+         * "/home notes.txt" - and touch, which treats the whole string as one
+         * filename, created a file literally called that. Every tool except
+         * echo, which alone skipped the leading token, mis-parsed its arguments
+         * because of it.
+         *
+         * The kernel tracks the working directory now, so there is nothing to
+         * pass: a bare "notes.txt" resolves where the process actually stands.
+         */
         for(int i = 1; args[i] != 0; i++) {
-            ft_strcpy(&arg_str[ft_strlen(arg_str)], " ");
+            if (arg_str[0] != '\0') {
+                ft_strcpy(&arg_str[ft_strlen(arg_str)], " ");
+            }
             ft_strcpy(&arg_str[ft_strlen(arg_str)], args[i]);
         }
 

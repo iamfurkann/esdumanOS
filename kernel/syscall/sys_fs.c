@@ -31,6 +31,22 @@
  */
 #define READDIR_STAGE_MAX 4096
 
+/**
+ * @brief Bounds on sys_getcwd()'s parent-chain walk.
+ *
+ * DEPTH exists because the walk follows parent_id links: a table whose links
+ * formed a cycle would otherwise spin forever inside a syscall, with interrupts
+ * enabled but the task never returning. Bounding it turns a corrupted table into
+ * E_NAMETOOLONG instead of a hang - the same reasoning as the depth limit added
+ * to check_vfs_access().
+ *
+ * PATH is what the rendered path is built into, on the kernel stack. MAX_FILENAME
+ * is 256, so a deeply nested path with long names can exceed this; that case
+ * reports E_NAMETOOLONG rather than truncating to something that looks valid.
+ */
+#define GETCWD_MAX_DEPTH 16
+#define GETCWD_MAX_PATH  512
+
 static int copy_user_string(char *destination, const char *source, size_t max_len) {
     if (!validate_string_pointer(source, max_len)) return 0;
     return copy_string_from_user(destination, source, max_len) == E_OK;
@@ -414,41 +430,142 @@ void sys_ls_dir(arch_regs_t *regs) {
 }
 
 /**
+ * @brief Resolves a path to a directory entry id, relative to a base directory.
+ *
+ * Shared by sys_get_dir_id() and sys_chdir(), which need exactly the same
+ * resolution - the "." and ".." cases and the access check included.
+ *
+ * The base is a parameter rather than always the PCB's cwd because the two
+ * callers disagree for now: chdir() is new and resolves against the process's
+ * working directory, while get_dir_id() still takes its base from the caller
+ * until the rest of the syscalls make the same move. Once they do, this
+ * parameter goes away and every path resolves against the PCB.
+ *
+ * @param path User-supplied path, already copied into kernel memory.
+ * @param base Directory the resolution starts from for relative paths.
+ * @return Directory entry id on success, or a negative errno.
+ */
+static int resolve_dir_from(const char *path, uint8_t base) {
+    char basename[MAX_FILENAME];
+
+    int parent = vfs_resolve_path(path, base, basename);
+    if (parent < 0) return E_NOENT;
+
+    int target;
+
+    if (basename[0] == '\0' || (basename[0] == '.' && basename[1] == '\0')) {
+        target = parent;
+    }
+    else if (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0') {
+        /* Root is its own parent; anything unfound falls back to root. */
+        target = 0;
+        for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
+            if (dir_table[k].entry_id == parent && dir_table[k].file_type == FT_DIR &&
+                dir_table[k].is_used == 1) {
+                target = dir_table[k].parent_id;
+                break;
+            }
+        }
+    }
+    else {
+        int idx = fs_get_entry_idx(basename, parent);
+        if (idx == -1) return E_NOENT;
+        if (dir_table[idx].file_type != FT_DIR) return E_NOTDIR;
+        target = dir_table[idx].entry_id;
+    }
+
+    if (!check_vfs_access((uint8_t)target, 0)) return E_ACCES;
+    return target;
+}
+
+/**
  * @brief Function sys_get_dir_id
  */
 void sys_get_dir_id(arch_regs_t *regs) {
     char path[MAX_FILENAME];
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
-    
-    char basename[MAX_FILENAME];
-    int parent_dir_id = vfs_resolve_path(path, (uint8_t)regs->ecx, basename);
-    if (parent_dir_id < 0) { regs->eax = E_NOENT; return; }
 
-    if (basename[0] == '\0' || (basename[0] == '.' && basename[1] == '\0')) {
-        regs->eax = parent_dir_id; 
-    }
-    else if (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0') {
-        int final_id = 0; 
+    regs->eax = resolve_dir_from(path, (uint8_t)regs->ecx);
+}
+
+/**
+ * @brief Changes the calling process's working directory.
+ *
+ * Refuses anything that is not a directory the caller may read, and only then
+ * commits - so a failed chdir leaves the process exactly where it was rather
+ * than somewhere half-resolved.
+ */
+void sys_chdir(arch_regs_t *regs) {
+    char path[MAX_FILENAME];
+    if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
+    if (current_task == 0) { regs->eax = E_FAULT; return; }
+
+    int target = resolve_dir_from(path, current_task->cwd_id);
+    if (target < 0) { regs->eax = target; return; }
+
+    current_task->cwd_id = (uint8_t)target;
+    regs->eax = E_OK;
+}
+
+/**
+ * @brief Writes the calling process's working directory into a user buffer.
+ *
+ * Walks the parent chain up to root and then renders it forwards. The walk is
+ * bounded rather than trusting the table to be acyclic: a corrupted parent_id
+ * that pointed back into the chain would otherwise hang the kernel inside a
+ * syscall, which is the same failure K-10 fixed in the VFS access check.
+ */
+void sys_getcwd(arch_regs_t *regs) {
+    char *user_buf = (char *)regs->ebx;
+    uint32_t user_size = regs->ecx;
+
+    if (current_task == 0) { regs->eax = E_FAULT; return; }
+    if (user_size == 0) { regs->eax = E_INVAL; return; }
+
+    uint8_t chain[GETCWD_MAX_DEPTH];
+    int depth = 0;
+    uint8_t id = current_task->cwd_id;
+
+    while (id != 0) {
+        if (depth >= GETCWD_MAX_DEPTH) { regs->eax = E_NAMETOOLONG; return; }
+
+        int idx = -1;
         for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
-            if (dir_table[k].entry_id == parent_dir_id && dir_table[k].file_type == 1 && dir_table[k].is_used == 1) {
-                final_id = dir_table[k].parent_id;
+            if (dir_table[k].entry_id == id && dir_table[k].file_type == FT_DIR &&
+                dir_table[k].is_used == 1) {
+                idx = k;
                 break;
             }
         }
-        regs->eax = final_id;
+        if (idx == -1) { regs->eax = E_NOENT; return; }
+
+        chain[depth++] = (uint8_t)idx;
+        id = dir_table[idx].parent_id;
     }
-    else {
-        int idx = fs_get_entry_idx(basename, parent_dir_id);
-        if (idx != -1) {
-            if (dir_table[idx].file_type == 1) regs->eax = dir_table[idx].entry_id;
-            else regs->eax = E_NOTDIR;
-        } else {
-            regs->eax = E_NOENT;
+
+    char path[GETCWD_MAX_PATH];
+    uint32_t pos = 0;
+    path[pos++] = '/';
+
+    /* chain holds cwd-first, so render it in reverse to get root-first. */
+    for (int d = depth - 1; d >= 0; d--) {
+        const char *name = dir_table[chain[d]].filename;
+
+        if (pos > 1) {
+            if (pos + 1 >= sizeof(path)) { regs->eax = E_NAMETOOLONG; return; }
+            path[pos++] = '/';
+        }
+        for (int c = 0; name[c] != '\0'; c++) {
+            if (pos + 1 >= sizeof(path)) { regs->eax = E_NAMETOOLONG; return; }
+            path[pos++] = name[c];
         }
     }
-    if (regs->eax != (uint32_t)E_NOENT && regs->eax != (uint32_t)E_NOTDIR && !check_vfs_access(regs->eax, 0)) {
-        regs->eax = E_ACCES;
-    }
+    path[pos] = '\0';
+
+    if (pos + 1 > user_size) { regs->eax = E_NAMETOOLONG; return; }
+    if (copy_to_user(user_buf, path, pos + 1) != E_OK) { regs->eax = E_FAULT; return; }
+
+    regs->eax = (int)pos;
 }
 
 /**

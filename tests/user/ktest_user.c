@@ -302,6 +302,55 @@ void main(void) {
     KT_ASSERT(canary_intact, "[VFS] readdir() did not write past the caller's buffer");
 
     /*
+     * Working directory, from Ring 3.
+     *
+     * This is the only place the round trip means anything: the value lives in
+     * the PCB, so a kernel-mode test would be inspecting the same struct it just
+     * wrote. Here the payload can only reach it through the syscall boundary,
+     * which is what has to work.
+     */
+    char cwd[128];
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 128, 0) > 0,
+              "[CWD] getcwd() reports a path from Ring 3");
+    KT_ASSERT(cwd[0] == '/', "[CWD] the reported path is absolute");
+
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/etc", 0, 0) == E_OK,
+              "[CWD] chdir() into an existing directory succeeds");
+
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+    int cwd_len = syscall(SYSCALL_GETCWD, (int)cwd, 128, 0);
+    KT_ASSERT(cwd_len == 4 && cwd[0] == '/' && cwd[1] == 'e' && cwd[2] == 't' && cwd[3] == 'c',
+              "[STRICT] [CWD] getcwd() reflects the directory chdir() moved to");
+
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"..", 0, 0) == E_OK,
+              "[CWD] chdir(\"..\") walks back toward root");
+
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 128, 0) == 1 && cwd[0] == '/',
+              "[STRICT] [CWD] \"..\" from /etc lands at root");
+
+    /*
+     * A failed chdir must not move the process. Checked explicitly because the
+     * resolution and the commit are separate steps, and a version that wrote
+     * cwd_id before validating would pass every assertion above.
+     */
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/no_such_directory", 0, 0) < 0,
+              "[CWD] chdir() to a missing directory is refused");
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/etc/passwd", 0, 0) < 0,
+              "[STRICT] [CWD] chdir() to a regular file is refused, not accepted as a directory");
+
+    for (int i = 0; i < 128; i++) cwd[i] = 0;
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 128, 0) == 1 && cwd[0] == '/',
+              "[STRICT] [CWD] a refused chdir left the process where it was");
+
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)cwd, 0, 0) < 0,
+              "[CWD] getcwd() rejects a zero-sized buffer");
+    KT_ASSERT(syscall(SYSCALL_GETCWD, ADDR_KERNEL_HEAP, 128, 0) < 0,
+              "[UACCESS] getcwd() rejects a kernel destination buffer");
+
+    /*
      * sync() from Ring 3. The block cache is write-back, and the automatic policy
      * only bounds the loss window - it does not let a program decide that what it
      * just wrote must be on the disk now. So the syscall has to be reachable

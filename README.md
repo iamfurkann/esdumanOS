@@ -5,11 +5,11 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.2.0--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.3.0--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
-![Status](https://img.shields.io/badge/status-pre--alpha-red)
+![Status](https://img.shields.io/badge/status-alpha-orange)
 [![Website](https://img.shields.io/badge/Website-Live-2ea44f)](https://iamfurkann.github.io/esdumanOS-website/)
 
 *An independent operating system, booting through GRUB via Multiboot,*
@@ -17,7 +17,7 @@
 
 </div>
 
-> **⚠️ Pre-Alpha Notice:** This is an early development release intended for testing and educational purposes only. It is not suitable for production use. Expect bugs, crashes, and incomplete features.
+> **⚠️ Alpha Notice:** This is an early development release intended for testing and educational purposes only. It is not suitable for production use. Expect bugs, crashes, and incomplete features.
 
 ---
 
@@ -54,14 +54,20 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.2.0-alpha
+**Version:** 0.3.0-alpha
 
-esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional, the
-OS boots in QEMU, and — as of this release — the privilege boundary is actually
-tested rather than merely written: the self-test suite hands control to a real Ring 3
-process and asserts from CPL=3, and it also runs under hardware SMEP/SMAP enforcement.
-Before v0.2.0 every automated test ran at CPL=0, which meant process isolation and the
-scheduler were never exercised at all.
+esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
+OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
+written: the self-test suite hands control to a real Ring 3 process and asserts from
+CPL=3, and it also runs under hardware SMEP/SMAP enforcement. Before v0.2.0 every
+automated test ran at CPL=0, so process isolation and the scheduler were never
+exercised at all.
+
+v0.3.0 moves the working directory into the kernel. Until now the shell kept it in a
+userspace global and handed a directory id to every syscall that touched a path, which
+meant a process chose where its own relative lookups started — and every `/bin` tool
+passed a hardcoded 0, so they all operated on the root directory no matter where you
+had `cd`'d to.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -90,7 +96,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 43 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 45 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
 | **Kernel Logging** | 8 KB ring buffer logger (dmesg equivalent) with disk persistence to `/var/log/dmesg.log` |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
@@ -108,6 +114,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Scheduler** | Preemptive, priority-based, with kernel-mode preemption guard |
 | **ELF Loader** | Loads PT_LOAD segments, sets up user stack with guard page, inherits file descriptors |
+| **Working directory** | Per-process, held in the PCB and inherited from the creating process. Relative paths resolve against it; user space can only move it through `chdir()` |
 | **IPC** | Message passing (8-slot mailbox per process), anonymous and named pipes (16 pipes, 4 KB ring buffer each) |
 | **Signals** | Per-process signal handlers (32 slots), kernel timer slots (32) |
 | **FPU** | Lazy FPU state save/restore (FXSAVE/FXRSTOR), per-process 512-byte state |
@@ -174,7 +181,7 @@ anyone curious about kernel internals — not for storing anything you care abou
                           INT 0x80      INT 0x80  INT 0x80  INT 0x80
                                |             |        |         |
     +--------------------------|-------------|--------|---------|-------+
-    |                    System Call Dispatcher (43 syscalls)           |
+    |                    System Call Dispatcher (45 syscalls)           |
     +------------------------------------------------------------------+
     |                                                                   |
     |   +-------------+  +-------------+  +-------------+  +---------+ |
@@ -378,7 +385,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.2.0-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.3.0-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -401,7 +408,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.2.0-alpha.iso \
+    -cdrom esdumanOS-v0.3.0-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -541,7 +548,7 @@ esdumanOS/
 |   |   |-- pipe.c                   Anonymous and named pipes
 |   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   |-- syscall.c                Dispatcher, 43 system calls
+|   |   |-- syscall.c                Dispatcher, 45 system calls
 |   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
 |       |-- security.c               Security levels, master key lifetime
@@ -596,9 +603,9 @@ esdumanOS/
 |       +-- date.c                   Display date and time
 |
 |-- include/                         40 header files
-|   |-- kernel.h                     Master header (version 0.2.0-alpha)
+|   |-- kernel.h                     Master header (version 0.3.0-alpha)
 |   |-- types.h                      Integer type definitions
-|   |-- syscall.h                    43 syscall number definitions
+|   |-- syscall.h                    45 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
 |   |-- fs.h                         VFS structures, file operations
 |   |-- paging.h                     Virtual memory constants
@@ -626,7 +633,7 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 43 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 45 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 ### Process Management
 
@@ -663,6 +670,11 @@ The kernel exposes 43 system calls through `INT 0x80`. The syscall number is pas
 | 34 | `CAT_RAW` | Read raw (unencrypted) file contents |
 | 44 | `READDIR` | Read directory entries into user buffer |
 | 45 | `SYNC` | Write every dirty block-cache sector out to disk |
+| 46 | `CHDIR` | Change the calling process's working directory |
+| 47 | `GETCWD` | Write the working directory into a user buffer |
+
+Relative paths in every one of these resolve against the calling process's working
+directory, which lives in the PCB. No syscall takes a base directory as an argument.
 
 ### IPC and Signals
 

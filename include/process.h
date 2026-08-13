@@ -94,6 +94,21 @@ typedef struct process_s {
     int pid;
     int parent_pid;
     uint32_t uid;
+
+    /*
+     * Current working directory, as a VFS directory entry id (0 is root).
+     *
+     * Lives here rather than in user space because the shell used to keep it in
+     * a global of its own and pass it down to every syscall that touched a path.
+     * That made relative-path resolution something the caller chose, so a process
+     * could name any directory id it liked as the base; with the value in the PCB
+     * the kernel decides, and userspace can only move it through chdir().
+     *
+     * Inherited from the creating process, like uid - see create_process(). fork()
+     * will rely on that same inheritance when it lands.
+     */
+    uint8_t cwd_id;
+
     task_state_t state;
     wait_reason_t wait_reason;
     mutex_t *wait_mutex;

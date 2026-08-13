@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1-alpha] - 2026-08-13
+
+### Fixed
+
+- **`/bin` tools mis-parsed their arguments.** The shell pasted the current directory
+  onto the front of every argument string as an implicit first token, joined with a
+  space rather than a slash. In `/home`, `touch notes.txt` produced the argument string
+  `/home notes.txt`, and `touch` — which treats its whole argument string as one
+  filename — created a file called exactly that. Every tool except `echo` was affected;
+  `echo` alone skipped the leading token, so its skip is removed alongside.
+
+  The mechanism dates from when the kernel had no idea where a process was and each
+  tool had to be told. v0.3.0 moved the working directory into the PCB but left the
+  shell still prepending, so a bare name now resolves correctly on its own.
+
+  Nothing caught this before release: every assertion called the syscalls directly,
+  and the defect was in how arguments were assembled before any syscall ran. There is
+  now an end-to-end test that execs a real tool with a bare filename and checks the
+  file lands in the working directory and not in root.
+
+- **The block cache announced every automatic flush.** Once v0.2.0 gave write-back a
+  five-second deadline, the existing INFO line meant a console message every five
+  seconds for as long as anything was being written. Flushes performed by the policy —
+  the deadline and the high-water mark — now report at DEBUG; an explicit `sync()`,
+  reboot or halt still reports at INFO.
+
 ## [0.3.0-alpha] - 2026-08-13
 
 Moves the working directory into the kernel. Until now the shell kept it in a userspace

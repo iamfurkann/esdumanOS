@@ -36,6 +36,9 @@ static uint32_t bcache_ticks = 0;
 static uint32_t dirty_count = 0;
 static uint32_t oldest_dirty_tick = 0;
 
+/* Defined below; bcache_write_sector() reaches the high-water path before it. */
+static void bcache_flush_reporting(int log_level);
+
 /**
  * @brief Marks a slot dirty and starts the deadline if the cache was clean.
  */
@@ -182,14 +185,23 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
      * comes back through here.
      */
     if (dirty_count >= BCACHE_DIRTY_HIGH_WATER) {
-        bcache_flush();
+        bcache_flush_reporting(LOG_LEVEL_DEBUG);   /* policy, not a request */
     }
 }
 
 /**
- * @brief Flush all dirty cache slots to disk.
+ * @brief Flushes every dirty slot, reporting at the given log level.
+ *
+ * The level is a parameter because the same work means different things
+ * depending on who asked. A flush the write-back policy performed on its own is
+ * routine housekeeping and should not announce itself - once the five-second
+ * deadline existed, an INFO line here meant a message on the console every five
+ * seconds for as long as anything was being written. A flush somebody asked for,
+ * or one taken on the way down, is worth a line.
+ *
+ * @param log_level Level to report the flushed count at; DEBUG is suppressed.
  */
-void bcache_flush(void) {
+static void bcache_flush_reporting(int log_level) {
     int flushed = 0;
     for (int i = 0; i < BCACHE_SIZE; i++) {
         if (cache[i].is_valid && cache[i].is_dirty) {
@@ -199,8 +211,17 @@ void bcache_flush(void) {
         }
     }
     if (flushed > 0) {
-        klog_int(LOG_LEVEL_INFO, "BCACHE", "Dirty caches synchronized to disk (Flush)", flushed);
+        klog_int(log_level, "BCACHE", "Dirty caches synchronized to disk (Flush)", flushed);
     }
+}
+
+/**
+ * @brief Flush all dirty cache slots to disk.
+ *
+ * The explicit path: sync(), reboot and halt. Reports what it wrote.
+ */
+void bcache_flush(void) {
+    bcache_flush_reporting(LOG_LEVEL_INFO);
 }
 
 /**
@@ -219,6 +240,6 @@ void bcache_flush(void) {
  */
 void bcache_flush_if_due(void) {
     if (bcache_flush_is_due()) {
-        bcache_flush();
+        bcache_flush_reporting(LOG_LEVEL_DEBUG);   /* policy, not a request */
     }
 }

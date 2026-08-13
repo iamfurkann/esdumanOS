@@ -380,6 +380,37 @@ void main(void) {
               "[UACCESS] getcwd() rejects a kernel destination buffer");
 
     /*
+     * End to end: exec a real tool with a bare filename and check where the file
+     * lands. This is the path that was broken - the kernel resolved against the
+     * working directory correctly, but the shell was still pasting the current
+     * directory onto the front of the argument string, joined with a space. A
+     * tool that treats its whole argument string as one filename then created
+     * "/home notes.txt" instead of notes.txt inside /home.
+     *
+     * Nothing above catches that: every assertion so far calls the syscalls
+     * directly, and the defect lived in how arguments were assembled before the
+     * syscall was ever reached.
+     *
+     * /tmp because check_vfs_access() allows writes there regardless of uid.
+     */
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/tmp", 0, 0) == E_OK,
+              "[CWD] chdir(/tmp) for the exec argument check");
+
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/touch", 0, (int)"anchor.txt") == E_OK,
+              "[PROC] exec() of a tool with a bare filename argument");
+
+    int made = syscall(SYSCALL_OPEN, (int)"anchor.txt", 0, 0);
+    KT_ASSERT(made >= 0,
+              "[STRICT] [CWD] the tool created its file in the working directory");
+    if (made >= 0) syscall(SYSCALL_CLOSE, made, 0, 0);
+
+    /* And not in root, which is where a mangled argument string would put it. */
+    KT_ASSERT(syscall(SYSCALL_OPEN, (int)"/anchor.txt", 0, 0) < 0,
+              "[STRICT] [CWD] and not in root under a mangled name");
+
+    syscall(SYSCALL_CHDIR, (int)"/", 0, 0);
+
+    /*
      * sync() from Ring 3. The block cache is write-back, and the automatic policy
      * only bounds the loss window - it does not let a program decide that what it
      * just wrote must be on the disk now. So the syscall has to be reachable

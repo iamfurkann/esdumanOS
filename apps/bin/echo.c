@@ -30,10 +30,15 @@ void main(void) {
 
     syscall(42, (int)args_buf, 0, 0); 
     
+    /*
+     * Print the argument string as given. This used to skip the first token,
+     * because the shell prepended the current directory to every argument list -
+     * echo was the one tool that accounted for it. The shell no longer does,
+     * since the kernel tracks the working directory itself, so skipping here
+     * would now swallow the first word the user actually typed.
+     */
     int i = 0;
-    while (args_buf[i] != ' ' && args_buf[i] != '\0') i++; 
-    if (args_buf[i] == ' ') i++;
-    
+
     if (args_buf[i] == '\0') {
         syscall(4, 1, (int)"\n", 1);
     } else {

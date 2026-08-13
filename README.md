@@ -871,7 +871,7 @@ Contributions are welcome. If you are interested in contributing to esdumanOS, p
   ISO mode and is not meant to. Assembly in NASM syntax.
 - **Indentation:** Tabs for indentation, spaces for alignment.
 - **Naming:** `snake_case` for functions and variables. `UPPER_SNAKE_CASE` for macros and constants.
-- **Comments:** Comment non-obvious logic. Existing comments are in Turkish; new contributions may use English.
+- **Comments:** Comment non-obvious logic, and say *why* rather than restating the code. Comments throughout the tree are in English.
 - **Headers:** Include the minimal set of headers required. Avoid pulling in `kernel.h` when a specific subsystem header suffices.
 
 ### Commit Messages

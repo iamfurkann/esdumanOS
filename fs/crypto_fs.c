@@ -103,12 +103,13 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
         return iv_res;
     }
 
-    uint32_t checksum = 5381;
-    for (uint32_t i = 0; i < len; i++) {
-        checksum = ((checksum << 5) + checksum) + data[i];
-    }
-
-    uint32_t *hdr = (uint32_t *)(enc_buffer + 16); 
+    /*
+     * A djb2 checksum used to be computed over the plaintext here and then never
+     * read. The HMAC-SHA256 tag written into the header below is what actually
+     * detects tampering, and unlike a checksum it is keyed - so the weaker
+     * unused one was only costing a pass over the data.
+     */
+    uint32_t *hdr = (uint32_t *)(enc_buffer + 16);
     hdr[0] = 0x53414645; // "SAFE"
     hdr[1] = len;        
     hmac_sha256(key, 32, data, len, (uint8_t *)&hdr[2]);

@@ -91,3 +91,7 @@ src/resources/*_data.c
 # Local editor and agent tooling state. Machine-specific, not project config.
 .claude/
 .VSCodeCounter/
+
+# Build-time host tool. Compiled from tools/encrypt_tool.c on every build; has no
+# extension, so none of the patterns above catch it.
+tools/encrypt_tool

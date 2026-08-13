@@ -91,6 +91,19 @@ static inline void serial_print(const char *str) {
     while (*str) serial_putchar(*str++);
 }
 
+/**
+ * @brief Records one failure so the run can list them all together at the end.
+ *
+ * A full run prints several hundred lines, and hunting the [FAIL] markers out of
+ * that scrollback is its own chore. Every failure is also collected here and
+ * reprinted as a block just before the tally.
+ *
+ * @param message What was asserted.
+ * @param file Source file, or 0 for results reported from Ring 3.
+ * @param line Source line; ignored when file is 0.
+ */
+void ktest_record_failure(const char *message, const char *file, int line);
+
 #define KTEST_ASSERT(condition, message) \
     do { \
         if (condition) { \
@@ -104,6 +117,7 @@ static inline void serial_print(const char *str) {
             serial_print("  [FAIL] "); serial_print(message); \
             serial_print(" ("); serial_print(__FILE__); serial_print(":"); \
             serial_print(line_str); serial_print(")\n"); \
+            ktest_record_failure(message, __FILE__, __LINE__); \
             tests_failed++; \
         } \
     } while(0)
@@ -132,4 +146,5 @@ void run_crypto_tests(void);
 void run_entropy_tests(void);
 void run_bcache_tests(void);
 void run_elf_tests(void);
+
 #endif // KTEST_H

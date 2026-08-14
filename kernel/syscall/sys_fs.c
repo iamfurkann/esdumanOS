@@ -245,26 +245,65 @@ void sys_dup2(arch_regs_t *regs) {
     if (!validate_fd(oldfd) || !validate_fd(newfd)) { regs->eax = E_BADF; return; }
     if (current_task->fd_table[oldfd].type == FD_TYPE_NONE) { regs->eax = E_BADF; return; }
 
+    /* Duplicating a descriptor onto itself must not release and re-take the
+     * same object; with a refcount of 1 the release would free it outright. */
+    if (oldfd == newfd) { regs->eax = newfd; return; }
+
+    /*
+     * Release whatever newfd was pointing at.
+     *
+     * Only the pipe case was handled. An open file overwritten here kept its
+     * vfs_file_t alive with nothing left referring to it - a permanent kernel
+     * heap leak, one allocation per "fd1=open(a); fd2=open(b); dup2(fd1,fd2)".
+     */
     uint8_t old_type = current_task->fd_table[newfd].type;
     if (old_type == FD_TYPE_PIPE) {
         pipe_t *p = (pipe_t *)current_task->fd_table[newfd].ptr;
-        if (p != 0) { 
-            if (current_task->fd_table[newfd].mode == 1) p->write_refs--; 
+        if (p != 0) {
+            if (current_task->fd_table[newfd].mode == 1) p->write_refs--;
             else p->read_refs--;
-            
+
             if (p->read_refs <= 0 && p->write_refs <= 0) {
                 destroy_pipe(p);
             }
+            /* Losing an end is what a blocked peer is waiting to hear. See the
+             * note in sys_close(). */
+            wakeup_tasks(WAIT_IPC);
         }
     }
+    else if (old_type == FD_TYPE_FILE) {
+        vfs_file_t *f = (vfs_file_t *)current_task->fd_table[newfd].ptr;
+        if (f != 0) {
+            f->ref_count--;
+            if (f->ref_count <= 0) kfree(f);
+        }
+    }
+
     current_task->fd_table[newfd] = current_task->fd_table[oldfd];
+
+    /*
+     * Take a reference for the new descriptor.
+     *
+     * Files were copied by value with ref_count untouched, so both descriptors
+     * believed they were the only owner. Closing either one dropped the count to
+     * zero and freed the vfs_file_t while the other fd still pointed at it: a
+     * read through the survivor was a use-after-free on the kernel heap, and
+     * closing it a second free. load_and_exec_elf() gets this right when it
+     * inherits a parent's table (elf.c), so the invariant was understood - it
+     * was only missing here.
+     */
     if (current_task->fd_table[oldfd].type == FD_TYPE_PIPE) {
         pipe_t *p = (pipe_t *)current_task->fd_table[oldfd].ptr;
         if (p != 0) {
-            if (current_task->fd_table[oldfd].mode == 1) p->write_refs++; 
+            if (current_task->fd_table[oldfd].mode == 1) p->write_refs++;
             else p->read_refs++;
         }
     }
+    else if (current_task->fd_table[oldfd].type == FD_TYPE_FILE) {
+        vfs_file_t *f = (vfs_file_t *)current_task->fd_table[oldfd].ptr;
+        if (f != 0) f->ref_count++;
+    }
+
     regs->eax = newfd;
 }
 
@@ -278,12 +317,28 @@ void sys_close(arch_regs_t *regs) {
     
     if (desc->type == FD_TYPE_PIPE && desc->ptr != 0) {
         pipe_t *p = (pipe_t *)desc->ptr;
-        if (desc->mode == 1) p->write_refs--; 
+        if (desc->mode == 1) p->write_refs--;
         else p->read_refs--;
-        
+
         if (p->read_refs <= 0 && p->write_refs <= 0) {
-            destroy_pipe(p); 
+            destroy_pipe(p);
         }
+
+        /*
+         * Wake anyone parked on this pipe.
+         *
+         * wakeup_tasks(WAIT_IPC) was called only from pipe_read() and
+         * pipe_write() - when data moved. Closing an end moves no data but is
+         * exactly the event a blocked peer needs: a reader waiting on an empty
+         * pipe whose last writer goes away is entitled to the EOF that
+         * pipe_read() is already prepared to return, and a writer parked on a
+         * full pipe whose reader disappears needs to stop waiting. Neither ever
+         * woke, so the task stayed TASK_WAITING for the rest of the boot.
+         *
+         * Woken tasks re-run their syscall and re-evaluate, so a spurious wake
+         * costs nothing.
+         */
+        wakeup_tasks(WAIT_IPC);
     }
     if (desc->type == FD_TYPE_FILE && desc->ptr != 0) { 
         vfs_file_t *f = (vfs_file_t *)desc->ptr;
@@ -352,8 +407,20 @@ void sys_open(arch_regs_t *regs) {
     if (fd == -1) { regs->eax = E_MFILE; return; }
 
     vfs_file_t *new_file = (vfs_file_t *)kmalloc(sizeof(vfs_file_t));
-    
-    if (fs_open(basename, parent_id, new_file) == 0) { 
+
+    /*
+     * The failure path below already returned this allocation, but the success
+     * path went straight into fs_open(), which writes through the pointer as
+     * soon as it matches a directory entry. A user able to exhaust the kernel
+     * heap - one loop of read() with a large size is enough, each call takes a
+     * bounce buffer - then opening any file that exists turned a NULL return
+     * into a supervisor write to address 0. That is a kernel-mode page fault
+     * with no fixup handler, so page_fault_handler() takes its kernel branch and
+     * parks the CPU: the whole machine, from an unprivileged process.
+     */
+    if (!new_file) { regs->eax = E_NOMEM; return; }
+
+    if (fs_open(basename, parent_id, new_file) == 0) {
         new_file->current_offset = 0;
         current_task->fd_table[fd].type = FD_TYPE_FILE;
         current_task->fd_table[fd].ptr = (uint32_t)new_file;

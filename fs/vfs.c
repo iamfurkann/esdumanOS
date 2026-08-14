@@ -537,8 +537,27 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
         if (dir_table[i].is_used == 1 && 
             dir_table[i].parent_id == parent_id && 
             ft_strcmp(dir_table[i].filename, name) == 0) {
+            /*
+             * The index is bounded before every use.
+             *
+             * file_allocation_table is uint32_t[4096] and dir_table is loaded
+             * verbatim from the disk at init_fs() with no validation, so
+             * start_sector is attacker-controlled by anyone who can write the
+             * image. Unbounded, this loop turned "rm <file>" into a four-byte
+             * kernel write at an offset the image chose, and then followed
+             * whatever it read there.
+             *
+             * Every other FAT walk in this file already guards the same value -
+             * fs_read_raw() checks it twice and fs_create_file_raw() once. This
+             * one was the exception.
+             */
             uint32_t sec_to_free = dir_table[i].start_sector;
             while (sec_to_free != FAT_EOF && sec_to_free != FAT_FREE) {
+                if (sec_to_free >= 4096) {
+                    klog_int(LOG_LEVEL_ERROR, "VFS",
+                             "Refusing to follow an out-of-range FAT entry while deleting", (int)sec_to_free);
+                    break;
+                }
                 uint32_t next_sec = file_allocation_table[sec_to_free];
                 file_allocation_table[sec_to_free] = FAT_FREE;
                 sec_to_free = next_sec;

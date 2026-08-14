@@ -312,7 +312,9 @@ void check_and_deliver_signals(arch_regs_t *regs);
 
 
 // --- Added by Refactor Script ---
-extern void process_pending_kernel_timers(void);
+/* process_pending_kernel_timers() is declared in signal.h, which owns the kernel
+ * timer slots; it was duplicated here. schedule() calls it, and process.c gets
+ * signal.h through kernel.h. */
 extern void sleep_current_task(arch_regs_t *regs, int reason);
 extern void wakeup_tasks(int reason);
 

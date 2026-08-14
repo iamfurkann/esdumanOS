@@ -1,6 +1,5 @@
 #include "gdt.h"
 #include "tss.h"
-#include "stdio.h"
 
 gdt_entry_t gdt_entries[GDT_ENTRIES];
 gdt_ptr_t gdt_ptr;

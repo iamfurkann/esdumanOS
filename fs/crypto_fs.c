@@ -12,7 +12,6 @@
 #include "entropy.h"
 #include "stdio.h"
 #include "kheap.h"
-#include "rtc.h"
 #include "hmac.h"
 #include "bcache.h"
 

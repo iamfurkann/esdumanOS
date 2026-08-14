@@ -6,10 +6,8 @@
  */
 #include "paging.h"
 #include "pmm.h"
-#include "stdio.h"
 #include "klog.h"
 #include "errno.h"
-#include "kernel.h"
 #include "serial.h"
 uint32_t *page_directory;
 

@@ -6,7 +6,6 @@
  */
 #include "tty.h"
 #include "io.h"
-#include "libft.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25

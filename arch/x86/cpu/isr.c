@@ -3,11 +3,8 @@
 #include "tty.h"
 #include "io.h"
 #include "signal.h"
-#include "fs.h"
 #include "process.h"
-#include "syscall.h"
 #include "registers.h"
-#include "security.h"
 #include "keyboard.h"
 #define PIC1_COMMAND 0x20
 #define PIC2_COMMAND 0xA0

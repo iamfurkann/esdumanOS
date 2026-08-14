@@ -6,7 +6,6 @@
  */
 #include "syscalls_internal.h"
 #include "types.h"
-#include "arch.h"
 #include "registers.h"
 #include "stdio.h"
 #include "io.h"

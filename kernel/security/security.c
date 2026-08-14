@@ -5,8 +5,6 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "security.h"
-#include "stdio.h"
-#include "io.h"
 #include "klog.h" 
 #include "crypto.h"
 #include "entropy.h"

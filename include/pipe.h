@@ -1,8 +1,9 @@
 #ifndef PIPE_H
 #define PIPE_H
 
+/* registers.h was included here and used for nothing - this header declares no
+ * function that takes an arch_regs_t. kernel/proc/pipe.c gets it from process.h. */
 #include "types.h"
-#include "registers.h" 
 
 /**
  * @brief Standard buffer size for a pipe in bytes.

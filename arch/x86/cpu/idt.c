@@ -1,24 +1,9 @@
 #include "idt.h"
 #include "io.h"
-#include "stdio.h"
 #include "isr.h"
 
-// isr define
-extern void isr1(void); extern void isr2(void); extern void isr3(void);
-extern void isr5(void); extern void isr6(void); extern void isr7(void);
-extern void isr9(void); extern void isr10(void); extern void isr11(void);
-extern void isr13(void); extern void isr14(void); extern void isr15(void);
-extern void isr17(void); extern void isr18(void); extern void isr19(void);
-extern void isr21(void); extern void isr22(void); extern void isr23(void);
-extern void isr25(void); extern void isr26(void); extern void isr27(void);
-extern void isr29(void); extern void isr30(void); extern void isr31(void);
-extern void isr33(void);
+/* The isrN stubs are declared in isr.h, all forty-nine of them together. */
 
-// Added All Hardware Interrupts between IRQ2 - IRQ15 (Including ATA)
-extern void isr35(void); extern void isr36(void); extern void isr37(void);
-extern void isr39(void); extern void isr40(void); extern void isr41(void);
-extern void isr43(void); extern void isr44(void); extern void isr45(void);
-extern void isr47(void);
 idt_entry_t idt[256];
 idt_ptr_t idtp;
 

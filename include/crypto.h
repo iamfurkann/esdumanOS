@@ -1,8 +1,9 @@
 #ifndef CRYPTO_H
 #define CRYPTO_H
 
+/* arch.h was included here and used for nothing. The #if defined(ARCH_RISCV64)
+ * further down tests a -D macro from the Makefile, not anything arch.h defines. */
 #include "types.h"
-#include "arch.h"
 
 /**
  * @brief AES block size in bytes.

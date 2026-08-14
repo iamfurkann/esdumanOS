@@ -7,7 +7,6 @@
  * Purpose: Physical Memory Manager implementation with dynamic bitmap.
  */
 #include "pmm.h"
-#include "stdio.h"
 #include "kernel.h"
 #include "klog.h"
 #include "errno.h"

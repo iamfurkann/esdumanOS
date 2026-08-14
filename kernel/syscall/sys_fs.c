@@ -6,7 +6,6 @@
  */
 #include "syscalls_internal.h"
 #include "types.h"
-#include "arch.h"
 #include "registers.h"
 #include "stdio.h"
 #include "tty.h"
@@ -17,7 +16,6 @@
 #include "devfs.h"
 #include "errno.h"
 #include "klog.h"
-#include "isr.h"
 #include "keyboard.h"
 #include "kheap.h"
 #include "libft.h"

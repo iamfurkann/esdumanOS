@@ -4,7 +4,6 @@
  */
 #include "uaccess.h"
 #include "errno.h"
-#include "kernel.h"
 
 /*
  * Address of the fixup label for the copy in progress. page_fault_handler() in

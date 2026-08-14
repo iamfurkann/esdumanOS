@@ -34,6 +34,10 @@ void sys_set_priority(arch_regs_t *regs);
 void sys_yield(arch_regs_t *regs);
 /** @brief Syscall handler for getting the current user ID */
 void sys_getuid(arch_regs_t *regs);
+/** @brief Syscall handler for getting the current process ID */
+void sys_getpid(arch_regs_t *regs);
+/** @brief Syscall handler for blocking the caller for a number of milliseconds */
+void sys_sleep(arch_regs_t *regs);
 /** @brief Syscall handler for getting command line arguments */
 void sys_get_args(arch_regs_t *regs);
 /** @brief Syscall handler for dumping the task's stack */
@@ -76,6 +80,12 @@ void sys_list_files(arch_regs_t *regs);
 void sys_cat_raw(arch_regs_t *regs);
 /** @brief Syscall handler for outputting file contents */
 void sys_cat_file(arch_regs_t *regs);
+/** @brief Syscall handler for reporting a path's metadata */
+void sys_stat(arch_regs_t *regs);
+/** @brief Syscall handler for reporting an open descriptor's metadata */
+void sys_fstat(arch_regs_t *regs);
+/** @brief Syscall handler for repositioning an open file's read offset */
+void sys_lseek(arch_regs_t *regs);
 
 // sys_ipc.c
 /** @brief Syscall handler for sending an IPC message */

@@ -109,6 +109,27 @@ typedef struct process_s {
      */
     uint8_t cwd_id;
 
+    /*
+     * sleep() bookkeeping.
+     *
+     * sleep_deadline is an absolute timer_get_ticks() value, not a countdown,
+     * so the sweep in schedule() can decide whether a task is due without
+     * anything having to decrement it per tick. Comparisons against it are
+     * signed differences: timer_ticks is a 32-bit counter and wraps roughly
+     * every 497 days at TIMER_HZ, and a plain >= would then sleep for weeks.
+     *
+     * sleep_active exists because a blocking syscall re-runs from the start when
+     * it wakes - see syscall_block_and_restart(). Without a flag, sys_sleep()
+     * could not tell a fresh call from a resumption and would arm itself again
+     * forever. It also lets a spurious wakeup be told from a real one, so the
+     * task can go back to sleep rather than return early.
+     *
+     * The kernel timer slots in signal.c cannot serve this: they are global,
+     * hold a bare void(*)(void), and carry no pid to wake.
+     */
+    uint32_t sleep_deadline;
+    uint8_t sleep_active;
+
     task_state_t state;
     wait_reason_t wait_reason;
     mutex_t *wait_mutex;
@@ -279,6 +300,15 @@ void check_and_deliver_signals(arch_regs_t *regs);
 extern void process_pending_kernel_timers(void);
 extern void sleep_current_task(arch_regs_t *regs, int reason);
 extern void wakeup_tasks(int reason);
+
+/**
+ * @brief Wakes every task whose sleep() deadline has passed.
+ *
+ * Called from schedule() before a task is selected, so a task that becomes due
+ * this pass can be chosen in it. Distinct from wakeup_tasks(WAIT_TIMER), which
+ * would wake every sleeper at once regardless of when each asked to be woken.
+ */
+extern void wake_expired_sleepers(void);
 extern int check_free_task_slot(void);
 extern void exit_current_process(arch_regs_t *regs);
 extern void set_task_priority(int pid, uint8_t priority);

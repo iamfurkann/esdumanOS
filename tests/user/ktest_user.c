@@ -17,11 +17,13 @@
  */
 #include "syscall.h"
 #include "errno.h"
+#include "stat.h"
 
 /* Report kinds understood by sys_ktest_report() in tests/kernel/selftest.c. */
-#define KT_FAIL 0
-#define KT_PASS 1
-#define KT_DONE 2
+#define KT_FAIL  0
+#define KT_PASS  1
+#define KT_DONE  2
+#define KT_TICKS 3
 
 /**
  * @brief Performs a system call from user mode.
@@ -49,6 +51,26 @@ static void kt_assert(int ok, const char *msg) {
 }
 
 #define KT_ASSERT(cond, msg) kt_assert((cond) ? 1 : 0, (msg))
+
+/**
+ * @brief Reads the kernel tick counter.
+ *
+ * Ring 3 has no clock, so without this the sleep() assertions below could only
+ * check that the call returned - which a sleep that never waited would also do.
+ * Serviced only in test builds; see KT_REPORT_TICKS in tests/kernel/ktest.h.
+ */
+static int kt_ticks(void) {
+    return syscall(SYSCALL_KTEST_REPORT, KT_TICKS, 0, 0);
+}
+
+/*
+ * File type values from include/fs.h and the PIT rate from include/rtc.h.
+ * Both headers declare kernel functions, so they are not included here; the
+ * values are repeated instead, the same way the GDT selectors above are.
+ */
+#define FT_REGULAR_U 0
+#define FT_DIR_U     1
+#define TICKS_PER_SEC 100
 
 /**
  * @brief Calculates the length of a null-terminated string.
@@ -427,7 +449,195 @@ void main(void) {
               "[BCACHE] sync() on an already-clean cache still reports success");
 
     /* ------------------------------------------------------------------
-     * 8. Child process round trip.
+     * 8. File and process introspection.
+     *
+     * stat/fstat/lseek/getpid/sleep, from the only side where they mean
+     * anything: a kernel-mode test would be reading back the same structs it
+     * had just written, whereas here every field has to survive copy_to_user()
+     * and every argument has to survive validation.
+     *
+     * Before the lockdown section, because stat() on an encrypted file reads
+     * that file's header and the key is destroyed down there.
+     * ------------------------------------------------------------------ */
+    esd_stat_t st;
+    esd_stat_t st2;
+
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/tmp", 0, 0) == E_OK,
+              "[STAT] chdir(/tmp), which is writable regardless of uid");
+
+    /* 16 bytes, chosen so the encrypted form pads to a different length. */
+    const char *probe = "0123456789abcdef";
+    int probe_len = kt_strlen(probe);
+
+    KT_ASSERT(syscall(SYSCALL_CREATE_FILE, (int)"statprobe.txt", (int)probe, 0) == E_OK,
+              "[STAT] probe file created");
+
+    KT_ASSERT(syscall(SYSCALL_STAT, (int)"statprobe.txt", (int)&st, 0) == E_OK,
+              "[STAT] stat() of a relative name succeeds");
+
+    /*
+     * The assertion this whole helper exists for. dir_table records the
+     * encrypted form's length - an IV, a header and padding - so a stat() built
+     * on it would be wrong for every regular file on a default boot, where
+     * SEC_LEVEL_CRYPTO_ENFORCED is the starting level.
+     */
+    KT_ASSERT(st.st_size == (unsigned int)probe_len,
+              "[STRICT] [STAT] st_size is the byte count written, not the size on disk");
+    KT_ASSERT(st.st_type == FT_REGULAR_U, "[STAT] a regular file reports FT_REGULAR");
+
+    if (st.st_encrypted) {
+        KT_ASSERT(st.st_disk_size > st.st_size,
+                  "[STRICT] [STAT] the encrypted form on disk is larger than the plaintext");
+    } else {
+        KT_ASSERT(st.st_disk_size == st.st_size,
+                  "[STAT] unencrypted, the two sizes agree");
+    }
+
+    /* And what stat() promised is what a read actually yields. */
+    int pfd = syscall(SYSCALL_OPEN, (int)"statprobe.txt", 0, 0);
+    KT_ASSERT(pfd >= 0, "[STAT] probe file opened");
+
+    if (pfd >= 0) {
+        char rd[32];
+        for (int i = 0; i < 32; i++) rd[i] = 0;
+
+        KT_ASSERT(syscall(SYSCALL_READ, pfd, (int)rd, 32) == probe_len,
+                  "[STRICT] [STAT] read() returns exactly the count stat() predicted");
+
+        /* fstat() must describe the same entry, field for field. */
+        KT_ASSERT(syscall(SYSCALL_FSTAT, pfd, (int)&st2, 0) == E_OK,
+                  "[STAT] fstat() on an open descriptor succeeds");
+        KT_ASSERT(st2.st_size == st.st_size && st2.st_ino == st.st_ino &&
+                  st2.st_type == st.st_type && st2.st_disk_size == st.st_disk_size &&
+                  st2.st_uid == st.st_uid && st2.st_parent == st.st_parent,
+                  "[STRICT] [STAT] fstat() agrees with stat() on every field");
+
+        /* ---- lseek ---- */
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, 0, SEEK_SET) == 0,
+                  "[LSEEK] SEEK_SET to 0 reports the new offset");
+
+        for (int i = 0; i < 32; i++) rd[i] = 0;
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, 10, SEEK_SET) == 10,
+                  "[LSEEK] SEEK_SET past the start reports the requested offset");
+        KT_ASSERT(syscall(SYSCALL_READ, pfd, (int)rd, 32) == probe_len - 10,
+                  "[STRICT] [LSEEK] a read after seeking returns only the remaining bytes");
+        KT_ASSERT(rd[0] == 'a',
+                  "[STRICT] [LSEEK] and returns the bytes from the offset, not from the start");
+
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, 4, SEEK_SET) == 4,
+                  "[LSEEK] SEEK_SET repositions again");
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, 3, SEEK_CUR) == 7,
+                  "[STRICT] [LSEEK] SEEK_CUR composes with the current position");
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, -2, SEEK_CUR) == 5,
+                  "[LSEEK] SEEK_CUR accepts a negative offset");
+
+        /*
+         * SEEK_END is the case that breaks if the end is taken from the
+         * directory table: the encrypted length is larger, so this would land
+         * past the plaintext and the read below would still return 0 - passing
+         * for the wrong reason. The offset itself is therefore checked too.
+         */
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, 0, SEEK_END) == probe_len,
+                  "[STRICT] [LSEEK] SEEK_END lands on the plaintext end, not the on-disk end");
+        KT_ASSERT(syscall(SYSCALL_READ, pfd, (int)rd, 32) == 0,
+                  "[LSEEK] a read at the end returns 0");
+
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, -4, SEEK_END) == probe_len - 4,
+                  "[LSEEK] SEEK_END with a negative offset walks back from the end");
+
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, -1, SEEK_SET) < 0,
+                  "[LSEEK] an offset before the start of the file is refused");
+        KT_ASSERT(syscall(SYSCALL_LSEEK, pfd, 0, 99) < 0,
+                  "[LSEEK] an unknown whence is refused");
+
+        syscall(SYSCALL_CLOSE, pfd, 0, 0);
+    }
+
+    /* Directories, and the root, which owns no directory table entry. */
+    KT_ASSERT(syscall(SYSCALL_STAT, (int)"/etc", (int)&st, 0) == E_OK && st.st_type == FT_DIR_U,
+              "[STAT] stat() of a directory reports FT_DIR");
+    KT_ASSERT(syscall(SYSCALL_STAT, (int)"/", (int)&st, 0) == E_OK &&
+              st.st_type == FT_DIR_U && st.st_ino == 0,
+              "[STRICT] [STAT] stat(\"/\") describes the root, which has no table entry");
+
+    /* Failure paths. */
+    KT_ASSERT(syscall(SYSCALL_STAT, (int)"/no_such_file_at_all", (int)&st, 0) < 0,
+              "[STAT] stat() of a missing path is refused");
+    KT_ASSERT(syscall(SYSCALL_STAT, (int)"statprobe.txt", ADDR_KERNEL_HEAP, 0) < 0,
+              "[UACCESS] stat() rejects a kernel destination buffer");
+    KT_ASSERT(syscall(SYSCALL_STAT, ADDR_KERNEL_TEXT, (int)&st, 0) < 0,
+              "[UACCESS] stat() rejects a kernel path pointer");
+    KT_ASSERT(syscall(SYSCALL_FSTAT, 999, (int)&st, 0) < 0,
+              "[STAT] fstat() rejects an out-of-range descriptor");
+
+    /*
+     * A pipe has no directory entry, and a /dev descriptor stores a device table
+     * index in the same field a file descriptor stores a pointer. Both must be
+     * refused by type rather than dereferenced - that field overload is what
+     * made a stale comparison in open() an indirect call through dev_table[-2].
+     */
+    unsigned int sfds[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+    if (syscall(SYSCALL_PIPE, (int)sfds, 0, 0) == 0) {
+        KT_ASSERT(syscall(SYSCALL_FSTAT, (int)sfds[0], (int)&st, 0) < 0,
+                  "[STRICT] [STAT] fstat() on a pipe is refused, not answered with garbage");
+        KT_ASSERT(syscall(SYSCALL_LSEEK, (int)sfds[0], 0, SEEK_SET) < 0,
+                  "[STRICT] [LSEEK] lseek() on a pipe is refused");
+        syscall(SYSCALL_CLOSE, (int)sfds[0], 0, 0);
+        syscall(SYSCALL_CLOSE, (int)sfds[1], 0, 0);
+    }
+
+    int devfd = syscall(SYSCALL_OPEN, (int)"/dev/null", 0, 0);
+    if (devfd >= 0) {
+        KT_ASSERT(syscall(SYSCALL_FSTAT, devfd, (int)&st, 0) < 0,
+                  "[STRICT] [STAT] fstat() on a /dev node is refused");
+        KT_ASSERT(syscall(SYSCALL_LSEEK, devfd, 0, SEEK_END) < 0,
+                  "[STRICT] [LSEEK] lseek() on a /dev node is refused");
+        syscall(SYSCALL_CLOSE, devfd, 0, 0);
+    }
+
+    /* ---- getpid ---- */
+    int pid1 = syscall(SYSCALL_GETPID, 0, 0, 0);
+    int pid2 = syscall(SYSCALL_GETPID, 0, 0, 0);
+    KT_ASSERT(pid1 > 0, "[PROC] getpid() returns a positive pid");
+    KT_ASSERT(pid1 == pid2, "[PROC] getpid() is stable across calls");
+
+    /* ---- sleep ---- */
+    KT_ASSERT(syscall(SYSCALL_SLEEP, 0, 0, 0) == E_OK,
+              "[SLEEP] a zero delay returns immediately");
+    KT_ASSERT(syscall(SYSCALL_SLEEP, -1, 0, 0) < 0,
+              "[SLEEP] a negative delay is refused");
+
+    /*
+     * Measured, not assumed. A sleep() that returned without ever blocking
+     * would satisfy every assertion above; only the tick counter tells the two
+     * apart. 500 ms is 50 ticks at TIMER_HZ.
+     *
+     * The upper bound is deliberately loose - one whole extra second. The task
+     * is woken by a sweep in schedule(), so it resumes at the next scheduling
+     * point after its deadline rather than exactly on it, and under an emulator
+     * that slack is worth allowing for. The lower bound is the one carrying the
+     * claim.
+     */
+    int t0 = kt_ticks();
+    int slept = syscall(SYSCALL_SLEEP, 500, 0, 0);
+    int elapsed = kt_ticks() - t0;
+
+    KT_ASSERT(slept == E_OK, "[SLEEP] sleep(500) reports success");
+    KT_ASSERT(elapsed >= 50,
+              "[STRICT] [SLEEP] sleep(500) really waited at least 50 ticks");
+    KT_ASSERT(elapsed < 50 + TICKS_PER_SEC,
+              "[SLEEP] and woke within a second of its deadline");
+
+    /* The pid survived blocking and being rescheduled. */
+    KT_ASSERT(syscall(SYSCALL_GETPID, 0, 0, 0) == pid1,
+              "[PROC] the pid is unchanged after blocking in sleep()");
+
+    syscall(SYSCALL_RM_FILE, (int)"statprobe.txt", 0, 0);
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/", 0, 0) == E_OK,
+              "[STAT] back to root for the remaining sections");
+
+    /* ------------------------------------------------------------------
+     * 9. Child process round trip.
      *
      * The only path that drives process teardown end to end: exec() a child,
      * the child exits, and the zombie reaper in schedule() releases both its
@@ -449,7 +659,7 @@ void main(void) {
               "[PROC] parent still functional after the reaper ran");
 
     /* ------------------------------------------------------------------
-     * 9. LOCKDOWN.
+     * 10. LOCKDOWN.
      *
      * Deliberately the very last thing: it destroys the master key, and
      * security levels only ever go up, so every encrypted filesystem operation

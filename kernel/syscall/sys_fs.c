@@ -22,6 +22,8 @@
 #include "kheap.h"
 #include "libft.h"
 #include "uaccess.h"
+#include "stat.h"
+#include "security.h"
 
 /**
  * @brief Upper bound on the kernel staging buffer used by sys_readdir().
@@ -604,6 +606,245 @@ void sys_getcwd(arch_regs_t *regs) {
     if (copy_to_user(user_buf, path, pos + 1) != E_OK) { regs->eax = E_FAULT; return; }
 
     regs->eax = (int)pos;
+}
+
+/**
+ * @brief Finds the directory table slot holding a given entry id.
+ *
+ * Entry ids and table indices are not the same thing, and the table is not
+ * indexed by id - so anything holding an id has to search. Unlike the walks in
+ * resolve_dir_from_cwd() and sys_getcwd(), which are looking specifically for a
+ * directory, this matches an entry of any type.
+ *
+ * @param id Entry id to find. 0 is the root, which has no slot of its own.
+ * @return Index into dir_table, or -1 when no live entry carries that id.
+ */
+static int dir_index_of_entry_id(uint8_t id) {
+    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        if (dir_table[i].is_used == 1 && dir_table[i].entry_id == id) return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief Describes the root directory, which owns no directory table entry.
+ *
+ * fs_dir_exists() treats id 0 as always present without looking it up, so a
+ * stat of "/" has nothing to read fields out of and they are stated here
+ * instead. Root is its own parent, which is the same convention the ".." walk
+ * in resolve_dir_from_cwd() relies on.
+ */
+static void stat_fill_root(esd_stat_t *out) {
+    out->st_size = 0;
+    out->st_disk_size = 0;
+    out->st_ino = 0;
+    out->st_uid = 0;
+    out->st_parent = 0;
+    out->st_type = FT_DIR;
+    out->st_encrypted = 0;
+    out->st_reserved = 0;
+}
+
+/**
+ * @brief Fills an esd_stat_t from a directory table slot.
+ *
+ * st_size does not come from the table. Under SEC_LEVEL_CRYPTO_ENFORCED - the
+ * default - dir_table records the encrypted form's length, which is an IV, a
+ * header and padding larger than anything read() will hand back. fs_size()
+ * resolves that, and taking the shortcut here would make stat() wrong for every
+ * regular file on a normally configured system.
+ *
+ * @param out Destination, filled only on success.
+ * @param idx Directory table slot to describe.
+ * @param open_file An already-open handle on the same entry, or 0 to open a
+ *                  temporary one. fstat() passes the caller's handle so the
+ *                  entry is not looked up twice; fs_size() only reads from it.
+ * @return E_OK on success, or a negative error code.
+ */
+static int stat_fill_from_index(esd_stat_t *out, int idx, vfs_file_t *open_file) {
+    if (idx < 0 || idx >= MAX_FILES_IN_DIR || dir_table[idx].is_used != 1) return E_NOENT;
+
+    out->st_ino = dir_table[idx].entry_id;
+    out->st_uid = dir_table[idx].owner_uid;
+    out->st_parent = dir_table[idx].parent_id;
+    out->st_type = dir_table[idx].file_type;
+    out->st_disk_size = dir_table[idx].file_size;
+    out->st_reserved = 0;
+
+    if (dir_table[idx].file_type == FT_DIR) {
+        /* Directories hold no file content: fs_mkdir() stores size 0 and there
+         * is nothing encrypted to measure. */
+        out->st_encrypted = 0;
+        out->st_size = 0;
+        return E_OK;
+    }
+
+    out->st_encrypted = (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) ? 1 : 0;
+
+    if (open_file != 0) return fs_size(open_file, &out->st_size);
+
+    vfs_file_t probe;
+    if (fs_open(dir_table[idx].filename, dir_table[idx].parent_id, &probe) != E_OK) return E_NOENT;
+    return fs_size(&probe, &out->st_size);
+}
+
+/**
+ * @brief Reports a path's metadata into a user-supplied esd_stat_t.
+ *
+ * Relative paths resolve against the process's working directory, like every
+ * other path-taking syscall since v0.3.0 - see split_from_cwd().
+ */
+void sys_stat(arch_regs_t *regs) {
+    char path[MAX_FILENAME];
+    esd_stat_t *user_out = (esd_stat_t *)regs->ecx;
+
+    if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
+    if (!validate_user_writable_pointer(user_out, sizeof(esd_stat_t))) { regs->eax = E_FAULT; return; }
+
+    char basename[MAX_FILENAME];
+    for (int k = 0; k < MAX_FILENAME; k++) basename[k] = '\0';
+
+    /* Propagated rather than flattened to E_NOENT: a path whose middle component
+     * is a regular file is E_NOTDIR, and saying so is more useful than "missing". */
+    int parent_id = split_from_cwd(path, basename);
+    if (parent_id < 0) { regs->eax = parent_id; return; }
+
+    esd_stat_t st;
+    int rc;
+
+    int names_a_directory = (basename[0] == '\0') ||
+                            (basename[0] == '.' && basename[1] == '\0') ||
+                            (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0');
+
+    if (names_a_directory) {
+        /*
+         * "/", "." and ".." name a directory rather than an entry inside one.
+         * resolve_dir_from_cwd() already handles all three, including the access
+         * check, so the alternative would be a second implementation of the
+         * same walk.
+         */
+        int target = resolve_dir_from_cwd(path);
+        if (target < 0) { regs->eax = target; return; }
+
+        if (target == 0) {
+            stat_fill_root(&st);
+            rc = E_OK;
+        } else {
+            rc = stat_fill_from_index(&st, dir_index_of_entry_id((uint8_t)target), 0);
+        }
+    } else {
+        if (!check_vfs_access(parent_id, 0)) {
+            klog(LOG_LEVEL_WARN, "SYSCALL", "stat: Permission denied");
+            regs->eax = E_ACCES; return;
+        }
+
+        rc = stat_fill_from_index(&st, fs_get_entry_idx(basename, (uint8_t)parent_id), 0);
+    }
+
+    if (rc != E_OK) { regs->eax = rc; return; }
+
+    regs->eax = (copy_to_user(user_out, &st, sizeof(st)) == E_OK) ? E_OK : E_FAULT;
+}
+
+/**
+ * @brief Reports an open descriptor's metadata into a user-supplied esd_stat_t.
+ *
+ * Only real files can answer. A pipe has no directory entry, and a device
+ * descriptor stores a device table *index* in ptr rather than a pointer - the
+ * same field overload that made a stale -1 comparison in sys_open() an indirect
+ * call through dev_table[-2]. Refusing by type keeps that shape unreachable
+ * here rather than relying on the value looking wrong.
+ */
+void sys_fstat(arch_regs_t *regs) {
+    int fd = (int)regs->ebx;
+    esd_stat_t *user_out = (esd_stat_t *)regs->ecx;
+
+    if (!validate_fd(fd)) { regs->eax = E_BADF; return; }
+    if (!validate_user_writable_pointer(user_out, sizeof(esd_stat_t))) { regs->eax = E_FAULT; return; }
+
+    file_descriptor_t *desc = &current_task->fd_table[fd];
+    if (desc->type != FD_TYPE_FILE || desc->ptr == 0) { regs->eax = E_BADF; return; }
+
+    vfs_file_t *file = (vfs_file_t *)desc->ptr;
+
+    esd_stat_t st;
+    int rc = stat_fill_from_index(&st, file->inode_idx, file);
+    if (rc != E_OK) { regs->eax = rc; return; }
+
+    regs->eax = (copy_to_user(user_out, &st, sizeof(st)) == E_OK) ? E_OK : E_FAULT;
+}
+
+/**
+ * @brief Repositions the read offset of an open file.
+ *
+ * vfs_file_t.current_offset is the real cursor: fs_read_raw() reads and advances
+ * it, and fs_read_encrypted() honours it as an offset into the *plaintext*. So
+ * seeking needs no special case for encrypted files - provided SEEK_END asks
+ * fs_size() rather than the directory table, which records the longer encrypted
+ * form.
+ *
+ * Seeking past the end is allowed, as POSIX has it. Nothing can be written
+ * there - writes do not go through this cursor - and both read paths already
+ * return 0 for an offset at or beyond the data.
+ */
+void sys_lseek(arch_regs_t *regs) {
+    int fd = (int)regs->ebx;
+    int offset = (int)regs->ecx;
+    int whence = (int)regs->edx;
+
+    if (!validate_fd(fd)) { regs->eax = E_BADF; return; }
+
+    file_descriptor_t *desc = &current_task->fd_table[fd];
+    if (desc->type == FD_TYPE_NONE) { regs->eax = E_BADF; return; }
+
+    /*
+     * Pipes, the console and /dev nodes are streams with no position to set.
+     * E_SPIPE is exactly this case.
+     */
+    if (desc->type != FD_TYPE_FILE) { regs->eax = E_SPIPE; return; }
+    if (desc->ptr == 0) { regs->eax = E_BADF; return; }
+
+    vfs_file_t *file = (vfs_file_t *)desc->ptr;
+
+    uint32_t base = 0;
+    switch (whence) {
+        case SEEK_SET:
+            base = 0;
+            break;
+        case SEEK_CUR:
+            base = file->current_offset;
+            break;
+        case SEEK_END: {
+            uint32_t end = 0;
+            int rc = fs_size(file, &end);
+            if (rc != E_OK) { regs->eax = rc; return; }
+            base = end;
+            break;
+        }
+        default:
+            regs->eax = E_INVAL;
+            return;
+    }
+
+    uint32_t target;
+
+    if (offset < 0) {
+        /*
+         * Negated in two steps so INT_MIN does not overflow on the way. The
+         * result is the magnitude of the move, as an unsigned value.
+         */
+        uint32_t back = (uint32_t)(-(offset + 1)) + 1u;
+        if (back > base) { regs->eax = E_INVAL; return; }
+        target = base - back;
+    } else {
+        /* Keep the result representable as a positive int, since that is what
+         * the syscall returns and a negative one means failure. */
+        if ((uint32_t)offset > 0x7FFFFFFFu - base) { regs->eax = E_INVAL; return; }
+        target = base + (uint32_t)offset;
+    }
+
+    file->current_offset = target;
+    regs->eax = (int)target;
 }
 
 /**

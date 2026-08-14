@@ -22,6 +22,19 @@ extern int tests_failed;
 #define KT_REPORT_PASS 1
 #define KT_REPORT_DONE 2
 
+/*
+ * Returns timer_get_ticks() to the caller instead of recording a result.
+ *
+ * Ring 3 has no clock of its own, so without this the sleep() assertions could
+ * only check that the call returned - not that it waited. Measuring is the whole
+ * point: a sleep that returns instantly and a sleep that works are
+ * indistinguishable from user space otherwise.
+ *
+ * Test builds only, like the rest of syscall 200; production kernels answer
+ * E_NOSYS and no timing surface is added to them.
+ */
+#define KT_REPORT_TICKS 3
+
 /**
  * @brief Terminates QEMU with the suite's verdict.
  * @param is_success Non-zero when every assertion passed.

@@ -62,6 +62,8 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_SET_PRIORITY: sys_set_priority(regs); break;
         case SYSCALL_YIELD:        sys_yield(regs); break;
         case SYSCALL_GETUID:       sys_getuid(regs); break;
+        case SYSCALL_GETPID:       sys_getpid(regs); break;
+        case SYSCALL_SLEEP:        sys_sleep(regs); break;
         case SYSCALL_GET_ARGS:     sys_get_args(regs); break;
         case SYSCALL_STACK_DUMP:   sys_stack_dump(regs); break;
         case SYSCALL_MEMINFO:      sys_meminfo(regs); break;
@@ -85,6 +87,9 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_CAT_RAW:      sys_cat_raw(regs); break;
         case SYSCALL_CAT_FILE:     sys_cat_file(regs); break;
         case SYSCALL_READDIR:      sys_readdir(regs); break;
+        case SYSCALL_STAT:         sys_stat(regs); break;
+        case SYSCALL_FSTAT:        sys_fstat(regs); break;
+        case SYSCALL_LSEEK:        sys_lseek(regs); break;
 
         //sys_ipc.c
         case SYSCALL_IPC_SEND:     sys_ipc_send(regs); break;

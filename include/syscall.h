@@ -113,6 +113,16 @@
 #define SYSCALL_CHDIR           46
 /** @brief Write the calling process's working directory into a user buffer */
 #define SYSCALL_GETCWD          47
+/** @brief Report a path's metadata into a user esd_stat_t */
+#define SYSCALL_STAT            48
+/** @brief Report an open descriptor's metadata into a user esd_stat_t */
+#define SYSCALL_FSTAT           49
+/** @brief Reposition the read/write offset of an open file */
+#define SYSCALL_LSEEK           50
+/** @brief Return the calling process's pid */
+#define SYSCALL_GETPID          51
+/** @brief Block the calling process for a number of milliseconds */
+#define SYSCALL_SLEEP           52
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

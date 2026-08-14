@@ -16,6 +16,7 @@
 #include "registers.h"
 #include "uaccess.h"
 #include "syscall.h"
+#include "rtc.h"
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -117,19 +118,15 @@ static void ktest_print_failures(void) {
     if (listed > KTEST_MAX_LOGGED_FAILURES) listed = KTEST_MAX_LOGGED_FAILURES;
 
     printk("\n---------------- FAILURES ----------------\n");
-    serial_print("\n---------------- FAILURES ----------------\n");
 
     for (int i = 0; i < listed; i++) {
         char num[16]; ktest_itoa(i + 1, num);
         printk("  %s. %s\n", num, ktest_failures[i]);
-        serial_print("  "); serial_print(num); serial_print(". ");
-        serial_print(ktest_failures[i]); serial_print("\n");
     }
 
     if (ktest_failure_count > KTEST_MAX_LOGGED_FAILURES) {
         char extra[16]; ktest_itoa(ktest_failure_count - KTEST_MAX_LOGGED_FAILURES, extra);
         printk("  ... and %s more not listed\n", extra);
-        serial_print("  ... and "); serial_print(extra); serial_print(" more not listed\n");
     }
 }
 
@@ -148,10 +145,6 @@ static void ktest_print_summary(void) {
     printk("RESULT: %s PASSED | %s FAILED\n", pass_str, fail_str);
     printk("======================================================\n");
 
-    serial_print("\n======================================================\n");
-    serial_print("RESULT: "); serial_print(pass_str);
-    serial_print(" PASSED | "); serial_print(fail_str); serial_print(" FAILED\n");
-    serial_print("======================================================\n");
 }
 
 /**
@@ -209,6 +202,13 @@ void sys_ktest_report(arch_regs_t *regs) {
         return;
     }
 
+    if (kind == KT_REPORT_TICKS) {
+        /* Not an assertion: hands the payload the tick counter so it can time
+         * sleep() for itself rather than assume the call blocked. */
+        regs->eax = (int)timer_get_ticks();
+        return;
+    }
+
     char msg[128];
     int res = copy_string_from_user(msg, (const char *)regs->ecx, sizeof(msg));
 
@@ -220,12 +220,10 @@ void sys_ktest_report(arch_regs_t *regs) {
 
     if (kind == KT_REPORT_FAIL) {
         printk("  [FAIL] %s\n", msg);
-        serial_print("  [FAIL] "); serial_print(msg); serial_print("\n");
         ktest_record_failure(msg, 0, 0);
         tests_failed++;
     } else {
         printk("  [PASS] %s\n", msg);
-        serial_print("  [PASS] "); serial_print(msg); serial_print("\n");
         tests_passed++;
     }
 
@@ -245,7 +243,6 @@ void sys_ktest_report(arch_regs_t *regs) {
  */
 static void run_user_mode_tests(void) {
     printk("\n--- Ring 3 (User Mode) Boundary Tests ---\n");
-    serial_print("\n--- Ring 3 (User Mode) Boundary Tests ---\n");
 
     int bin_idx = fs_get_entry_idx("bin", 0);
     KTEST_ASSERT(bin_idx != -1, "[RING3] /bin is present to install the payload into");
@@ -358,9 +355,6 @@ void run_all_selftests(void) {
         printk("\n[KTEST] SMAP active: kernel-mode modules skipped.\n");
         printk("        They simulate user space from Ring 0, which SMAP forbids.\n");
         printk("        The Ring 3 payload exercises the boundary properly.\n");
-        serial_print("\n[KTEST] SMAP active: kernel-mode modules skipped.\n");
-        serial_print("        They simulate user space from Ring 0, which SMAP forbids.\n");
-        serial_print("        The Ring 3 payload exercises the boundary properly.\n");
     } else {
         run_string_tests();
         run_memory_tests();

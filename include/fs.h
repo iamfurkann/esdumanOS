@@ -58,7 +58,37 @@ typedef struct {
     uint32_t start_sector;           /**< Starting sector on the disk. */
     int      ref_count;              /**< Reference count to prevent Use-After-Free vulnerabilities! [SECURITY PATCH ADDED] */
     int      inode_idx;              /**< Index in the dir_table for locking */
+
+    /*
+     * Buffered writes, committed as a whole when the last descriptor closes.
+     *
+     * Appending to a file is not possible with the on-disk format: under
+     * SEC_LEVEL_CRYPTO_ENFORCED - the default - a file is one AES-CBC blob with
+     * an HMAC over the entire plaintext, so adding a byte at the end means
+     * re-encrypting and re-authenticating all of it. The VFS has no streaming
+     * write primitive either; the only way to change a file's contents is
+     * fs_atomic_update(), which replaces the whole thing.
+     *
+     * So writes accumulate here and are committed once, on the last close. That
+     * is what makes the semantics what they are: opening for writing truncates,
+     * writes append to this buffer in order, and lseek does not reposition a
+     * write.
+     */
+    uint8_t *write_buf;              /**< NULL until the first write; owned by this struct. */
+    uint32_t write_len;              /**< Bytes buffered so far.                            */
+    uint32_t write_cap;              /**< Allocated capacity of write_buf.                  */
+    uint8_t  dirty;                  /**< Set when opened for writing; cleared on commit.   */
 } vfs_file_t;
+
+/**
+ * @brief Largest file that can be produced through write().
+ *
+ * The buffer lives in the kernel heap until the last descriptor closes, so this
+ * bounds how much one process can pin there. The whole disk is 2 MB, and
+ * sys_create_file() caps its own path at 4 KB, so 64 KB is generous for what
+ * the system can actually store while staying well clear of exhausting the heap.
+ */
+#define MAX_FILE_WRITE_BYTES 65536
 
 /**
  * @brief Reads data from an opened file into a buffer.
@@ -176,6 +206,34 @@ int fs_size(vfs_file_t *file, uint32_t *out_size);
  * @return E_OK on success, or a negative error code.
  */
 int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_size);
+
+/**
+ * @brief Appends to an open file's write buffer.
+ *
+ * Does not touch the disk. The bytes are held until fs_commit_writes() runs, for
+ * the reason described on vfs_file_t: the stored form cannot be appended to.
+ *
+ * @param file Open file, opened for writing.
+ * @param data Bytes to append; already copied into kernel memory.
+ * @param size Number of bytes.
+ * @return The count written, or a negative error code (E_FBIG past the cap,
+ *         E_NOMEM if the buffer cannot grow).
+ */
+int fs_write_buffered(vfs_file_t *file, const uint8_t *data, uint32_t size);
+
+/**
+ * @brief Commits an open file's buffered writes and releases the buffer.
+ *
+ * Called when the last descriptor referring to the file goes away - on close, or
+ * when a process exits still holding it. A file opened for writing and never
+ * written to commits zero bytes, which is what makes opening for writing a
+ * truncation.
+ *
+ * @param file Open file; may have no buffer, in which case this does nothing.
+ * @return E_OK, or the error fs_atomic_update() reported. A caller that
+ *         discards this turns a full disk into silent data loss.
+ */
+int fs_commit_writes(vfs_file_t *file);
 
 /**
  * @brief Reads raw, unprocessed data directly from the file's sectors.

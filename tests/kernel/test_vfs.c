@@ -146,6 +146,72 @@ static void test_vfs_size_reporting(void) {
 }
 
 /**
+ * @brief Tests the bounds on buffered writes.
+ *
+ * The Ring 3 half covers the semantics - commit on the last close, truncation on
+ * open, the dup2 case. What it cannot cover cheaply is the size cap: reaching it
+ * from user space takes 256 syscalls and then commits a 64 KB file. Called
+ * directly, the refusal costs nothing, because fs_write_buffered() checks the
+ * size before it allocates anything.
+ *
+ * Expected Behavior:
+ * - A single write larger than the cap is refused with E_FBIG.
+ * - A write that would carry an already-partly-filled buffer past the cap is
+ *   refused too, rather than only the first oversized one.
+ * - Null arguments are rejected instead of dereferenced.
+ * - Committing a file that was never opened for writing does nothing and
+ *   reports success.
+ *
+ * Edge Cases Covered:
+ * - A zero-length write, which must succeed without allocating.
+ */
+static void test_vfs_write_bounds(void) {
+    vfs_file_t probe;
+    for (uint32_t i = 0; i < sizeof(probe.filename); i++) probe.filename[i] = '\0';
+    probe.file_size = 0;
+    probe.current_offset = 0;
+    probe.start_sector = FAT_EOF;
+    probe.ref_count = 1;
+    probe.inode_idx = -1;
+    probe.write_buf = 0;
+    probe.write_len = 0;
+    probe.write_cap = 0;
+    probe.dirty = 0;
+
+    static const uint8_t chunk[64] = { 'x' };
+
+    KTEST_ASSERT(fs_write_buffered(&probe, chunk, 0) == 0,
+                 "[WRITE] a zero-length write succeeds and allocates nothing");
+    KTEST_ASSERT(probe.write_buf == 0,
+                 "[STRICT] [WRITE] and really did not allocate");
+
+    KTEST_ASSERT(fs_write_buffered(&probe, chunk, MAX_FILE_WRITE_BYTES + 1) == E_FBIG,
+                 "[STRICT] [WRITE] a single write past the cap is refused");
+
+    KTEST_ASSERT(fs_write_buffered(&probe, chunk, 64) == 64,
+                 "[WRITE] a normal write is accepted");
+    KTEST_ASSERT(probe.write_len == 64 && probe.dirty == 1,
+                 "[STRICT] [WRITE] and marks the file dirty");
+
+    /* Already holding 64 bytes, so a write of the full cap must not fit. */
+    KTEST_ASSERT(fs_write_buffered(&probe, chunk, MAX_FILE_WRITE_BYTES) == E_FBIG,
+                 "[STRICT] [WRITE] the cap accounts for what is already buffered");
+
+    KTEST_ASSERT(fs_write_buffered(0, chunk, 8) < 0 && fs_write_buffered(&probe, 0, 8) < 0,
+                 "[WRITE] null arguments are rejected");
+
+    /* inode_idx is -1, so a commit cannot resolve a parent; it must fail rather
+     * than index dir_table out of range, and must still release the buffer. */
+    KTEST_ASSERT(fs_commit_writes(&probe) < 0,
+                 "[STRICT] [WRITE] committing a file with no directory entry is refused");
+    KTEST_ASSERT(probe.write_buf == 0 && probe.dirty == 0,
+                 "[STRICT] [WRITE] and the buffer is released even when the commit fails");
+
+    KTEST_ASSERT(fs_commit_writes(&probe) == E_OK,
+                 "[WRITE] committing a file with nothing buffered is a no-op");
+}
+
+/**
  * @brief Tests VFS directory boundaries, depth limits, and prevents path traversal (OOB).
  *
  * This test evaluates the robustness of the Virtual File System (VFS) against
@@ -323,4 +389,5 @@ void run_vfs_tests(void) {
 
     test_vfs_boundary_and_depth();
     test_vfs_size_reporting();
+    test_vfs_write_bounds();
 }

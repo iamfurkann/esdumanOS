@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.4.2--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.4.3--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -46,7 +46,7 @@
 
 esdumanOS is a from-scratch operating system kernel for the x86 (IA-32) architecture. It does not derive from Linux, BSD, or any existing kernel codebase. Every subsystem, from the bootloader handoff through memory management, process scheduling, file system operations, and user authentication, is written specifically for this project.
 
-The kernel boots via GRUB using the Multiboot specification, transitions through Protected Mode with full GDT/IDT/TSS initialization, sets up paged virtual memory, and launches a preemptive multitasking environment with Ring 0 / Ring 3 separation. User-space programs are loaded from ELF binaries, and the system provides a Unix-inspired shell with pipes, conditional chaining, and environment variables.
+The kernel boots via GRUB using the Multiboot specification, transitions through Protected Mode with full GDT/IDT/TSS initialization, sets up paged virtual memory, and launches a preemptive multitasking environment with Ring 0 / Ring 3 separation. User-space programs are loaded from ELF binaries, and the system provides a Unix-inspired shell with pipes, output redirection, conditional chaining, and environment variables.
 
 A central design goal is treating security as a first-class concern rather than an afterthought. The kernel includes a tiered security level system, AES-256-CBC disk encryption, user authentication against a shadow password database, and permission enforcement at the system call boundary.
 
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.2-alpha
+**Version:** 0.4.3-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -84,6 +84,13 @@ its entire address space, closing a pipe never woke the process blocked on it, a
 shell overran its own stack on a line of 33 short words. Those and a dozen more are
 fixed; the release notes list what is still known-broken rather than quietly carrying
 it.
+
+v0.4.3 gives the kernel the ability to write to a file through a descriptor, which it
+had never had — `sys_write` handled the console, pipes and `/dev` nodes and dropped
+everything else. That single gap was why `/bin/cp` produced empty files and why the
+shell's `>` could not be connected to anything. Both work now, within semantics the
+disk format dictates: a write is buffered and committed whole when the last descriptor
+closes, so there is no appending and no writing into the middle of a file.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -168,7 +175,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion. Output redirection is parsed but not implemented |
+| **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
 | **Programs** | 15 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `date`, `stat` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
@@ -401,7 +408,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.4.2-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.4.3-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -424,7 +431,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.4.2-alpha.iso \
+    -cdrom esdumanOS-v0.4.3-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -480,13 +487,19 @@ exit                  Exit the shell
 `echo` and `clear` are not builtins — they are ELF programs in `/bin`, reached
 through the same path as any other program. `echo` does not implement `-n`.
 
-**Operators:** Pipes (`cmd1 | cmd2`, two stages only), chaining (`cmd1 && cmd2`,
-`cmd1 || cmd2`).
+**Operators:** Pipes (`cmd1 | cmd2`, two stages only), output redirection
+(`cmd > file`), chaining (`cmd1 && cmd2`, `cmd1 || cmd2`).
 
-**Not implemented:** output redirection. `cmd > file` is parsed and then
-discarded — the command runs and writes to the terminal, and no file is created.
-It cannot work until the kernel can write to a regular file through a descriptor;
-see Known Limitations.
+Redirection truncates: the target is created if it does not exist and emptied if
+it does. `>` and `|` cannot be combined in one command — the parser takes
+whichever it meets first and passes the other through as an ordinary argument.
+
+**Writing a file is all-or-nothing.** Bytes written through a descriptor are held
+until the last descriptor closes and then committed as the file's entire new
+contents, so there is no appending (`>>`), no writing into the middle of a file,
+and no seeking during a write. That is not a shortcut: a stored file is a single
+AES-CBC blob authenticated over its whole plaintext, so it can be replaced but
+never extended. A single file is capped at 64 KB on this path.
 
 **Variables:** `$VAR` expansion, `$?` last exit code, `~` home directory. Note
 that every `~` in a single command expands into one shared buffer, so
@@ -637,7 +650,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.4.2-alpha)
+|   |-- kernel.h                     Master header (version 0.4.3-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API

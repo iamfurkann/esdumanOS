@@ -14,6 +14,7 @@
 #include "crypto.h"
 #include "process.h"
 #include "bcache.h"
+#include "kheap.h"
 disk_file_entry_t dir_table[MAX_FILES_IN_DIR];
 uint32_t fs_max_sectors = 4096;
 uint32_t file_allocation_table[4096];
@@ -339,6 +340,96 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
 }
 
 /**
+ * @brief fs_write_buffered
+ *
+ * Accumulates a write instead of performing it. See the note on vfs_file_t for
+ * why there is no streaming path: the stored form of a file is one AES-CBC blob
+ * authenticated over its whole plaintext, so it can only be replaced, never
+ * extended. fs_commit_writes() does the replacing, once.
+ *
+ * The buffer doubles rather than growing by the request size, so a program
+ * writing in small chunks - /bin/cp uses 64 bytes - does not re-copy the whole
+ * file on every call.
+ *
+ * @param file Open file, opened for writing.
+ * @param data Bytes to append.
+ * @param size Number of bytes.
+ * @return The count written, or a negative error code.
+ */
+int fs_write_buffered(vfs_file_t *file, const uint8_t *data, uint32_t size) {
+    if (!file || !data) return E_INVAL;
+    if (size == 0) return 0;
+
+    if (size > MAX_FILE_WRITE_BYTES || file->write_len > MAX_FILE_WRITE_BYTES - size) {
+        klog(LOG_LEVEL_WARN, "VFS", "Refusing a write past the maximum file size.");
+        return E_FBIG;
+    }
+
+    if (file->write_len + size > file->write_cap) {
+        uint32_t new_cap = file->write_cap ? file->write_cap : 512;
+        while (new_cap < file->write_len + size) new_cap *= 2;
+        if (new_cap > MAX_FILE_WRITE_BYTES) new_cap = MAX_FILE_WRITE_BYTES;
+
+        uint8_t *grown = (uint8_t *)krealloc(file->write_buf, new_cap);
+        if (!grown) return E_NOMEM;
+
+        file->write_buf = grown;
+        file->write_cap = new_cap;
+    }
+
+    for (uint32_t i = 0; i < size; i++) {
+        file->write_buf[file->write_len + i] = data[i];
+    }
+    file->write_len += size;
+    file->dirty = 1;
+
+    return (int)size;
+}
+
+/**
+ * @brief fs_commit_writes
+ *
+ * Writes the accumulated buffer out as the file's new contents and releases it.
+ * fs_atomic_update() handles the encryption and the .tmp/swap dance, and refuses
+ * outright when the master key has been destroyed rather than writing something
+ * nobody can read back.
+ *
+ * A file opened for writing but never written to arrives here with dirty set and
+ * no buffer, and commits zero bytes - that is what makes opening for writing a
+ * truncation.
+ *
+ * @param file Open file; may have nothing to commit.
+ * @return E_OK, or whatever fs_atomic_update() reported.
+ */
+int fs_commit_writes(vfs_file_t *file) {
+    if (!file || !file->dirty) return E_OK;
+
+    int res = E_OK;
+
+    if (file->inode_idx < 0 || file->inode_idx >= MAX_FILES_IN_DIR) {
+        res = E_BADF;
+    } else {
+        uint8_t parent_id = dir_table[file->inode_idx].parent_id;
+        /* An empty commit still needs a valid pointer; fs_create_file() is happy
+         * with a zero length, which is how /bin/touch already creates files. */
+        const uint8_t *content = file->write_buf ? file->write_buf : (const uint8_t *)"";
+
+        res = fs_atomic_update(file->filename, content, file->write_len, parent_id);
+        if (res == E_OK) file->file_size = file->write_len;
+    }
+
+    if (file->write_buf) {
+        kfree(file->write_buf);
+        file->write_buf = 0;
+    }
+    file->write_cap = 0;
+    file->write_len = 0;
+    file->dirty = 0;
+
+    return res;
+}
+
+/**
  * @brief fs_size
  *
  * Reports the number of bytes a caller can actually read out of an open file,
@@ -506,6 +597,19 @@ int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file) {
             file->current_offset = 0;
             file->ref_count = 1;
             file->inode_idx = i;
+
+            /*
+             * The write-buffer fields are initialised here because this is the
+             * only constructor a vfs_file_t has, and its callers do not zero it:
+             * sys_open() hands over raw kmalloc'd memory and sys_cat_raw() a
+             * bare stack local. Left as they came, a garbage `dirty` would make
+             * fs_commit_writes() free a garbage pointer on the first close.
+             */
+            file->write_buf = 0;
+            file->write_len = 0;
+            file->write_cap = 0;
+            file->dirty = 0;
+
             vfs_unlock();
             return E_OK;
         }

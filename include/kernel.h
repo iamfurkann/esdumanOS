@@ -9,7 +9,7 @@
  */
 #define OS_VERSION_MAJOR    0
 #define OS_VERSION_MINOR    4
-#define OS_VERSION_PATCH    2
+#define OS_VERSION_PATCH    3
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.

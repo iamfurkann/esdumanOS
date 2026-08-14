@@ -358,9 +358,14 @@ void exit_current_process(arch_regs_t *regs) {
                 wakeup_tasks(WAIT_IPC);
             }
             else if (curr->fd_table[i].type == 2 && curr->fd_table[i].ptr != 0) {
+                /* Same commit-on-last-reference rule as sys_close(): a program
+                 * that writes and then exits without closing would otherwise
+                 * lose everything it wrote. Nothing can be reported from here,
+                 * so a failure is logged by fs_commit_writes() itself. */
                 vfs_file_t *f = (vfs_file_t *)curr->fd_table[i].ptr;
                 f->ref_count--;
                 if (f->ref_count <= 0) {
+                    fs_commit_writes(f);
                     kfree((void *)curr->fd_table[i].ptr);
                 }
             }

@@ -339,6 +339,41 @@ int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
 }
 
 /**
+ * @brief fs_size
+ *
+ * Reports the number of bytes a caller can actually read out of an open file,
+ * which is not the same thing as the size recorded in the directory table.
+ * Under SEC_LEVEL_CRYPTO_ENFORCED - the default - what is on the disk is
+ * ciphertext: an IV, a header, and the plaintext padded to an AES block. A
+ * stat() that handed back dir_table's file_size would therefore be wrong for
+ * every regular file in a normally configured system, and an lseek(SEEK_END)
+ * built on it would land past the end of the data every time.
+ *
+ * The branch mirrors fs_read() deliberately, including the refusal after
+ * LOCKDOWN: with the master key destroyed the encrypted path is still selected,
+ * and reporting the raw ciphertext length instead of failing would be answering
+ * a question we can no longer answer.
+ *
+ * @param file Open file to measure.
+ * @param out_size Receives the readable byte count on success.
+ * @return E_OK on success, or a negative error code.
+ */
+int fs_size(vfs_file_t *file, uint32_t *out_size) {
+    if (!file || !out_size) return E_INVAL;
+
+    if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
+        if (!crypto_fs_key_is_usable()) {
+            klog(LOG_LEVEL_ERROR, "VFS", "Encrypted size query refused: master key destroyed.");
+            return E_ACCES;
+        }
+        return fs_size_encrypted(file, kernel_master_key, out_size);
+    }
+
+    *out_size = file->file_size;
+    return E_OK;
+}
+
+/**
  * @brief fs_create_file_raw
  * @param name
  * @param content

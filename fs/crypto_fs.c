@@ -14,6 +14,7 @@
 #include "kheap.h"
 #include "rtc.h"
 #include "hmac.h"
+#include "bcache.h"
 
 
 /**
@@ -129,6 +130,83 @@ int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, con
     int ret = fs_create_file_raw(name, enc_buffer, total_len, parent_id);
     kfree(enc_buffer);
     return ret;
+}
+
+/**
+ * @brief Reports how many plaintext bytes an encrypted file holds.
+ *
+ * The directory table records what the file occupies on disk, and for an
+ * encrypted file that is 16 bytes of IV plus a 40-byte header plus the plaintext
+ * padded up to an AES block - so it is never the number read() will hand back.
+ * Since SEC_LEVEL_CRYPTO_ENFORCED is the default (see security.c), that gap is
+ * the normal case rather than a corner one, which is why stat() and lseek() ask
+ * here instead of reading dir_table directly.
+ *
+ * This costs one block, not one file. fs_create_encrypted() above writes the
+ * magic and the original length as the first eight bytes of the payload, so both
+ * land inside ciphertext block 0 and decrypting that single block is enough. The
+ * IV sits in front of it in the clear, which is what CBC needs to decrypt block 0
+ * on its own.
+ *
+ * BOUNDARY: the length returned here is NOT authenticated. The header is
+ * encrypted, but the HMAC covers the plaintext and is only checked by
+ * fs_read_encrypted() once it has the whole file. Someone who can write to the
+ * disk can therefore make stat() report a wrong size - the subsequent read()
+ * fails the integrity check, but the size itself carries no guarantee. Do not
+ * treat a stat() size as evidence that the file is intact.
+ *
+ * @param file Open file whose first sector is to be inspected.
+ * @param key 32-byte master key.
+ * @param out_size Receives the plaintext length on success.
+ * @return E_OK on success, or a negative error code.
+ */
+int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_size) {
+    if (!file || !out_size) return E_INVAL;
+
+    /*
+     * Same threshold fs_read_encrypted() uses: a file that cannot even hold the
+     * IV and header has no plaintext to report, and reads of it return 0.
+     */
+    if (file->file_size <= 56) {
+        *out_size = 0;
+        return E_OK;
+    }
+
+    /*
+     * The IV and the first ciphertext block are the first 32 bytes of the file,
+     * so they are always inside its first sector. Read it through the block
+     * cache, which is where fs_read_raw() would find it anyway.
+     */
+    uint8_t sector[512];
+    bcache_read_sector(file->start_sector, sector);
+
+    /* Aligned because the header fields are read back through a uint32_t view. */
+    uint8_t block[AES_BLOCKLEN] __attribute__((aligned(4)));
+    for (int i = 0; i < AES_BLOCKLEN; i++) block[i] = sector[16 + i];
+
+    struct AES_ctx ctx;
+    AES_init_ctx_iv(&ctx, key, sector);
+    AES_CBC_decrypt_buffer(&ctx, block, AES_BLOCKLEN);
+
+    uint32_t magic = ((uint32_t *)block)[0];
+    uint32_t orig_len = ((uint32_t *)block)[1];
+
+    if (magic != 0x53414645) {
+        /* Wrong key or a corrupted header. Reporting the on-disk size here would
+         * be inventing an answer; fs_read_encrypted() refuses the same case. */
+        return E_IO;
+    }
+
+    /*
+     * Cross-check against what the file can physically hold, so a tampered
+     * length cannot be handed back as though it were plausible. The payload is
+     * everything after the IV; the header takes 40 bytes of it.
+     */
+    uint32_t max_possible_len = (file->file_size - 16) - 40;
+    if (orig_len > max_possible_len) return E_IO;
+
+    *out_size = orig_len;
+    return E_OK;
 }
 
 /**

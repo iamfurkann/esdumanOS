@@ -42,7 +42,6 @@ static int bytes_equal(const uint8_t *a, const uint8_t *b, uint32_t n) {
  */
 void run_crypto_tests(void) {
     printk("\n--- Crypto & CryptoFS Tests ---\n");
-    serial_print("\n--- Crypto & CryptoFS Tests ---\n");
 
     /*
      * Full-digest comparisons, not just the leading bytes. The padding and

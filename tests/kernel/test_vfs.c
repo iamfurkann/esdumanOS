@@ -5,10 +5,11 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "ktest.h"
-#include "syscall.h" 
+#include "syscall.h"
 #include "fs.h"
 #include "errno.h"
 #include "libft.h"
+#include "security.h"
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
@@ -49,6 +50,102 @@ static inline int sys_get_dir_id_u(const char *name) {
 }
 
 /**
+ * @brief Tests that fs_size() reports readable bytes rather than on-disk bytes.
+ *
+ * The directory table records what a file occupies on the disk. Under
+ * SEC_LEVEL_CRYPTO_ENFORCED, which security.c makes the default, that is an IV,
+ * a header and the plaintext padded up to an AES block - so it is larger than
+ * what read() returns, always, for every regular file in the system. stat() and
+ * lseek(SEEK_END) are built on fs_size() precisely so they do not inherit that
+ * discrepancy.
+ *
+ * The gap itself is asserted rather than assumed: if encryption were ever to
+ * stop padding, or fs_size() were quietly changed to return dir_table's value,
+ * a test that only checked "size == strlen(content)" would still pass while the
+ * reason the function exists had evaporated.
+ *
+ * Expected Behavior:
+ * - fs_size() returns exactly the number of bytes written.
+ * - fs_read() hands back that same number, so the two agree.
+ * - With encryption on, the on-disk size is strictly larger.
+ *
+ * Edge Cases Covered:
+ * - A file too short to hold the header reports 0 rather than a negative or a
+ *   wrapped length.
+ * - Null arguments are rejected instead of dereferenced.
+ */
+static void test_vfs_size_reporting(void) {
+    static const char payload[] = "esdumanOS fs_size probe: the length here is what read() must return.";
+    const uint32_t payload_len = (uint32_t)(sizeof(payload) - 1);
+
+    int created = fs_create_file("sizeprobe.txt", (const uint8_t *)payload, payload_len, 0);
+    KTEST_ASSERT(created >= 0, "[VFS] fs_size probe file created");
+
+    vfs_file_t f;
+    int opened = fs_open("sizeprobe.txt", 0, &f);
+    KTEST_ASSERT(opened == E_OK, "[VFS] fs_size probe file opened");
+
+    if (opened == E_OK) {
+        uint32_t reported = 0xFFFFFFFFu;
+        int rc = fs_size(&f, &reported);
+
+        KTEST_ASSERT(rc == E_OK, "[VFS] fs_size() succeeds on an open file");
+        KTEST_ASSERT(reported == payload_len,
+                     "[STRICT] [VFS] fs_size() reports the bytes written, not the bytes on disk");
+
+        if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
+            /*
+             * 16 bytes of IV plus a 40-byte header, then padding. The exact
+             * total is not the point; that it differs at all is.
+             */
+            KTEST_ASSERT(f.file_size > reported + 40,
+                         "[STRICT] [VFS] the on-disk size is larger, which is why fs_size() exists");
+        }
+
+        /* And the number fs_size() gave is the number a read actually yields. */
+        uint8_t readback[128];
+        for (uint32_t i = 0; i < sizeof(readback); i++) readback[i] = 0;
+
+        f.current_offset = 0;
+        int got = fs_read(&f, readback, sizeof(readback));
+        KTEST_ASSERT(got == (int)reported,
+                     "[STRICT] [VFS] fs_read() returns exactly the count fs_size() predicted");
+
+        int same = 1;
+        for (uint32_t i = 0; i < payload_len; i++) {
+            if (readback[i] != (uint8_t)payload[i]) same = 0;
+        }
+        KTEST_ASSERT(same, "[VFS] the bytes read back match what was written");
+    }
+
+    KTEST_ASSERT(fs_size(0, 0) < 0, "[VFS] fs_size() rejects null arguments");
+
+    /*
+     * A file with no room for the IV and header. fs_read_encrypted() already
+     * treats this as empty, and fs_size() has to agree with it rather than
+     * underflow the subtraction that derives the maximum plausible length.
+     */
+    uint32_t tiny_size = 0xFFFFFFFFu;
+    vfs_file_t tiny;
+    for (uint32_t i = 0; i < sizeof(tiny.filename); i++) tiny.filename[i] = '\0';
+    tiny.file_size = 8;
+    tiny.current_offset = 0;
+    tiny.start_sector = FAT_EOF;
+    tiny.ref_count = 1;
+    tiny.inode_idx = -1;
+
+    if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
+        KTEST_ASSERT(fs_size(&tiny, &tiny_size) == E_OK && tiny_size == 0,
+                     "[STRICT] [VFS] a file too short to hold the header reports size 0");
+    } else {
+        KTEST_ASSERT(fs_size(&tiny, &tiny_size) == E_OK && tiny_size == 8,
+                     "[VFS] unencrypted, fs_size() is the on-disk size");
+    }
+
+    fs_delete("sizeprobe.txt", 0);
+}
+
+/**
  * @brief Tests VFS directory boundaries, depth limits, and prevents path traversal (OOB).
  *
  * This test evaluates the robustness of the Virtual File System (VFS) against
@@ -68,7 +165,6 @@ static inline int sys_get_dir_id_u(const char *name) {
  */
 void test_vfs_boundary_and_depth(void) {
     printk("\n--- VFS Boundary and Depth (OOB) Tests ---\n");
-    serial_print("\n--- VFS Boundary and Depth (OOB) Tests ---\n");
 
     /*
      * The nesting is driven by chdir() now. mkdir() no longer takes a parent
@@ -198,7 +294,6 @@ void test_vfs_boundary_and_depth(void) {
  */
 void run_vfs_tests(void) {
     printk("\n--- VFS (Virtual File System) Tests ---\n");
-    serial_print("\n--- VFS (Virtual File System) Tests ---\n");
 
     char *u_dir = (char *)0x500000;
     char *u_fake = (char *)0x500100;
@@ -227,4 +322,5 @@ void run_vfs_tests(void) {
     KTEST_ASSERT(del_res >= 0, "[STRICT] sys_delete_file successfully deleted the file");
 
     test_vfs_boundary_and_depth();
+    test_vfs_size_reporting();
 }

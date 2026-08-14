@@ -119,6 +119,8 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     new_task->in_signal_handler = 0;
     new_task->state = TASK_RUNNING;
     new_task->wait_reason = WAIT_NONE;
+    new_task->sleep_deadline = 0;
+    new_task->sleep_active = 0;
     new_task->wait_mutex = 0;
     new_task->held_mutex = 0;
     new_task->pending_signals = 0;
@@ -476,6 +478,33 @@ void wakeup_tasks(int reason) {
 }
 
 /**
+ * @brief Wake every task whose sleep() deadline has passed.
+ *
+ * Deliberately not wakeup_tasks(WAIT_TIMER): that wakes everyone waiting on a
+ * reason at once, which is the right shape for "a key arrived" and the wrong one
+ * for sleeping, where each task asked for a different moment. The deadline lives
+ * in the PCB and is checked per task here.
+ *
+ * The subtraction is signed on purpose. timer_ticks is a 32-bit counter that
+ * wraps after roughly 497 days at TIMER_HZ; comparing the raw values with >=
+ * would leave a task that armed its deadline just before the wrap asleep until
+ * the counter came all the way back round.
+ */
+void wake_expired_sleepers(void) {
+    uint32_t now = timer_get_ticks();
+
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->state != TASK_WAITING || p->wait_reason != WAIT_TIMER) continue;
+        if (!p->sleep_active) continue;
+
+        if ((int32_t)(now - p->sleep_deadline) >= 0) {
+            p->state = TASK_RUNNING;
+            p->wait_reason = WAIT_NONE;
+        }
+    }
+}
+
+/**
  * @brief Schedule the next task to run.
  * 
  * @param regs Pointer to the current CPU registers.
@@ -540,7 +569,38 @@ void schedule(arch_regs_t *regs) {
     if (regs && (regs->cs & 0x03) == 0) {
         return;
     }
-    
+
+    /*
+     * Bottom halves, before a task is picked rather than after one has been.
+     *
+     * process_pending_kernel_timers() used to be called at the very end of this
+     * function, which put it behind the "current_task == next_task" early return
+     * below: whenever the same task was reselected - the normal case while only
+     * the idle task is runnable, with the shell blocked on WAIT_KBD - armed
+     * timers were counted down by the tick handler and then never run. It also
+     * sat after CR3 had been loaded with the incoming task's directory while
+     * still executing on the outgoing task's kernel stack, which happens to be
+     * harmless for callbacks that only touch kernel mappings and is not a
+     * property worth depending on.
+     *
+     * Both now run on every entry, on the caller's own stack and directory, and
+     * before the selection passes - so a task either of them makes runnable can
+     * be chosen in this same pass instead of waiting for the next one. That
+     * ordering is load-bearing for wake_expired_sleepers(): a sweep after the
+     * selection would leave a due sleeper waiting one more scheduling round.
+     *
+     * Running either from IRQ0 instead would mean walking the task list from an
+     * interrupt, and that list is edited without masking interrupts - see the
+     * note above. This is the same reasoning that made kernel timers a bottom
+     * half in the first place.
+     *
+     * Progress does not depend on another task being awake: the idle task is a
+     * Ring 3 loop of "mov eax, SYSCALL_YIELD; int 0x80" (init_multitasking()),
+     * so schedule() keeps being entered even when every other task is sleeping.
+     */
+    process_pending_kernel_timers();
+    wake_expired_sleepers();
+
     if (current_task != 0 && regs) {
         current_task->regs = *regs;
     }
@@ -622,8 +682,7 @@ void schedule(arch_regs_t *regs) {
 
     if (regs) *regs = current_task->regs;
     if (regs) regs->eflags |= 0x200;
-    process_pending_kernel_timers();
-    
+
     check_and_deliver_signals(regs);
 }
 

@@ -37,7 +37,6 @@
  */
 void run_bcache_tests(void) {
     printk("\n--- Block Cache (bcache) Tests ---\n");
-    serial_print("\n--- Block Cache (bcache) Tests ---\n");
 
     uint8_t w_buf[512];
     uint8_t r_buf[512];

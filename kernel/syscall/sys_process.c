@@ -20,6 +20,7 @@
 #include "stack.h"
 #include "uaccess.h"
 #include "bcache.h"
+#include "rtc.h"
 
 static int copy_user_string(char *destination, const char *source, size_t max_len) {
     if (!validate_string_pointer(source, max_len)) return 0;
@@ -176,6 +177,91 @@ void sys_getuid(arch_regs_t *regs) {
         regs->eax = current_task->uid;
     } else {
         regs->eax = E_FAULT;
+    }
+}
+
+/**
+ * @brief Function sys_getpid
+ */
+void sys_getpid(arch_regs_t *regs) {
+    if (current_task != 0) {
+        regs->eax = current_task->pid;
+    } else {
+        regs->eax = E_FAULT;
+    }
+}
+
+/**
+ * @brief Blocks the caller for a number of milliseconds.
+ *
+ * The first production use of WAIT_TIMER, which had been defined since the
+ * beginning and referenced by one test.
+ *
+ * The mechanism is a deadline in the PCB plus wake_expired_sleepers() in
+ * schedule(), not the kernel timer slots in signal.c: those are global, hold a
+ * bare void(*)(void) and carry no pid, so they cannot express "wake this task
+ * at tick N". wakeup_tasks(WAIT_TIMER) is equally unsuitable on its own - it
+ * wakes every sleeper at once, whatever each of them asked for.
+ *
+ * Because syscall_block_and_restart() resumes on the trap instruction, this
+ * handler runs again from the top when the task wakes, and sleep_active is what
+ * tells the two entries apart. A wakeup that arrives early - anything else
+ * calling wakeup_tasks(WAIT_TIMER) - finds the deadline still in the future and
+ * blocks again rather than returning short.
+ */
+void sys_sleep(arch_regs_t *regs) {
+    if (current_task == 0) { regs->eax = E_FAULT; return; }
+
+    if (current_task->sleep_active) {
+        uint32_t now = timer_get_ticks();
+
+        /* Signed difference: timer_ticks wraps, see wake_expired_sleepers(). */
+        if ((int32_t)(now - current_task->sleep_deadline) >= 0) {
+            current_task->sleep_active = 0;
+            current_task->sleep_deadline = 0;
+            regs->eax = E_OK;
+            return;
+        }
+
+        if (!syscall_block_and_restart(regs, WAIT_TIMER)) {
+            current_task->sleep_active = 0;
+            current_task->sleep_deadline = 0;
+            regs->eax = E_AGAIN;
+        }
+        return;
+    }
+
+    int requested_ms = (int)regs->ebx;
+    if (requested_ms < 0) { regs->eax = E_INVAL; return; }
+    if (requested_ms == 0) { regs->eax = E_OK; return; }
+
+    /*
+     * Milliseconds to ticks, rounding up. Rounding up matters because TIMER_HZ
+     * is 100, so the resolution is 10 ms and anything shorter would otherwise
+     * convert to zero ticks and not wait at all - the one thing a sleep must
+     * never do.
+     *
+     * Split into whole seconds and a remainder so the multiply cannot overflow:
+     * ms * TIMER_HZ wraps past roughly 43 s of requested delay, and a wrapped
+     * value produces a *shorter* sleep than asked for, which is exactly the
+     * failure that would go unnoticed.
+     */
+    uint32_t ms = (uint32_t)requested_ms;
+    uint32_t ticks = (ms / 1000u) * TIMER_HZ + ((ms % 1000u) * TIMER_HZ + 999u) / 1000u;
+    if (ticks == 0) ticks = 1;
+
+    current_task->sleep_deadline = timer_get_ticks() + ticks;
+    current_task->sleep_active = 1;
+
+    if (!syscall_block_and_restart(regs, WAIT_TIMER)) {
+        /*
+         * Not a live Ring 3 syscall frame, so the task cannot be suspended -
+         * report that rather than pretending to have waited. Same contract as
+         * the console read path in sys_read().
+         */
+        current_task->sleep_active = 0;
+        current_task->sleep_deadline = 0;
+        regs->eax = E_AGAIN;
     }
 }
 

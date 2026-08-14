@@ -22,6 +22,19 @@ extern int tests_failed;
 #define KT_REPORT_PASS 1
 #define KT_REPORT_DONE 2
 
+/*
+ * Returns timer_get_ticks() to the caller instead of recording a result.
+ *
+ * Ring 3 has no clock of its own, so without this the sleep() assertions could
+ * only check that the call returned - not that it waited. Measuring is the whole
+ * point: a sleep that returns instantly and a sleep that works are
+ * indistinguishable from user space otherwise.
+ *
+ * Test builds only, like the rest of syscall 200; production kernels answer
+ * E_NOSYS and no timing surface is added to them.
+ */
+#define KT_REPORT_TICKS 3
+
 /**
  * @brief Terminates QEMU with the suite's verdict.
  * @param is_success Non-zero when every assertion passed.
@@ -45,19 +58,20 @@ void ktest_finish(void);
  */
 void sys_ktest_report(arch_regs_t *regs);
 
-/**
- * @brief Transmits a single character to the primary serial port.
+/*
+ * serial_putchar() and serial_print() used to live here: a raw write to port
+ * 0x3F8 and a loop over it, justified as a low-level path for "when higher-level
+ * printing subsystems are unstable".
  *
- * Bypasses standard output mechanisms to provide low-level debugging capabilities 
- * over the COM1 port (0x3F8). Critical for safely logging test results when higher-level 
- * printing subsystems are unstable.
+ * They are gone because printk() already reaches COM1 and everything that called
+ * them called printk() with the same text on the line above, so the whole suite
+ * was emitting its output twice on the serial console. The names also shadowed
+ * the real serial_print() in drivers/serial.c, which does wait for the transmit
+ * register rather than writing blind.
  *
- * @param c The character to transmit.
- * @expected The character is written directly to the serial I/O port without relying on interrupts.
+ * If a future test genuinely needs output from somewhere printk() cannot be
+ * trusted, include serial.h and call the driver's version.
  */
-static inline void serial_putchar(char c) {
-    __asm__ volatile ( "outb %0, %1" : : "a"(c), "Nd"((uint16_t)0x3F8) );
-}
 
 /**
  * @brief Converts an integer to a null-terminated string representation.
@@ -79,19 +93,6 @@ static inline void ktest_itoa(int n, char *buf) {
 }
 
 /**
- * @brief Transmits a full null-terminated string to the serial port.
- *
- * Iterates through a character string and sequentially pushes each byte to the serial 
- * interface using the primitive `serial_putchar` function.
- *
- * @param str A pointer to the null-terminated string to output.
- * @expected The entire string is emitted to the COM1 serial interface.
- */
-static inline void serial_print(const char *str) {
-    while (*str) serial_putchar(*str++);
-}
-
-/**
  * @brief Records one failure so the run can list them all together at the end.
  *
  * A full run prints several hundred lines, and hunting the [FAIL] markers out of
@@ -104,19 +105,29 @@ static inline void serial_print(const char *str) {
  */
 void ktest_record_failure(const char *message, const char *file, int line);
 
+/*
+ * Every result used to be written twice: once through printk() and once more
+ * through a serial_print() alongside it. printk() already emits to COM1 as well
+ * as the VGA console and the dmesg ring (see lib/stdio.c), so on a
+ * "-serial stdio" run - which is how the suite is normally watched, and how CI
+ * captures it - every [PASS] and [FAIL] appeared twice. A single failure showed
+ * up as two identical numbered entries in the summary, which reads like two
+ * separate defects.
+ *
+ * printk() is also the better of the two paths: serial_write_char() waits for
+ * the UART to report the transmit register empty, while the raw port write the
+ * test framework carried did not, so it could shift characters out from under an
+ * unfinished byte.
+ */
 #define KTEST_ASSERT(condition, message) \
     do { \
         if (condition) { \
             printk("  [PASS] "); printk(message); printk("\n"); \
-            serial_print("  [PASS] "); serial_print(message); serial_print("\n"); \
             tests_passed++; \
         } else { \
             printk("  [FAIL] "); printk(message); \
             printk(" ("); printk(__FILE__); printk(":"); \
             char line_str[16]; ktest_itoa(__LINE__, line_str); printk(line_str); printk(")\n"); \
-            serial_print("  [FAIL] "); serial_print(message); \
-            serial_print(" ("); serial_print(__FILE__); serial_print(":"); \
-            serial_print(line_str); serial_print(")\n"); \
             ktest_record_failure(message, __FILE__, __LINE__); \
             tests_failed++; \
         } \

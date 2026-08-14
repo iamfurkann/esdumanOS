@@ -38,7 +38,6 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
  */
 void run_adversarial_tests(void) {
     printk("\n--- Adversarial Input (Adversarial/Security) Tests ---\n");
-    serial_print("\n--- Adversarial Input (Adversarial/Security) Tests ---\n");
 
     int safe_content = 0x500C00;
 

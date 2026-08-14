@@ -11,11 +11,14 @@
 #include "elf.h"
 #include "libft.h"
 #include "security.h"
-static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
-    int ret;
-    asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
-    return ret;
-}
+
+/*
+ * No ktest_syscall() helper here, unlike most of the sibling modules. There was
+ * one, copied along with the includes, and nothing in this file ever called it:
+ * these tests drive the VFS and the ELF loader through their kernel entry points
+ * directly rather than across the trap gate. Removed rather than left as a
+ * stub that quietly implies a coverage this module does not have.
+ */
 
 /**
  * @brief Executes integration tests across multiple kernel components.
@@ -35,7 +38,6 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
  */
 void run_integration_tests(void) {
     printk("\n--- Cross-Component Integration Tests ---\n");
-    serial_print("\n--- Cross-Component Integration Tests ---\n");
 
     asm volatile("sti");
 multitasking_enabled = 0; 

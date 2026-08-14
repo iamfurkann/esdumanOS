@@ -28,7 +28,6 @@
  */
 void run_syscall_tests(void) {
     printk("\n--- Syscall Dispatcher Tests ---\n");
-    serial_print("\n--- Syscall Dispatcher Tests ---\n");
 
     // Allocate an architecture-specific register structure to simulate syscall input.
     arch_regs_t regs;

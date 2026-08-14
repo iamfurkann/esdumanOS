@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-alpha] - 2026-08-14
+
+Adds the syscalls a program needs to ask about things rather than only do them:
+`stat`, `fstat`, `lseek`, `getpid` and `sleep`. Until now a program could open a file
+but not learn its size or whether it was a directory, could read forwards but never
+reposition, could not learn its own pid, and had no way to wait for a duration at all.
+
+Two of the five needed groundwork. `stat` has to report the size a `read()` will
+return, and that is not the size the directory table records — with encryption on by
+default the stored form carries an IV, a header and padding — so sizes come from a new
+VFS helper that reads the real length out of the file's header. And `sleep` is the
+first production use of `WAIT_TIMER`, which had been defined since the beginning and
+appeared in exactly one test.
+
+Test coverage: 345 → 403 assertions.
+
+### Added
+
+- **`stat` (48) and `fstat` (49).** Both fill an `esd_stat_t` (`include/stat.h`),
+  shared verbatim between the kernel and user space. `fstat` refuses pipes, the
+  console and `/dev` nodes rather than answering for them: a device descriptor stores
+  a device table *index* in the field a file descriptor stores a pointer in, and that
+  overload is what once made a stale comparison in `open()` an indirect call through
+  `dev_table[-2]`. There is deliberately no `st_mtime` — the on-disk entry has no
+  timestamps and the RTC is not wired to the VFS, so one would have to be invented.
+- **`lseek` (50)**, operating on `vfs_file_t.current_offset`, which was already the
+  cursor both read paths use. `SEEK_END` asks the size helper, so seeking to the end
+  of an encrypted file lands on the end of the data rather than inside the padding.
+  Pipes and devices report `E_SPIPE`.
+- **`getpid` (51)** and **`sleep` (52)**. `sleep` takes milliseconds: `TIMER_HZ` is
+  100, so the resolution is 10 ms and a seconds-only call could not reach it. The
+  shell's new `sleep` builtin still takes seconds.
+- **`fs_size()` in the VFS**, branching on security level the way `fs_read()` does,
+  refusal after LOCKDOWN included. For an encrypted file it decrypts one AES block
+  rather than the whole file: `fs_create_encrypted()` writes the magic and the
+  original length as the first eight bytes of the payload, so both sit in ciphertext
+  block 0 and the IV in front of it is all CBC needs to get at them.
+- **`/bin/stat`**, which prints the readable size and the on-disk size side by side
+  so neither looks wrong on its own.
+- **A test-build-only `KT_REPORT_TICKS`** on the existing report protocol, because
+  Ring 3 has no clock and a `sleep()` that never blocked would otherwise satisfy every
+  assertion a payload could make about it. The timing assertions measure.
+
+### Fixed
+
+- **Kernel timers could be counted down and then never run.**
+  `process_pending_kernel_timers()` was called at the very end of `schedule()`, which
+  put it behind the `current_task == next_task` early return. Whenever the same task
+  was reselected — the ordinary case while only the idle task is runnable, with the
+  shell blocked on `WAIT_KBD` — an expired timer waited for some unrelated task to
+  become runnable before its callback fired. It now runs before the selection passes,
+  on the caller's own stack and page directory instead of after CR3 has already been
+  switched. The countdown and the drain had no test at all; they have one now.
+
+### Notes
+
+- `st_size` for an encrypted file is **not authenticated**. It is read from the file's
+  own header, and the HMAC that would vouch for it covers the plaintext and is checked
+  only by `read()` over the whole file. A tampered header can make `stat` report a
+  wrong size — the read that follows fails, but the size alone proves nothing. Stated
+  in the README and on the function itself rather than left to be discovered.
+- `file_descriptor_t.offset` is dead for files; nothing on the read or write path
+  consults it. Left in place, since the pipe and device paths do use it.
+
 ## [0.3.1-alpha] - 2026-08-13
 
 ### Fixed

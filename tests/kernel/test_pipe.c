@@ -37,7 +37,6 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
  */
 void run_pipe_tests(void) {
     printk("\n--- IPC (Pipe) Unit and Integration Tests ---\n");
-    serial_print("\n--- IPC (Pipe) Unit and Integration Tests ---\n");
     
     // ---------------------------------------------------------
     // PART 1: UNIT TEST - Internal Logic and Blocking

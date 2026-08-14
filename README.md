@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.3.1-alpha
+**Version:** 0.4.0-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -63,11 +63,19 @@ CPL=3, and it also runs under hardware SMEP/SMAP enforcement. Before v0.2.0 ever
 automated test ran at CPL=0, so process isolation and the scheduler were never
 exercised at all.
 
-v0.3.0 moves the working directory into the kernel. Until now the shell kept it in a
+v0.3.0 moved the working directory into the kernel. Until then the shell kept it in a
 userspace global and handed a directory id to every syscall that touched a path, which
 meant a process chose where its own relative lookups started — and every `/bin` tool
 passed a hardcoded 0, so they all operated on the root directory no matter where you
 had `cd`'d to.
+
+v0.4.0 lets a program ask about things rather than only do them: `stat`, `fstat`,
+`lseek`, `getpid` and `sleep`. Two of those needed something the tree did not have.
+`stat` had to answer with the size a `read()` would return, which is not the size the
+directory table records — with encryption on by default, the stored form carries an IV,
+a header and padding — so sizes now come from a helper that reads the real length out of
+the file's header. And `sleep` is the first production use of `WAIT_TIMER`, which had
+been defined since the beginning and referenced only by a test.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -77,7 +85,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 14 user-space programs and 20+ shell builtins
+- 15 user-space programs and 20+ shell builtins
 - 23 kernel self-test modules and CI pipeline
 
 **What to expect:**
@@ -96,7 +104,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 45 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 50 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
 | **Kernel Logging** | 8 KB ring buffer logger (dmesg equivalent) with disk persistence to `/var/log/dmesg.log` |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
@@ -153,7 +161,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 20+ builtins (cat, ls, cd, pwd, mkdir, rm, mv, echo, env, export, exec, kill, su, dmesg, hexdump, help), pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
-| **Programs** | 14 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `date` |
+| **Programs** | 15 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `date`, `stat` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -600,14 +608,16 @@ esdumanOS/
 |       |-- kill.c                   Send signal to process
 |       |-- grep.c                   Search text patterns
 |       |-- head.c                   Display first lines of file
-|       +-- date.c                   Display date and time
+|       |-- date.c                   Display date and time
+|       +-- stat.c                   Show a file's size, type and owner
 |
-|-- include/                         40 header files
-|   |-- kernel.h                     Master header (version 0.3.1-alpha)
+|-- include/                         41 header files
+|   |-- kernel.h                     Master header (version 0.4.0-alpha)
 |   |-- types.h                      Integer type definitions
-|   |-- syscall.h                    45 syscall number definitions
+|   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
 |   |-- fs.h                         VFS structures, file operations
+|   |-- stat.h                       esd_stat_t and the lseek origins
 |   |-- paging.h                     Virtual memory constants
 |   |-- entropy.h                    Entropy pool API and quality contract
 |   +-- security.h                   Security level enumeration
@@ -633,7 +643,7 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 45 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 50 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 ### Process Management
 
@@ -642,7 +652,16 @@ The kernel exposes 45 system calls through `INT 0x80`. The syscall number is pas
 | 1 | `EXIT` | Terminate the current process |
 | 5 | `EXEC` | Load and execute an ELF binary |
 | 7 | `SET_PRIORITY` | Set process scheduling priority |
+| 51 | `GETPID` | Get the process ID of the caller |
+| 52 | `SLEEP` | Block the caller for a number of **milliseconds** |
 | 99 | `YIELD` | Voluntarily yield the CPU |
+
+`SLEEP` takes milliseconds rather than seconds because `TIMER_HZ` is 100, giving a
+10 ms resolution that a seconds-only call could not reach; the shell's `sleep`
+builtin still takes seconds and multiplies. A sleeping task holds `WAIT_TIMER`
+with an absolute deadline in its PCB, and `schedule()` wakes it once that tick
+passes — not `wakeup_tasks(WAIT_TIMER)`, which would wake every sleeper at once
+regardless of what each one asked for.
 
 ### I/O and File Descriptors
 
@@ -654,6 +673,8 @@ The kernel exposes 45 system calls through `INT 0x80`. The syscall number is pas
 | 37 | `DUP2` | Duplicate a file descriptor |
 | 38 | `CLOSE` | Close a file descriptor |
 | 40 | `OPEN` | Open a file and return a file descriptor |
+| 49 | `FSTAT` | Report an open descriptor's metadata |
+| 50 | `LSEEK` | Reposition an open file's read offset |
 
 ### File System
 
@@ -672,9 +693,29 @@ The kernel exposes 45 system calls through `INT 0x80`. The syscall number is pas
 | 45 | `SYNC` | Write every dirty block-cache sector out to disk |
 | 46 | `CHDIR` | Change the calling process's working directory |
 | 47 | `GETCWD` | Write the working directory into a user buffer |
+| 48 | `STAT` | Report a path's metadata into a user `esd_stat_t` |
 
 Relative paths in every one of these resolve against the calling process's working
 directory, which lives in the PCB. No syscall takes a base directory as an argument.
+
+`STAT` and `FSTAT` fill an `esd_stat_t` (`include/stat.h`), shared verbatim with
+user space. Two points are worth stating plainly:
+
+- **`st_size` is not the size on disk.** Under `SEC_LEVEL_CRYPTO_ENFORCED` — the
+  default — files are stored as an IV, a header and the plaintext padded to an AES
+  block, so the directory table's length is always larger than what `read()`
+  returns. `st_size` comes from `fs_size()`, which reads the real length out of the
+  file's header; `st_disk_size` reports the stored length alongside it. `LSEEK`
+  with `SEEK_END` uses the same source, so seeking to the end lands on the end of
+  the data rather than somewhere inside the padding.
+- **`st_size` is not authenticated.** For an encrypted file that length is read
+  from the file's own header, and the HMAC that would vouch for it covers the
+  plaintext and is only checked by `read()` over the whole file. Someone able to
+  write to the disk can make `stat` report a wrong size; the read that follows
+  fails, but the size on its own proves nothing.
+
+There is no `st_mtime`. The on-disk directory entry carries no timestamps and the
+RTC is not wired into the VFS, so any time reported here would be invented.
 
 ### IPC and Signals
 

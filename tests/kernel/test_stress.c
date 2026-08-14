@@ -36,7 +36,6 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
  */
 void run_stress_tests(void) {
     printk("\n--- Stress and Boundary Tests ---\n");
-    serial_print("\n--- Stress and Boundary Tests ---\n");
     
     // =========================================================================
     // 1. FD EXHAUSTION TEST
@@ -109,6 +108,23 @@ asm volatile("cli");
     
     // Validate the kernel hit the ceiling and threw an error instead of corrupting the task array.
     KTEST_ASSERT(task_limit_hit == 1, "[STRICT] Process Table: Rejected when maximum task (MAX_TASKS) limit reached");
+
+    /*
+     * loaded_count was being counted and then never looked at, which left the
+     * assertion above weaker than it appears: a refusal on the very first
+     * iteration sets task_limit_hit exactly the same way as a refusal on the
+     * sixteenth. If load_and_exec_elf() failed for some reason unrelated to the
+     * task table - init.elf missing from the test image, say - the test would
+     * report that the limit was enforced without a single task ever having been
+     * created.
+     *
+     * What makes the rejection mean something is that loads succeeded first and
+     * then stopped, below the size of the table.
+     */
+    KTEST_ASSERT(loaded_count > 0,
+                 "[STRICT] Process Table: the ceiling was reached by loading tasks, not by the first load failing");
+    KTEST_ASSERT(loaded_count < MAX_TASKS,
+                 "[STRICT] Process Table: loading stopped below MAX_TASKS rather than past it");
     for(process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->state != TASK_EMPTY && p != current_task && p->pid > 1) {
             if (p->page_directory) {

@@ -150,6 +150,34 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
 int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const uint8_t key[32]);
 
 /**
+ * @brief Reports how many bytes an open file will actually yield to read().
+ *
+ * Not the same as the directory table's file_size: under SEC_LEVEL_CRYPTO_ENFORCED,
+ * which is the default, the on-disk bytes are ciphertext with an IV, a header and
+ * padding on top of the plaintext. stat() and lseek(SEEK_END) ask here so they
+ * agree with read().
+ *
+ * @param file Open file to measure.
+ * @param out_size Receives the readable byte count on success.
+ * @return E_OK on success, or a negative error code.
+ */
+int fs_size(vfs_file_t *file, uint32_t *out_size);
+
+/**
+ * @brief Reads the plaintext length out of an encrypted file's header.
+ *
+ * Decrypts only the first ciphertext block, which is where fs_create_encrypted()
+ * puts the magic and the original length. The result is not authenticated - see
+ * the note on the definition.
+ *
+ * @param file Open file whose header is to be read.
+ * @param key 32-byte decryption key.
+ * @param out_size Receives the plaintext length on success.
+ * @return E_OK on success, or a negative error code.
+ */
+int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_size);
+
+/**
  * @brief Reads raw, unprocessed data directly from the file's sectors.
  * 
  * @param file Pointer to the VFS file structure.

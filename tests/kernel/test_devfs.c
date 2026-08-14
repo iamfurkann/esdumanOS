@@ -62,7 +62,6 @@ static int distinct_byte_values(const uint8_t *buf, int n) {
  */
 void run_devfs_tests(void) {
     printk("\n--- DevFS (Device File System) Tests ---\n");
-    serial_print("\n--- DevFS (Device File System) Tests ---\n");
 
     int dev_idx = fs_get_entry_idx("dev", 0);
     KTEST_ASSERT(dev_idx != -1, "VFS root has /dev directory");

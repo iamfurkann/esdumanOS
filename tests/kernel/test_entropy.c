@@ -57,7 +57,6 @@ static void print_stat(const char *label, uint32_t value) {
     char buf[16];
     ktest_utoa(value, buf);
     printk("        %s%s\n", label, buf);
-    serial_print("        "); serial_print(label); serial_print(buf); serial_print("\n");
 }
 
 /** CPUID leaf 1, ECX bit 30 - the ground truth the quality report must match. */
@@ -142,7 +141,6 @@ static int hex_fields_differ(const char *a, const char *b) {
  */
 void run_entropy_tests(void) {
     printk("\n--- Entropy Pool Tests ---\n");
-    serial_print("\n--- Entropy Pool Tests ---\n");
 
     /* --- The pool is up ------------------------------------------------- */
 
@@ -257,7 +255,6 @@ void run_entropy_tests(void) {
                  "[STRICT] [ENTROPY] the periodic timer earned zero entropy bits");
 
     printk("      [MEASURED] interrupt jitter actually observed:\n");
-    serial_print("      [MEASURED] interrupt jitter actually observed:\n");
     print_stat("timer events    : ", after.events[ENTROPY_SRC_TIMER]);
     print_stat("keyboard events : ", after.events[ENTROPY_SRC_KBD]);
     print_stat("ATA events      : ", after.events[ENTROPY_SRC_ATA]);
@@ -280,8 +277,6 @@ void run_entropy_tests(void) {
      */
     printk("        (dLSB of 4/32 under TCG is arithmetic, not a defect: deltas are\n");
     printk("         multiples of 1000 and 1000 mod 32 == 8, so only 4 values occur.)\n");
-    serial_print("        (dLSB of 4/32 under TCG is arithmetic, not a defect: deltas are\n");
-    serial_print("         multiples of 1000 and 1000 mod 32 == 8, so only 4 values occur.)\n");
 
     /* --- Consumer 1: CryptoFS IVs -------------------------------------- */
 

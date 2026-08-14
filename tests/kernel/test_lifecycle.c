@@ -101,7 +101,6 @@ static int populate_address_space(uint32_t pd) {
  */
 void run_lifecycle_tests(void) {
     printk("\n--- Address Space Lifecycle Tests ---\n");
-    serial_print("\n--- Address Space Lifecycle Tests ---\n");
 
     /*
      * A clone must start empty below the kernel split. Entries 0..3 used to be

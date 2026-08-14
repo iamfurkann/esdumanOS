@@ -24,7 +24,6 @@
  */
 void run_process_tests(void) {
     printk("\n--- Process Scheduler Tests ---\n");
-    serial_print("\n--- Process Scheduler Tests ---\n");
 
     asm volatile("cli");
 

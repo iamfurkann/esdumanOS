@@ -31,7 +31,6 @@
  */
 void run_paging_tests(void) {
     printk("\n--- Paging / Virtual Memory Tests ---\n");
-    serial_print("\n--- Paging / Virtual Memory Tests ---\n");
 
     // Setup predefined virtual and physical addresses for isolated testing.
     uint32_t test_virt = 0x8000000;

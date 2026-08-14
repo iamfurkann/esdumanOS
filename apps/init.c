@@ -175,10 +175,27 @@ void main(void) {
     // directory, and init starts at root. Looking up a bare "sh" from there finds
     // nothing, so the shell would never launch.
     int res = syscall(SYSCALL_EXEC, (int)"/bin/sh", 0, (int)user_buf);
-    
-    if (res == -1) {
-        printk("\n[CRITICAL ERROR] /bin/sh could not be found or executed!\n");
-        printk("System halted.\n");
+
+    /*
+     * Any negative value means the shell never started.
+     *
+     * This tested for -1 exactly, and exec() never returns -1: a missing file is
+     * E_NOENT (-2), a rejected one E_ACCES (-13), a malformed ELF E_NOEXEC (-8).
+     * So on a disk with no usable /bin/sh the branch was skipped, main()
+     * returned, and PID 1 exited without a word - a blank machine with no
+     * diagnostic at all.
+     *
+     * A non-negative value is the shell's own exit status, which means the user
+     * typed "exit"; that is not an error.
+     */
+    if (res < 0) {
+        printk("\n[CRITICAL ERROR] /bin/sh could not be started!\n");
+        printk("The system cannot continue. Halting.\n");
+
+        /* "System halted." used to be printed and then not honoured: control
+         * fell through to _start's sys_exit(). Park here instead so the message
+         * stays on screen and matches what actually happens. */
+        while (1) { syscall(SYSCALL_YIELD, 0, 0, 0); }
     }
 }
 

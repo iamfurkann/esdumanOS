@@ -46,6 +46,8 @@ void main(void) {
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
     
     
+    int status = 0;
+
     int i = 0;
     while(args_buf[i] && args_buf[i] != ' ') i++;
     if (args_buf[i] == ' ') {
@@ -54,17 +56,37 @@ void main(void) {
         char *dst = &args_buf[i+1];
         
         int fd_in = syscall(40, (int)src, 0, 0); // SYSCALL_OPEN (O_RDONLY)
-        if (fd_in < 0) { print("cp: Source not found"); print_newline(); }
+        if (fd_in < 0) { print("cp: Source not found"); print_newline(); status = 1; }
         else {
             int res = syscall(8, (int)dst, (int)"", 0); // SYSCALL_CREATE_FILE
-            if (res < 0) { print("cp: Error creating destination"); print_newline(); }
+            if (res < 0) { print("cp: Error creating destination"); print_newline(); status = 1; }
             else {
                 int fd_out = syscall(40, (int)dst, 1, 0); // SYSCALL_OPEN (O_WRONLY)
-                if (fd_out >= 0) {
+                if (fd_out < 0) {
+                    /* Silently skipped before, leaving an empty destination and
+                     * a success exit. */
+                    print("cp: Error opening destination"); print_newline();
+                    status = 1;
+                } else {
                     char buf[64];
                     int bytes_read;
                     while ((bytes_read = syscall(3, fd_in, (int)buf, 64)) > 0) {
-                        syscall(4, fd_out, (int)buf, bytes_read); // SYSCALL_WRITE
+                        /*
+                         * The result of the write was discarded, which is why a
+                         * copy silently produced a zero-byte file: the kernel
+                         * has no write path for a regular file descriptor yet
+                         * (sys_write handles console, pipes and devices only),
+                         * so every one of these returns E_BADF.
+                         *
+                         * Reporting it does not make cp work - that needs the
+                         * kernel-side write support - but it turns silent data
+                         * loss into a visible failure.
+                         */
+                        if (syscall(4, fd_out, (int)buf, bytes_read) < 0) { // SYSCALL_WRITE
+                            print("cp: Error writing to destination"); print_newline();
+                            status = 1;
+                            break;
+                        }
                     }
                     syscall(38, fd_out, 0, 0); // SYSCALL_CLOSE
                 }
@@ -73,9 +95,10 @@ void main(void) {
         }
     } else {
         print("Usage: cp <src> <dst>"); print_newline();
+        status = 1;
     }
-    
 
-    syscall(1, 0, 0, 0); // EXIT
+
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

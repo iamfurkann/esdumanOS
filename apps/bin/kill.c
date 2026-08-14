@@ -46,8 +46,11 @@ void main(void) {
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
     
     
+    int status = 0;
+
     if (args_buf[0] == '\0') {
         print("Usage: kill <pid>"); print_newline();
+        status = 1;
     } else {
         int pid = 0;
         int i = 0;
@@ -55,12 +58,27 @@ void main(void) {
             pid = pid * 10 + (args_buf[i] - '0');
             i++;
         }
-        int res = syscall(25, pid, 9, 0); // SYSCALL_KILL (SIGKILL=9)
-        if (res < 0) { print("kill: Failed"); print_newline(); }
-        else { print("kill: Sent signal"); print_newline(); }
-    }
-    
 
-    syscall(1, 0, 0, 0); // EXIT
+        /*
+         * The loop above accepts zero digits, so a non-numeric argument left
+         * pid at 0 and the SIGKILL below was sent to PID 0 regardless. Require
+         * at least one digit, and require the whole argument to be digits so a
+         * typo is reported rather than silently truncated.
+         */
+        if (i == 0 || args_buf[i] != '\0') {
+            print("kill: pid must be a number"); print_newline();
+            status = 1;
+        } else if (pid <= 0) {
+            print("kill: pid must be positive"); print_newline();
+            status = 1;
+        } else {
+            int res = syscall(25, pid, 9, 0); // SYSCALL_KILL (SIGKILL=9)
+            if (res < 0) { print("kill: Failed"); print_newline(); status = 1; }
+            else { print("kill: Sent signal"); print_newline(); }
+        }
+    }
+
+
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

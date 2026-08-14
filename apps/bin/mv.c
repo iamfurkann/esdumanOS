@@ -46,6 +46,9 @@ void main(void) {
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
     
     
+    /* Exit status, so a failure is visible to && and ||. */
+    int status = 0;
+
     // mv gets args like "/path/src /path/dst"
     int i = 0;
     while(args_buf[i] && args_buf[i] != ' ') i++;
@@ -54,12 +57,13 @@ void main(void) {
         char *src = args_buf;
         char *dst = &args_buf[i+1];
         int res = syscall(23, (int)src, (int)dst, 0); // SYSCALL_MV_FILE
-        if (res < 0) { print("mv: Error moving file"); print_newline(); }
+        if (res < 0) { print("mv: Error moving file"); print_newline(); status = 1; }
     } else {
         print("Usage: mv <src> <dst>"); print_newline();
+        status = 1;
     }
     
 
-    syscall(1, 0, 0, 0); // EXIT
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

@@ -46,14 +46,18 @@ void main(void) {
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
     
     
+    /* Exit status, so a failure is visible to && and ||. */
+    int status = 0;
+
     if (args_buf[0] == '\0') {
         print("Usage: touch <file>"); print_newline();
+        status = 1;
     } else {
         int res = syscall(8, (int)args_buf, (int)"", 0); // SYSCALL_CREATE_FILE
-        if (res < 0) { print("touch: Error creating file"); print_newline(); }
+        if (res < 0) { print("touch: Error creating file"); print_newline(); status = 1; }
     }
-    
 
-    syscall(1, 0, 0, 0); // EXIT
+
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

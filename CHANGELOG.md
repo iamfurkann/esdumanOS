@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3-alpha] - 2026-08-14
+
+The kernel can write to a file through a descriptor. Two defects recorded in v0.4.2
+came from its absence, and both close here.
+
+### Added
+
+- **`write()` on a regular file descriptor.** `sys_write` handled the console, pipes
+  and `/dev` nodes; a regular file fell through to `E_BADF`. That is why `/bin/cp`
+  produced an empty destination — it opened, read, wrote and closed correctly, and the
+  kernel discarded every write — and why the shell's `>` could never be connected to
+  anything.
+- **`open()` honours its mode argument.** It was read from nowhere and every descriptor
+  was marked read-only, so even `/bin/cp` passing `O_WRONLY` had no effect. Opening for
+  writing truncates.
+- **Output redirection in the shell.** `cmd > file` creates the target if it does not
+  exist, empties it if it does, and sends the command's standard output there.
+
+### How writing works, and why it is narrow
+
+Writes are buffered in the kernel and committed as the file's entire new contents when
+the **last** descriptor referring to it closes. That is not a shortcut taken for
+convenience: under `SEC_LEVEL_CRYPTO_ENFORCED`, which is the default, a stored file is a
+single AES-CBC blob with an HMAC over its whole plaintext, so adding one byte at the end
+means re-encrypting and re-authenticating all of it. The VFS has no streaming write
+primitive either — `fs_atomic_update()` replaces a whole file and is the only way in.
+
+What follows from that, and is documented rather than half-emulated:
+
+- No appending (`>>`), no writing into the middle of a file, no seeking during a write.
+- A file written this way is capped at 64 KB, because the buffer is held in the kernel
+  heap until the commit.
+- `close()` returns the commit's result. A full disk or a destroyed master key surfaces
+  there and nowhere else, so a caller that discards it turns a failure into silent data
+  loss — the same shape as the `cp` defect this release fixes.
+
+The commit is tied to the last reference rather than to every `close()`, because `dup2()`
+can point several descriptors at one open file; committing on each would publish a
+partial buffer. A process that exits still holding a written file commits it too.
+
+### Tests
+
+Test coverage: 411 → 445 assertions.
+
+The Ring 3 half asserts what the semantics actually are: the file on disk is unchanged
+while a descriptor is open, `close()` commits it, the bytes survive the encrypt/decrypt
+round trip, opening for writing truncates, a read-only descriptor refuses writes, and —
+the assertion the design turns on — closing one of two duplicated descriptors does not
+commit while closing the second does. It finishes by running `/bin/cp` through `exec`
+and checking the copy is the same size as the original, because the defect that made
+v0.3.1 necessary lived in argument handling rather than in any syscall.
+
+The size cap is checked from the kernel side instead: reaching it from user space takes
+256 syscalls and then commits a 64 KB file, while calling `fs_write_buffered()` directly
+costs nothing because the bound is checked before anything is allocated.
+
+### Known and still not fixed
+
+- **The pipeline deadlock is now reachable.** v0.4.2 recorded it as latent because
+  nothing could produce more than 4 KB into a pipe. A program can now write that much,
+  and the shell runs the two stages of `cmd1 | cmd2` sequentially — so a first stage
+  that emits more than the 4 KB pipe buffer will block with no reader running. The real
+  fix is `fork` (v0.5.0).
+- `>` and `|` cannot be combined; the parser takes whichever it meets first.
+- `kill` still has no default action for a process with no handler registered.
+- `rm <directory>` orphans the directory's contents.
+- Every `~` in one command expands into the same shared buffer.
+
 ## [0.4.2-alpha] - 2026-08-14
 
 A stability patch. No new features: the whole v0.4.x tree was audited before starting

@@ -4,8 +4,13 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
+| 0.4.x   | :white_check_mark: |
+| 0.3.x   | :x:                |
+| 0.2.x   | :x:                |
 | 0.1.x   | :x:                |
+
+Only the current minor line is supported. Releases before 0.4.2 carry known
+memory-safety defects fixed in that patch and should not be used.
 
 ## ⚠️ Important Notice
 

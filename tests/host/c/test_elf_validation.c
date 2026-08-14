@@ -5,9 +5,13 @@
 #include "types.h"
 #include "elf.h"
 #include "errno.h"
-#include <stdio.h>
 
-/* The project include path shadows the host stdio header during this test. */
+/*
+ * printf is borrowed from the host libc, declared by hand rather than by
+ * including a system header. This project ships no third-party library and the
+ * kernel builds -nostdlib; these host tests run on Linux purely to print a
+ * result, so exactly one symbol is taken and nothing else.
+ */
 extern int printf(const char *format, ...);
 
 #define ASSERT(condition, message) \

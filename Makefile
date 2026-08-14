@@ -442,13 +442,13 @@ src/resources/stat_elf_data.c: apps/bin/stat.elf tools/encrypt_tool
 test:
 	@echo "--- Running Host Unit Tests ---"
 	
-	@gcc -Wall -Wextra -I./include -I./crypto -DARCH_X86 tests/host/c/test_crypto.c crypto/aes.c -o tests/host/test_crypto
+	@gcc -Wall -Wextra -iquote ./include -DARCH_X86 tests/host/c/test_crypto.c crypto/aes.c -o tests/host/test_crypto
 	@./tests/host/test_crypto
 	
-	@gcc -Wall -Wextra -I./include -DARCH_X86 tests/host/c/test_hash.c -o tests/host/test_hash
+	@gcc -Wall -Wextra -iquote ./include -DARCH_X86 tests/host/c/test_hash.c -o tests/host/test_hash
 	@./tests/host/test_hash
 
-	@gcc -Wall -Wextra -I./include -DARCH_X86 tests/host/c/test_elf_validation.c kernel/proc/elf_validate.c -o tests/host/test_elf_validation
+	@gcc -Wall -Wextra -iquote ./include -DARCH_X86 tests/host/c/test_elf_validation.c kernel/proc/elf_validate.c -o tests/host/test_elf_validation
 	@./tests/host/test_elf_validation
 
 	@mkdir -p tests/host/bin
@@ -523,7 +523,7 @@ test_smap:
 fuzz:
 	@echo "--- Starting Fuzzing (libFuzzer) ---"
 	@mkdir -p tests/host/corpus
-	@clang -g -O1 -fsanitize=fuzzer,address -I./include -DARCH_X86 tests/host/c/fuzz_parser.c kernel/proc/elf_validate.c -o tests/host/fuzz_parser
+	@clang -g -O1 -fsanitize=fuzzer,address -iquote ./include -DARCH_X86 tests/host/c/fuzz_parser.c kernel/proc/elf_validate.c -o tests/host/fuzz_parser
 	@echo "Testing known crash (corpus) files, then generating new attack vectors..."
 	@./tests/host/fuzz_parser tests/host/corpus -max_total_time=10
 

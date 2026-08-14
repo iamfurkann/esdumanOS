@@ -5,7 +5,6 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "types.h"
-#include <stdio.h>
 
 // Declare printf externally to print logs to the Ubuntu terminal:
 // =========================================================================

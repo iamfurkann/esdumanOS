@@ -8,9 +8,10 @@
 // We only use our own Kernel types now to avoid conflicts.
 #include "types.h"
 #include "aes.h"
-#include <stdio.h>
 
-// Externally declaring printf from Ubuntu's libc just to print to the screen
+// printf is borrowed from the host libc, declared by hand rather than by
+// including a system header: this project ships no third-party library, and
+// these host tests run on Linux only to print a result.
 // =========================================================================
 extern int printf(const char *format, ...);
 // MOCKING LAYER: 

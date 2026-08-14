@@ -2,14 +2,26 @@
 #include "io.h"
 #include "entropy.h"
 
+/*
+ * This file defines four public symbols - timer_ticks, timer_interrupt_handler,
+ * init_timer and timer_get_ticks - and used to include none of the headers that
+ * declare them, so nothing ever compared a definition against its declaration.
+ * That is exactly how the missing `volatile` on timer_ticks survived in rtc.h.
+ * Including them means the compiler checks.
+ */
+#include "rtc.h"     /* timer_ticks, timer_get_ticks, TIMER_HZ            */
+#include "isr.h"     /* timer_interrupt_handler                          */
+#include "signal.h"  /* kernel_timer_tick_handler                        */
+
 #define PIT_CMD_PORT 0x43
 #define PIT_CH0_PORT 0x40
 #define PIT_CMD_INIT 0x36
 #define PIT_BASE_FREQ 1193180
 
-volatile uint32_t timer_ticks = 0; 
+volatile uint32_t timer_ticks = 0;
+
+/* Defined in drivers/rtc.c, which has no header entry for it. */
 extern void rtc_timer_callback(void);
-extern void kernel_timer_tick_handler(void);
 
 /**
  * Handles the Programmable Interval Timer (PIT) interrupt.

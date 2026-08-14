@@ -7,8 +7,6 @@
 #include "klog.h"
 #include "kernel.h"
 #include "stdio.h"
-#include "serial.h"
-#include "libft.h"
 #include "tty.h"
 
 int current_log_level = LOG_LEVEL_INFO;

@@ -9,7 +9,7 @@
  */
 #define OS_VERSION_MAJOR    0
 #define OS_VERSION_MINOR    4
-#define OS_VERSION_PATCH    3
+#define OS_VERSION_PATCH    4
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
@@ -106,17 +106,37 @@ extern void init_timer(uint32_t freq);
 extern void init_kernel_timers(void);
 extern void __attribute__((weak)) run_all_selftests(void);
 extern int is_test_mode;
-extern uint32_t __bss_end;
+
+/*
+ * "__bss_end" was declared here and defined nowhere - the linker script provides
+ * _bss_start and _bss_end, with one underscore. The two that do exist are used
+ * only from boot.asm, which reads them as assembly symbols and does not go
+ * through this header; they are kept because a C consumer is plausible.
+ */
 extern uint32_t _bss_start;
 extern uint32_t _bss_end;
 
 extern int kernel_panic_mode;
 extern void init_stack_protect(void);
-extern void register_kernel_timer(int sig_num, void (*handler)(void));
-extern const uint32_t sh_elf_len;
-extern const uint32_t hello_elf_len;
-extern const uint32_t clear_elf_len;
-extern const uint32_t echo_elf_len;
+/*
+ * register_kernel_timer() was also declared here, spelled with a bare
+ * void(*)(void) where signal.h spells it signal_handler_t. The two agree - the
+ * typedef is exactly that - but a second declaration of a timer function in a
+ * second header is precisely the shape of the bug that once had
+ * schedule_kernel_timer() declared twice with signatures that did NOT agree.
+ * signal.h owns it.
+ */
+/*
+ * These four were declared "const uint32_t" while the other eleven below are
+ * "unsigned int" - and xxd -i, which generates every one of them, emits
+ * "unsigned int NAME_len = N;". So the first four disagreed with their own
+ * definitions in both qualification and spelling. Incompatible types across
+ * translation units is undefined behaviour the linker cannot catch.
+ */
+extern unsigned int sh_elf_len;
+extern unsigned int hello_elf_len;
+extern unsigned int clear_elf_len;
+extern unsigned int echo_elf_len;
 extern unsigned char touch_elf[]; extern unsigned int touch_elf_len;
 extern unsigned char rm_elf[]; extern unsigned int rm_elf_len;
 extern unsigned char mv_elf[]; extern unsigned int mv_elf_len;

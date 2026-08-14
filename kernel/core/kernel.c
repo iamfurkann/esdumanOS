@@ -17,8 +17,6 @@
 #include "security.h"
 #include "tss.h"
 #include "uaccess.h"
-#include "entropy.h"
-#include "pbkdf2.h"
 uint32_t kernel_stack_ring0[1024];
 multiboot_info_t global_mboot_info;
 char global_cmdline[256];

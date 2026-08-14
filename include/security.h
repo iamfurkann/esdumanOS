@@ -54,7 +54,13 @@ extern int verify_user_password(const char *username, const char *password);
 extern int create_shadow_entry(const char *username, const char *password, int uid, char *out_buf, int buf_size);
 
 
-// --- Added by Refactor Script 2 ---
-extern uint32_t auth_fail_ticks[16];
+/*
+ * "extern uint32_t auth_fail_ticks[16];" used to sit here and had no definition
+ * anywhere - a leftover from when the lockout counter was a global table indexed
+ * by pid. It is a per-process field now (process_t::auth_fail_ticks), which is
+ * what every user in sys_sec.c actually reads. Left in place it invited someone
+ * to write auth_fail_ticks[pid] and get a link error, or worse, to read it in
+ * review as though the global still existed.
+ */
 
 #endif // SECURITY_H

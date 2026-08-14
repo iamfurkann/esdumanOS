@@ -6,7 +6,6 @@
  */
 #include "types.h"
 #include "fs.h"
-#include "stdio.h"
 #include "errno.h"
 #include "klog.h"
 #include "crypto.h"

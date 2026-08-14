@@ -6,7 +6,6 @@
  */
 #include "types.h"
 #include "errno.h"
-#include "arch.h"
 #include "registers.h"
 #include "stdio.h"
 #include "syscall.h"

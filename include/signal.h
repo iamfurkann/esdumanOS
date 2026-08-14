@@ -15,19 +15,14 @@
  */
 typedef void (*signal_handler_t)(void);
 
-/**
- * @brief Structure representing a registered signal.
+/*
+ * signal_t and init_signals() used to be declared here. Both were dead:
+ * signal.c defines its own kernel_timer_t (with a uint32_t handler_addr rather
+ * than a function pointer) and nothing referenced signal_t; init_signals() was
+ * renamed to init_kernel_timers() and the declaration was left behind, pointing
+ * at a function that exists nowhere. The comment block below documents fixing
+ * three other renames in this header and missed this one.
  */
-typedef struct {
-    signal_handler_t handler; /* Address of the function to be executed */
-    uint32_t delay_ticks;     /* Countdown timer for the signal trigger */
-    uint32_t is_scheduled;    /* Is the signal actively scheduled? */
-} signal_t;
-
-/**
- * @brief Initializes the signal handling subsystem.
- */
-void init_signals(void);
 
 /*
  * These three were declared here under their pre-rename names - register_signal,

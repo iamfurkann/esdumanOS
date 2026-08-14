@@ -41,11 +41,14 @@
 #define E_NAMETOOLONG   -36   /**< File name too long */
 #define E_NOSYS         -38   /**< Function not implemented (Invalid syscall) */
 
-/**
- * @brief Global error number variable.
- * 
- * Stores the last error code encountered by system calls and library functions.
+/*
+ * There is no global errno, and this header used to declare one.
+ *
+ * Nothing defined it and nothing read it: the kernel reports failure by
+ * returning a negative E_* code directly, which is why every handler in
+ * kernel/syscall/ ends with "regs->eax = E_SOMETHING" rather than setting a
+ * variable. The declaration only invited code to be written against a variable
+ * that would never link.
  */
-extern int errno;
 
 #endif // ERRNO_H

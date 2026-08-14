@@ -69,8 +69,14 @@ void main(void) {
     syscall(SYSCALL_GET_ARGS, (int)args_buf, 0, 0);
 
     if (args_buf[0] == '\0') {
+        /*
+         * Exit 1, like the failure below. This used to exit 0, which reported a
+         * usage error as success - invisible until exit statuses started
+         * reaching the shell, and then immediately visible as
+         * "stat && echo CHAINED" printing CHAINED with no file named.
+         */
         print("stat: no file given"); print_newline();
-        syscall(SYSCALL_EXIT, 0, 0, 0);
+        syscall(SYSCALL_EXIT, 1, 0, 0);
         while (1);
     }
 

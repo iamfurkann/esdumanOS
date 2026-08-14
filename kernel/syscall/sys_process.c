@@ -30,6 +30,20 @@ static int copy_user_string(char *destination, const char *source, size_t max_le
  * @brief Function sys_exit
  */
 void sys_exit(arch_regs_t *regs) {
+    /*
+     * The status argument used to be read by nobody. Programs have always
+     * passed one - /bin/stat exits 1 when it cannot stat its argument - and it
+     * went straight into the floor, so a parent could see that its child had
+     * finished but never how. exit_current_process() picks this up when it
+     * wakes whoever was waiting.
+     *
+     * Masked to 8 bits: that is the width POSIX exposes, and it keeps an exit
+     * status from ever being mistaken for the negative errno sys_exec() returns
+     * when the program could not be started at all.
+     */
+    if (current_task != 0) {
+        current_task->exit_code = (int)(regs->ebx & 0xFF);
+    }
     exit_current_process(regs);
 }
 
@@ -102,6 +116,12 @@ void sys_exec(arch_regs_t *regs) {
          * registers instead. The old order left the parent returning the
          * syscall number it went in with, and silently clobbered EAX for
          * whichever task ran next.
+         *
+         * E_OK is the placeholder for "the program started". The value the
+         * caller actually receives is the child's exit status, written over
+         * this one in the snapshot by exit_current_process() when the child
+         * finishes. The two cannot be confused: a failure to start is reported
+         * as a negative errno, and an exit status is masked to 0-255.
          */
         regs->eax = E_OK;
         sleep_current_task(regs, WAIT_CHILD);

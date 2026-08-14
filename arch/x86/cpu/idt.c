@@ -33,11 +33,6 @@ idt_ptr_t idtp;
  * to prevent conflicts with CPU exceptions.
  */
 static void pic_remap(void) {
-    uint8_t a1, a2;
-
-    a1 = inb(PIC1_DATA);
-    a2 = inb(PIC2_DATA);
-
     outb(PIC1_COMMAND, 0x11);
     outb(PIC2_COMMAND, 0x11);
 
@@ -50,8 +45,25 @@ static void pic_remap(void) {
     outb(PIC1_DATA, 0x01);
     outb(PIC2_DATA, 0x01);
 
-    outb(PIC1_DATA, a1);
-    outb(PIC2_DATA, a2);
+    /*
+     * Unmask the lines this kernel actually services, instead of restoring
+     * whatever the firmware left behind.
+     *
+     * The masks used to be read before ICW1 and written back verbatim, and
+     * these were the only writes to the PIC data ports in the whole tree - so
+     * nothing ever enabled an interrupt. It works under GRUB and QEMU because
+     * that firmware hands over with the lines already open. A loader that
+     * masked them (the 8259 power-on default is 0xFF) would leave IRQ0 and
+     * IRQ1 dead with handlers installed for both, and the first boot would
+     * hang forever inside the keyboard wait in kernel_main() with nothing able
+     * to wake it.
+     *
+     * Master: IRQ0 (PIT), IRQ1 (keyboard) and IRQ2 (the cascade, without which
+     * no slave interrupt is delivered at all) enabled; the rest masked.
+     * Slave: IRQ14 (primary ATA) enabled; the rest masked.
+     */
+    outb(PIC1_DATA, (uint8_t)~((1 << 0) | (1 << 1) | (1 << 2)));
+    outb(PIC2_DATA, (uint8_t)~(1 << 6));
 }
 
 /**

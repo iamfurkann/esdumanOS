@@ -4,6 +4,18 @@
 typedef unsigned int uint32_t;
 
 /**
+ * @brief Slots in the argument vector, including the terminating NULL.
+ *
+ * The tokenizer used to fill this array with no bound at all while the input
+ * line allowed 254 characters - about 127 whitespace-separated tokens. Typing
+ * enough short words wrote past the end of main()'s own array, and the pass
+ * that follows then read those slots back as pointers and dereferenced them.
+ * At most MAX_ARGS - 1 tokens are accepted now, so the NULL terminator every
+ * consumer scans for always has a slot to live in.
+ */
+#define MAX_ARGS 32
+
+/**
  * @brief Performs a system call.
  * 
  * @param num System call number.
@@ -267,7 +279,9 @@ void sys_register_signal(int sig_num, void *handler) { syscall(SYSCALL_SIGNAL_RE
  * @param pid Process ID.
  * @param sig_num Signal number.
  */
-void sys_kill(int pid, int sig_num) { syscall(SYSCALL_KILL, pid, sig_num, 0); }
+/* Returns the syscall's verdict rather than discarding it, so the caller can
+ * report whether the signal was actually delivered. */
+int sys_kill(int pid, int sig_num) { return syscall(SYSCALL_KILL, pid, sig_num, 0); }
 /**
  * @brief Returns from a signal handler.
  */
@@ -592,7 +606,8 @@ void execute_command(char **args, char *redirect_file) {
     else if (ft_strcmp(args[0], "help") == 0) { show_help(); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "ls") == 0) { sys_ls_dir(sys_get_dir_id(".")); last_exit_status = 0; }
     else if (ft_strcmp(args[0], "mkdir") == 0) {
-        if (args[1]) sys_mkdir(args[1]); else printk("Usage: mkdir <directory>\n");
+        if (args[1]) last_exit_status = (sys_mkdir(args[1]) == E_OK) ? 0 : 1;
+        else { printk("Usage: mkdir <directory>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "cd") == 0) {
         static char old_path[256] = {0};
@@ -652,22 +667,28 @@ void execute_command(char **args, char *redirect_file) {
             if (res == E_OK) printk("File written successfully!\n");
             else if (res == E_ACCES) printk("write: Permission denied\n");
             else { printk("write: Failed to create file\n"); }
-        } else { printk("Usage: write <file> <content>\n"); }
+            last_exit_status = (res == E_OK) ? 0 : 1;
+        } else { printk("Usage: write <file> <content>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "rm") == 0) {
-        if (args[1]) sys_delete_file(args[1]); else printk("Usage: rm <file>\n");
+        /* The return value was being discarded, so "rm /nope && echo GONE"
+         * printed GONE. Every builtin below now reports what it did. */
+        if (args[1]) last_exit_status = (sys_delete_file(args[1]) == E_OK) ? 0 : 1;
+        else { printk("Usage: rm <file>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "mv") == 0) {
-        if (args[1] && args[2]) sys_rename_file(args[1], args[2]); else printk("Usage: mv <old> <new>\n");
+        if (args[1] && args[2]) last_exit_status = (sys_rename_file(args[1], args[2]) == E_OK) ? 0 : 1;
+        else { printk("Usage: mv <old> <new>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "layout") == 0) {
-        if (args[1] && ft_strcmp(args[1], "tr") == 0) syscall(12, 1, 0, 0);
-        else if (args[1] && ft_strcmp(args[1], "us") == 0) syscall(12, 0, 0, 0);
+        if (args[1] && ft_strcmp(args[1], "tr") == 0) { syscall(12, 1, 0, 0); last_exit_status = 0; }
+        else if (args[1] && ft_strcmp(args[1], "us") == 0) { syscall(12, 0, 0, 0); last_exit_status = 0; }
+        else { printk("Usage: layout tr|us\n"); last_exit_status = 1; }
     }
-    else if (ft_strcmp(args[0], "lockdown") == 0) { syscall(13, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "stack") == 0) { syscall(14, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "meminfo") == 0) { syscall(15, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "testmalloc") == 0) { syscall(16, 0, 0, 0); }
+    else if (ft_strcmp(args[0], "lockdown") == 0) { last_exit_status = syscall(13, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "stack") == 0) { last_exit_status = syscall(14, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "meminfo") == 0) { last_exit_status = syscall(15, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "testmalloc") == 0) { last_exit_status = syscall(16, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "hexdump") == 0) {
         if (args[1]) {
             syscall(17, hex_to_int(args[1]), 0, 0); 
@@ -718,31 +739,57 @@ void execute_command(char **args, char *redirect_file) {
         }
         last_exit_status = 0;
     }
-    else if (ft_strcmp(args[0], "alarm") == 0) { syscall(18, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "panic") == 0) { syscall(19, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "reboot") == 0) { syscall(20, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "halt") == 0) { syscall(21, 0, 0, 0); }
-    else if (ft_strcmp(args[0], "exec") == 0) { if (args[1]) syscall(5, (int)args[1], 0, 0); }
+    else if (ft_strcmp(args[0], "alarm") == 0) { last_exit_status = syscall(18, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "panic") == 0) { last_exit_status = syscall(19, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "reboot") == 0) { last_exit_status = syscall(20, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "halt") == 0) { last_exit_status = syscall(21, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "exec") == 0) {
+        if (args[1]) last_exit_status = syscall(5, (int)args[1], 0, 0) < 0 ? 127 : 0;
+        else { printk("Usage: exec <program>\n"); last_exit_status = 1; }
+    }
     else if (ft_strcmp(args[0], "exit") == 0) { printk("exit\n"); syscall(1, 0, 0, 0); while(1); }
     else if (ft_strcmp(args[0], "cat_raw") == 0) {
-        if (args[1]) sys_cat_raw_file(args[1]); else printk("Usage: cat_raw <file>\n");
+        if (args[1]) last_exit_status = (sys_cat_raw_file(args[1]) == E_OK) ? 0 : 1;
+        else { printk("Usage: cat_raw <file>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "kill") == 0) {
-        if (args[1] && args[2]) sys_kill(hex_to_int(args[1]), hex_to_int(args[2]));
+        /*
+         * Decimal, not hexadecimal. hex_to_int() read "10" as sixteen, so
+         * "kill 10 9" signalled PID 16 - and it returns 0 for anything
+         * non-hex, so "kill abc 9" quietly targeted PID 0. Neither missing
+         * arguments nor a junk one produced any message at all.
+         */
+        if (args[1] && args[2]) {
+            int pid = dec_to_int(args[1]);
+            int sig = dec_to_int(args[2]);
+            if (pid <= 0 || sig <= 0) {
+                printk("kill: pid and signal must be positive numbers\n");
+                last_exit_status = 1;
+            } else {
+                last_exit_status = (sys_kill(pid, sig) < 0) ? 1 : 0;
+            }
+        } else { printk("Usage: kill <pid> <signal>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "su") == 0) {
-        printk("Password for root: "); 
+        printk("Password for root: ");
         char su_pass[64];
         read_line(su_pass, 1, 64);
-        if (sys_setuid(0, su_pass) == 0) { 
-            set_env("USER", "root"); 
+        if (sys_setuid(0, su_pass) == 0) {
+            set_env("USER", "root");
             current_uid = 0;
             ft_strcpy(current_username, "root");
             printk("\n[SYSTEM] Privileges elevated to ROOT!\n");
+            last_exit_status = 0;
+        } else {
+            /* Failing silently left the user staring at a fresh prompt with no
+             * idea whether the password had been accepted. */
+            printk("\nsu: Authentication failed\n");
+            last_exit_status = 1;
         }
     }
     else if (ft_strcmp(args[0], "dmesg") == 0) {
         sys_dmesg();
+        last_exit_status = 0;
     }
     else if (ft_strcmp(args[0], "sleep") == 0) {
         /*
@@ -788,12 +835,30 @@ void execute_command(char **args, char *redirect_file) {
          * The kernel tracks the working directory now, so there is nothing to
          * pass: a bare "notes.txt" resolves where the process actually stands.
          */
-        for(int i = 1; args[i] != 0; i++) {
-            if (arg_str[0] != '\0') {
-                ft_strcpy(&arg_str[ft_strlen(arg_str)], " ");
+        /*
+         * Bounded join.
+         *
+         * The tokens come straight from the input line, which is capped at 254
+         * characters - so an unbounded join into 256 bytes looked safe. It was
+         * not: the expansion pass replaces short tokens with longer ones before
+         * this runs, so "$A" becomes up to 63 characters and "~" becomes HOME.
+         * A line of repeated "$A" therefore produced kilobytes out of 254 input
+         * characters and smashed this function's return address.
+         *
+         * Truncation is silent here only because the kernel truncates too:
+         * cmd_args in the PCB is 128 bytes and sys_get_args() copies at most
+         * 127. That is a separate limitation, recorded rather than fixed here.
+         */
+        uint32_t arg_len = 0;
+        for (int i = 1; args[i] != 0; i++) {
+            if (arg_len > 0 && arg_len < sizeof(arg_str) - 1) {
+                arg_str[arg_len++] = ' ';
             }
-            ft_strcpy(&arg_str[ft_strlen(arg_str)], args[i]);
+            for (int k = 0; args[i][k] != '\0' && arg_len < sizeof(arg_str) - 1; k++) {
+                arg_str[arg_len++] = args[i][k];
+            }
         }
+        arg_str[arg_len] = '\0';
 
         int exec_res = syscall(5, (int)exec_path, 0, (int)arg_str); // SYSCALL_EXEC
         if (exec_res < 0) {
@@ -842,9 +907,17 @@ static void handle_tab_completion(char *buf, int *idx) {
     while (word_start > 0 && buf[word_start - 1] != ' ') word_start--;
     
     // Extract the partial word (prefix to match)
+    /*
+     * The copy was already clamped to 127; the terminator was not. A word
+     * longer than the buffer - the input line allows 254 characters - stored
+     * a NUL that far past the end of a 128-byte stack array. Clamp the length
+     * once and use it for both.
+     */
     char prefix[128];
     int prefix_len = *idx - word_start;
-    for (int i = 0; i < prefix_len && i < 127; i++) prefix[i] = buf[word_start + i];
+    if (prefix_len > 127) prefix_len = 127;
+    if (prefix_len < 0) prefix_len = 0;
+    for (int i = 0; i < prefix_len; i++) prefix[i] = buf[word_start + i];
     prefix[prefix_len] = '\0';
     
     // Determine if we're completing a command (first word) or a filename
@@ -877,9 +950,15 @@ static void handle_tab_completion(char *buf, int *idx) {
                 int nlen = 0;
                 while (name[nlen] != 1 && name[nlen] != 2 && name[nlen] != '\0') nlen++;
                 // Skip the type marker byte
+                /* nlen keeps its true value - the buffer walk below advances by
+                 * it - so the clamp lives in a second variable used for both
+                 * the copy and the terminator. Storing at entry_name[nlen] wrote
+                 * past the array for any name longer than 63 bytes, and
+                 * readdir() emits up to 255. */
                 char entry_name[64];
-                for (int j = 0; j < nlen && j < 63; j++) entry_name[j] = name[j];
-                entry_name[nlen] = '\0';
+                int name_len = (nlen > 63) ? 63 : nlen;
+                for (int j = 0; j < name_len; j++) entry_name[j] = name[j];
+                entry_name[name_len] = '\0';
                 
                 if (prefix_len == 0 || ft_strncmp(entry_name, prefix, prefix_len) == 0) {
                     // Check it's not already a builtin
@@ -934,9 +1013,11 @@ static void handle_tab_completion(char *buf, int *idx) {
             int nlen = 0;
             while (name[nlen] != 1 && name[nlen] != 2 && name[nlen] != '\0') nlen++;
             int is_dir = (name[nlen] == 1);
+            /* Same clamp as above; nlen stays intact for the buffer walk. */
             char entry_name[64];
-            for (int j = 0; j < nlen && j < 63; j++) entry_name[j] = name[j];
-            entry_name[nlen] = '\0';
+            int name_len = (nlen > 63) ? 63 : nlen;
+            for (int j = 0; j < name_len; j++) entry_name[j] = name[j];
+            entry_name[name_len] = '\0';
             
             int nplen = ft_strlen(name_prefix);
             if (nplen == 0 || ft_strncmp(entry_name, name_prefix, nplen) == 0) {
@@ -1020,7 +1101,7 @@ static void handle_tab_completion(char *buf, int *idx) {
  */
 void main(void) {
     char cmd_buf[256];
-    char *args[32];
+    char *args[MAX_ARGS];
 
     current_uid = syscall(SYSCALL_GETUID, 0, 0, 0);
     current_username[0] = '\0';
@@ -1097,23 +1178,42 @@ void main(void) {
             }
 
             if (!skip_execution) {
-                for (int i = 0; i < 32; i++) { args[i] = 0; }
+                for (int i = 0; i < MAX_ARGS; i++) { args[i] = 0; }
                 int arg_count = 0; int in_word = 0; char *redirect_file = 0;
-                char *pipe_args[32]; for (int i = 0; i < 32; i++) { pipe_args[i] = 0; }
+                char *pipe_args[MAX_ARGS]; for (int i = 0; i < MAX_ARGS; i++) { pipe_args[i] = 0; }
                 int has_pipe = 0; int pipe_arg_count = 0;
+                int too_many_args = 0;
 
                 for (int i = 0; current_cmd[i] != '\0'; i++) {
-                    if (current_cmd[i] == ' ') { current_cmd[i] = '\0'; in_word = 0; } 
-                    else if (!in_word) { args[arg_count++] = &current_cmd[i]; in_word = 1; }
+                    if (current_cmd[i] == ' ') { current_cmd[i] = '\0'; in_word = 0; }
+                    else if (!in_word) {
+                        /* One slot is reserved for the NULL terminator. */
+                        if (arg_count >= MAX_ARGS - 1) { too_many_args = 1; break; }
+                        args[arg_count++] = &current_cmd[i];
+                        in_word = 1;
+                    }
+                }
+
+                if (too_many_args) {
+                    printk("sh: too many arguments\n");
+                    last_exit_status = 1;
+                    arg_count = 0;
+                    args[0] = 0;
                 }
 
                 for (int i = 0; i < arg_count; i++) {
                     if (ft_strcmp(args[i], ">") == 0) {
-                        args[i] = 0; if (args[i+1]) redirect_file = args[i+1]; break;
+                        /* i + 1 can be arg_count, which is a slot inside the
+                         * array only because the count is now bounded. */
+                        args[i] = 0;
+                        if (i + 1 < arg_count && args[i + 1]) redirect_file = args[i + 1];
+                        break;
                     }
                     else if (ft_strcmp(args[i], "|") == 0) {
                         args[i] = 0; has_pipe = 1;
-                        for (int j = i + 1; j < arg_count; j++) pipe_args[pipe_arg_count++] = args[j];
+                        for (int j = i + 1; j < arg_count && pipe_arg_count < MAX_ARGS - 1; j++) {
+                            pipe_args[pipe_arg_count++] = args[j];
+                        }
                         break;
                     }
                 }
@@ -1125,9 +1225,29 @@ void main(void) {
                         } else args[i] = get_env(&args[i][1]);
                     }
                     else if (args[i][0] == '~') {
+                        /*
+                         * Bounded append. The tail came from the input line with
+                         * no length check, so "~/AAAA..." wrote past a 128-byte
+                         * buffer in .bss - straight into env_keys, env_vals,
+                         * current_path and current_username, which sit beside it.
+                         *
+                         * KNOWN LIMITATION, not fixed here: this buffer is
+                         * static and shared, so every ~ token in one command
+                         * ends up pointing at the same string. "cp ~/a ~/b"
+                         * passes ~/b twice. Fixing that needs per-token storage.
+                         */
                         static char expanded_path[128];
-                        ft_strcpy(expanded_path, get_env("HOME"));
-                        if (args[i][1] == '/') ft_strcpy(&expanded_path[ft_strlen(expanded_path)], &args[i][1]);
+                        uint32_t p = 0;
+                        const char *home = get_env("HOME");
+                        for (int k = 0; home && home[k] != '\0' && p < sizeof(expanded_path) - 1; k++) {
+                            expanded_path[p++] = home[k];
+                        }
+                        if (args[i][1] == '/') {
+                            for (int k = 1; args[i][k] != '\0' && p < sizeof(expanded_path) - 1; k++) {
+                                expanded_path[p++] = args[i][k];
+                            }
+                        }
+                        expanded_path[p] = '\0';
                         args[i] = expanded_path;
                     }
                 }

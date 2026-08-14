@@ -17,6 +17,7 @@
 #include "uaccess.h"
 #include "syscall.h"
 #include "rtc.h"
+#include "pmm.h"
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -27,6 +28,14 @@ int tests_failed = 0;
  */
 extern unsigned char ktest_user_elf[];
 extern unsigned int ktest_user_elf_len;
+
+/*
+ * Companion payload that takes a user-mode page fault on purpose. Installed
+ * beside ktest_user so the Ring 3 half can exec it and check that a crashing
+ * child is reaped and its status delivered. Test builds only.
+ */
+extern unsigned char ktest_crash_elf[];
+extern unsigned int ktest_crash_elf_len;
 
 
 
@@ -209,6 +218,12 @@ void sys_ktest_report(arch_regs_t *regs) {
         return;
     }
 
+    if (kind == KT_REPORT_FREEMEM) {
+        /* Reported in KB so the value stays well inside a positive int. */
+        regs->eax = (int)(pmm_get_free_memory() / 1024);
+        return;
+    }
+
     char msg[128];
     int res = copy_string_from_user(msg, (const char *)regs->ecx, sizeof(msg));
 
@@ -256,6 +271,11 @@ static void run_user_mode_tests(void) {
     int wres = fs_create_file_raw("ktest_user", ktest_user_elf, ktest_user_elf_len, bin_id);
     KTEST_ASSERT(wres == E_OK, "[RING3] user-mode payload written to /bin/ktest_user");
     if (wres != E_OK) return;
+
+    /* The deliberate-crash companion, for the teardown assertions. */
+    fs_delete("ktest_crash", bin_id);
+    KTEST_ASSERT(fs_create_file_raw("ktest_crash", ktest_crash_elf, ktest_crash_elf_len, bin_id) == E_OK,
+                 "[RING3] crash payload written to /bin/ktest_crash");
 
     asm volatile("sti");
 

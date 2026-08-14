@@ -46,11 +46,14 @@ void main(void) {
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
     
     
+    int status = 0;
+
     if (args_buf[0] == '\0') {
         print("Usage: head <file>"); print_newline();
+        status = 1;
     } else {
         int fd = syscall(40, (int)args_buf, 0, 0);
-        if (fd < 0) { print("head: File not found"); print_newline(); }
+        if (fd < 0) { print("head: File not found"); print_newline(); status = 1; }
         else {
             char c;
             int lines = 0;
@@ -63,6 +66,6 @@ void main(void) {
     }
     
 
-    syscall(1, 0, 0, 0); // EXIT
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

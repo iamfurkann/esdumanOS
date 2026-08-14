@@ -46,14 +46,19 @@ void main(void) {
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
     
     
+    /* Exit status, so "rm x && ..." can tell whether the file went away. Every
+     * tool here used to exit 0 no matter what it printed. */
+    int status = 0;
+
     if (args_buf[0] == '\0') {
         print("Usage: rm <file>"); print_newline();
+        status = 1;
     } else {
         int res = syscall(22, (int)args_buf, 0, 0); // SYSCALL_RM_FILE
-        if (res < 0) { print("rm: Error removing file"); print_newline(); }
+        if (res < 0) { print("rm: Error removing file"); print_newline(); status = 1; }
     }
-    
 
-    syscall(1, 0, 0, 0); // EXIT
+
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

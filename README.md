@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.4.1--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.4.2--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -46,7 +46,7 @@
 
 esdumanOS is a from-scratch operating system kernel for the x86 (IA-32) architecture. It does not derive from Linux, BSD, or any existing kernel codebase. Every subsystem, from the bootloader handoff through memory management, process scheduling, file system operations, and user authentication, is written specifically for this project.
 
-The kernel boots via GRUB using the Multiboot specification, transitions through Protected Mode with full GDT/IDT/TSS initialization, sets up paged virtual memory, and launches a preemptive multitasking environment with Ring 0 / Ring 3 separation. User-space programs are loaded from ELF binaries, and the system provides a Unix-inspired shell with pipes, redirection, and environment variables.
+The kernel boots via GRUB using the Multiboot specification, transitions through Protected Mode with full GDT/IDT/TSS initialization, sets up paged virtual memory, and launches a preemptive multitasking environment with Ring 0 / Ring 3 separation. User-space programs are loaded from ELF binaries, and the system provides a Unix-inspired shell with pipes, conditional chaining, and environment variables.
 
 A central design goal is treating security as a first-class concern rather than an afterthought. The kernel includes a tiered security level system, AES-256-CBC disk encryption, user authentication against a shadow password database, and permission enforcement at the system call boundary.
 
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.1-alpha
+**Version:** 0.4.2-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -77,6 +77,14 @@ a header and padding — so sizes now come from a helper that reads the real len
 the file's header. And `sleep` is the first production use of `WAIT_TIMER`, which had
 been defined since the beginning and referenced only by a test.
 
+v0.4.2 is a stability patch rather than a feature release. The whole v0.4.x tree was
+audited before starting work on `fork`/`wait`, and the audit found more than the
+roadmap expected: a segfaulting user program left its parent blocked forever and leaked
+its entire address space, closing a pipe never woke the process blocked on it, and the
+shell overran its own stack on a line of 33 short words. Those and a dozen more are
+fixed; the release notes list what is still known-broken rather than quietly carrying
+it.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -85,7 +93,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 15 user-space programs and 20+ shell builtins
+- 15 user-space programs and 28 shell builtins
 - 23 kernel self-test modules and CI pipeline
 
 **What to expect:**
@@ -105,7 +113,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
 | **Syscall Interface** | 50 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
-| **Kernel Logging** | 8 KB ring buffer logger (dmesg equivalent) with disk persistence to `/var/log/dmesg.log` |
+| **Kernel Logging** | 8 KB in-memory ring buffer logger (dmesg equivalent), readable through the `dmesg` syscall. Not persisted to disk — `/var/log` is created at first boot but nothing is written there yet |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
 ### Memory Management
@@ -125,7 +133,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Working directory** | Per-process, held in the PCB and inherited from the creating process. Relative paths resolve against it; user space can only move it through `chdir()` |
 | **IPC** | Message passing (8-slot mailbox per process), anonymous and named pipes (16 pipes, 4 KB ring buffer each) |
 | **Signals** | Per-process signal handlers (32 slots), kernel timer slots (32) |
-| **FPU** | Lazy FPU state save/restore (FXSAVE/FXRSTOR), per-process 512-byte state |
+| **FPU** | Eager FPU state save/restore on every context switch (FXSAVE/FXRSTOR), per-process 512-byte state. Not lazy — there is no `CR0.TS` / `#NM` path |
 
 ### File System
 
@@ -160,7 +168,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **Shell** | Login screen, 20+ builtins (cat, ls, cd, pwd, mkdir, rm, mv, echo, env, export, exec, kill, su, dmesg, hexdump, help), pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
+| **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion. Output redirection is parsed but not implemented |
 | **Programs** | 15 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `date`, `stat` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
@@ -189,7 +197,7 @@ anyone curious about kernel internals — not for storing anything you care abou
                           INT 0x80      INT 0x80  INT 0x80  INT 0x80
                                |             |        |         |
     +--------------------------|-------------|--------|---------|-------+
-    |                    System Call Dispatcher (45 syscalls)           |
+    |                    System Call Dispatcher (50 syscalls)           |
     +------------------------------------------------------------------+
     |                                                                   |
     |   +-------------+  +-------------+  +-------------+  +---------+ |
@@ -372,7 +380,7 @@ make clean
 The build process:
 1. Compiles all C and assembly source files with `-m32 -nostdlib -nodefaultlibs
    -fno-builtin` (user-space programs additionally get `-ffreestanding`)
-2. Builds the 14 user-space ELF programs plus `init`
+2. Builds the 15 user-space ELF programs plus `init`
 3. Encrypts each ELF with AES-256-CBC using `ESDUMAN_ELF_KEY_HEX` and embeds the
    ciphertext as a C array via `xxd -i`
 4. Links the kernel binary against the custom linker script (load at 1 MB,
@@ -393,7 +401,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.3.1-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.4.2-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -416,7 +424,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.3.1-alpha.iso \
+    -cdrom esdumanOS-v0.4.2-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -442,30 +450,47 @@ sure what the current build produces.
 Once logged in, the following builtins are available:
 
 ```
-cat <file>          Print file contents
-ls [dir]            List directory contents
-cd <dir>            Change directory
-pwd                 Print working directory
-mkdir <name>        Create directory
-rm <file>           Remove file
-mv <old> <new>      Rename file
-echo <text>         Print text
-env                 List environment variables
-export KEY=VALUE    Set environment variable
-exec <program>      Execute ELF binary
-kill <pid>          Send signal to process
-su <user>           Switch user (requires password)
-dmesg               Display kernel log
-hexdump <addr>      Hex dump memory (root only)
-help                Show available commands
-reboot              Reboot the system
-halt                Halt the CPU
-clear               Clear screen
+cat [-nbEsTA] <file>  Print file contents
+ls                    List the working directory (takes no argument)
+cd [dir]              Change directory; supports ., .., ~ and -
+pwd                   Print working directory
+mkdir <name>          Create directory
+rm <file>             Remove file
+mv <old> <new>        Rename a file within one directory
+write <file> <text>   Create a file with the given contents
+cat_raw <file>        Hex dump a file's stored bytes, bypassing decryption
+env                   List environment variables
+export KEY VALUE      Set environment variable (two words, not KEY=VALUE)
+sleep <seconds>       Pause for a number of seconds
+exec <program>        Execute an ELF binary
+kill <pid> <signal>   Send a signal to a process (decimal)
+su                    Switch to root (prompts for the root password)
+dmesg                 Display the kernel log
+meminfo               Display memory usage (root only)
+hexdump <addr>        Hex dump memory (root only)
+stack                 Dump the current task's stack (root only)
+layout tr|us          Set the keyboard layout
+lockdown              Enter the lockdown security level
+help                  Show available commands
+reboot                Reboot the system
+halt                  Halt the CPU
+exit                  Exit the shell
 ```
 
-**Operators:** Pipes (`cmd1 | cmd2`), output redirection (`cmd > file`), chaining (`cmd1 && cmd2`, `cmd1 || cmd2`).
+`echo` and `clear` are not builtins — they are ELF programs in `/bin`, reached
+through the same path as any other program. `echo` does not implement `-n`.
 
-**Variables:** `$VAR` expansion, `$?` last exit code, `~` home directory.
+**Operators:** Pipes (`cmd1 | cmd2`, two stages only), chaining (`cmd1 && cmd2`,
+`cmd1 || cmd2`).
+
+**Not implemented:** output redirection. `cmd > file` is parsed and then
+discarded — the command runs and writes to the terminal, and no file is created.
+It cannot work until the kernel can write to a regular file through a descriptor;
+see Known Limitations.
+
+**Variables:** `$VAR` expansion, `$?` last exit code, `~` home directory. Note
+that every `~` in a single command expands into one shared buffer, so
+`cp ~/a ~/b` passes the same path twice.
 
 ---
 
@@ -556,7 +581,7 @@ esdumanOS/
 |   |   |-- pipe.c                   Anonymous and named pipes
 |   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   |-- syscall.c                Dispatcher, 45 system calls
+|   |   |-- syscall.c                Dispatcher, 50 system calls
 |   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
 |       |-- security.c               Security levels, master key lifetime
@@ -612,7 +637,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.4.0-alpha)
+|   |-- kernel.h                     Master header (version 0.4.2-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API

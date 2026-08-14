@@ -130,15 +130,30 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
         new_task->signal_handlers[k] = 0;
     }
     
-    new_task->fd_table_size = 16;
+    /*
+     * A task with no descriptor table must not be published.
+     *
+     * fd_table_size was set to 16 unconditionally and the allocation failure
+     * only skipped the initialisation loop - no error return, no cleanup. The
+     * task was then linked into the run list and scheduled, and its first
+     * read/write/open/close indexed a NULL table from Ring 0: a kernel page
+     * fault with no fixup, which parks the CPU. The process_t allocation a few
+     * lines above is checked properly; this one was not.
+     */
+    new_task->fd_table_size = 0;
     new_task->fd_table = (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t) * 16);
-    if (new_task->fd_table) {
-        for (uint32_t fd_i = 0; fd_i < 16; fd_i++) {
-            new_task->fd_table[fd_i].type = 0;
-            new_task->fd_table[fd_i].ptr = 0;
-            new_task->fd_table[fd_i].mode = 0;
-            new_task->fd_table[fd_i].offset = 0;
-        }
+    if (!new_task->fd_table) {
+        klog(LOG_LEVEL_ERROR, "PROCESS", "Could not create new process: no memory for the descriptor table.");
+        kfree(new_task);
+        return E_NOMEM;
+    }
+
+    new_task->fd_table_size = 16;
+    for (uint32_t fd_i = 0; fd_i < 16; fd_i++) {
+        new_task->fd_table[fd_i].type = 0;
+        new_task->fd_table[fd_i].ptr = 0;
+        new_task->fd_table[fd_i].mode = 0;
+        new_task->fd_table[fd_i].offset = 0;
     }
     
     new_task->base_priority = 10;
@@ -331,12 +346,16 @@ void exit_current_process(arch_regs_t *regs) {
         if (curr->fd_table && curr->fd_table[i].type != 0) {
             if (curr->fd_table[i].type == 3 && curr->fd_table[i].ptr != 0) {
                 pipe_t *p = (pipe_t *)curr->fd_table[i].ptr;
-                if (curr->fd_table[i].mode == 1) p->write_refs--; 
+                if (curr->fd_table[i].mode == 1) p->write_refs--;
                 else p->read_refs--;
-                
+
                 if (p->read_refs <= 0 && p->write_refs <= 0) {
-                    destroy_pipe(p); 
+                    destroy_pipe(p);
                 }
+                /* An exiting task dropping its end is the same event a close is;
+                 * without this a peer blocked in pipe_read()/pipe_write() waited
+                 * for the rest of the boot. See sys_close(). */
+                wakeup_tasks(WAIT_IPC);
             }
             else if (curr->fd_table[i].type == 2 && curr->fd_table[i].ptr != 0) {
                 vfs_file_t *f = (vfs_file_t *)curr->fd_table[i].ptr;

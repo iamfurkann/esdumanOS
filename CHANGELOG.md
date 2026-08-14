@@ -5,6 +5,120 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2-alpha] - 2026-08-14
+
+A stability patch. No new features: the whole v0.4.x tree was audited before starting
+work on `fork`/`wait`, and this ships what that audit found. Eight of the defects
+below are reachable from an ordinary unprivileged prompt, and three of them hang or
+halt the machine.
+
+### Fixed — kernel
+
+- **A segfaulting program left its parent blocked forever and leaked its address
+  space.** The page-fault handler's entire teardown was `state = TASK_DEAD` followed
+  by a reschedule, so `exit_current_process()` never ran: descriptors were not
+  released, a parent waiting on `WAIT_CHILD` was never woken, and the task was neither
+  unlinked from the run list nor placed on the zombie list — so the reaper never freed
+  its `process_t`, page directory, page tables, user stacks or descriptor table. In
+  practice a user program with a null-pointer bug left the shell that started it parked
+  on `WAIT_CHILD` with no console. It now exits through the same path `exit()` uses,
+  with status 139 (128 + SIGSEGV).
+- **Closing a pipe never woke the process blocked on it.** `wakeup_tasks(WAIT_IPC)`
+  was called only when data moved, so a reader waiting on an empty pipe whose last
+  writer went away never received the EOF the code was ready to give it, and a writer
+  parked on a full pipe whose reader disappeared waited for the rest of the boot. All
+  three release sites — `close`, `dup2` and process exit — now wake waiters.
+- **`open()` dereferenced an unchecked `kmalloc()`.** Exhausting the kernel heap and
+  then opening any existing file turned a NULL return into a supervisor write to
+  address 0 — a kernel page fault with no fixup, which parks the CPU. Any unprivileged
+  process could halt the machine.
+- **`create_process()` published a runnable task with a NULL descriptor table.** The
+  allocation failure skipped only the initialisation loop; the task was linked in and
+  scheduled anyway, and its first `read`/`write`/`open` indexed a NULL table from
+  Ring 0. It now frees the task and reports `E_NOMEM`, matching how the `process_t`
+  allocation directly above it was already handled.
+- **`fs_delete()` walked the FAT chain with no bound.** `file_allocation_table` holds
+  4096 entries and the directory table is loaded from disk unvalidated, so a crafted or
+  corrupt image gave `rm` a four-byte kernel write at an offset the image chose. Every
+  other FAT walk in the file already had this check.
+- **`dup2()` did not reference-count files.** Only pipes were counted, so
+  `fd = open(f); dup2(fd, 5); close(fd)` freed the `vfs_file_t` while fd 5 still
+  pointed at it: a use-after-free on the next read and a double free on the next close.
+  Overwriting a file descriptor also leaked its old target. Both directions now behave
+  the way the ELF loader's inheritance path already did.
+- **The PIC interrupt masks were never programmed.** `pic_remap()` read the firmware's
+  masks and wrote them back verbatim, and these were the only writes to the PIC data
+  ports in the tree. It works under GRUB and QEMU only because that firmware leaves the
+  lines open; a loader that masked them would leave IRQ0 and IRQ1 dead with handlers
+  installed for both, hanging the first boot in the keyboard wait. The timer, keyboard,
+  cascade and ATA lines are now unmasked explicitly.
+
+### Fixed — shell and tools
+
+- **The shell overran its own stack on ordinary input.** The tokenizer filled a
+  32-entry argument array with no bound while the input line allowed about 127 tokens;
+  33 short words were enough to corrupt `main`'s frame, and the pass that follows then
+  read those slots back as pointers. Tab completion had the same shape twice more: the
+  copy loops were clamped but the NUL terminators were not, so a long word or a long
+  filename wrote past a 128- and a 64-byte buffer. The argument join and `~` expansion
+  were likewise unbounded — and `~` expands to `$HOME`, so a short line could produce
+  kilobytes.
+- **Thirteen `/bin` tools exited 0 on every error path**, and eighteen shell builtins
+  never set the exit status at all — so `rm /nope && echo GONE` printed `GONE`. v0.4.1
+  connected the status chain but only `/bin/stat` was ever taught to use it. `cp`,
+  `grep`, `head`, `kill`, `mv`, `rm` and `touch` now report failure, and every builtin
+  sets a status.
+- **`kill` parsed its arguments as hexadecimal**, so `kill 10 9` signalled PID 16, and
+  a non-numeric argument silently became PID 0. It parses decimal and rejects junk.
+  `/bin/kill` accepted zero digits and sent SIGKILL to PID 0 regardless.
+- **`cp` reported success while producing an empty file.** The kernel has no write path
+  for a regular file descriptor — `sys_write` handles the console, pipes and devices
+  only — so every write returned `E_BADF` and the result was discarded. This does not
+  make `cp` work; it turns silent data loss into a visible error. The missing capability
+  is v0.4.3.
+- **`su` failed silently** on a wrong password, leaving a fresh prompt and no clue.
+- **`init` never detected a failed `exec`.** It tested for `-1`, which `exec` never
+  returns — a missing `/bin/sh` is `E_NOENT`. PID 1 exited without a diagnostic on a
+  broken disk. It now reports and parks rather than printing "System halted." and then
+  falling through to exit.
+
+### Documentation
+
+Corrected against the code: the syscall count (the README said both 45 and 50), the
+QEMU command's ISO name, the FPU description (eager, not lazy), the kernel log's disk
+persistence (`/var/log` is created but nothing is written to it), the shell command
+list (`export` takes two words, `su` takes none, `ls` takes none, `echo` and `clear`
+are not builtins, twelve builtins were missing) and the supported-version table.
+
+Output redirection is now documented as **not implemented** rather than as a working
+feature. It is parsed and discarded, and it cannot work until the kernel can write to
+a regular file through a descriptor.
+
+### Tests
+
+The crash-teardown path had no coverage because nothing in the image could produce a
+user-mode page fault — every tool exits cleanly and the syscalls validate their
+arguments rather than faulting. `tests/user/ktest_crash.c` is a Ring 3 program whose
+only job is to write to address 0; it is embedded in the test kernel only and never
+reaches the production image.
+
+The Ring 3 payload now execs it and asserts the parent is woken with status 139, then
+runs ten more crashes and compares the physical allocator's free-memory figure across
+them. The second half matters as much as the first: the parent surviving does not prove
+the dead task was reclaimed, and the leak was the larger half of the defect. If either
+regresses the run hangs and hits the QEMU timeout rather than passing quietly, which is
+the honest failure mode — a hang is the actual symptom.
+
+### Known and deliberately not fixed here
+
+- `kill` has no default action: a signal sent to a process with no handler registered
+  for it does nothing, so a runaway process cannot be terminated. Terminating a task
+  that is not the current one needs a safe path that does not exist yet.
+- Writing to a file through a descriptor, and therefore `cp` and `>`.
+- `rm <directory>` orphans the directory's contents.
+- Every `~` in one command expands into the same shared buffer.
+- Pipelines of more than two stages, and `|` combined with `>`, are mis-parsed.
+
 ## [0.4.1-alpha] - 2026-08-14
 
 ### Fixed

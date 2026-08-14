@@ -47,6 +47,8 @@ void main(void) {
     
     
     int i = 0;
+    int status = 0;
+
     while(args_buf[i] && args_buf[i] != ' ') i++;
     if (args_buf[i] == ' ') {
         args_buf[i] = '\0';
@@ -54,7 +56,7 @@ void main(void) {
         char *file = &args_buf[i+1];
         
         int fd = syscall(40, (int)file, 0, 0); // SYSCALL_OPEN
-        if (fd < 0) { print("grep: File not found"); print_newline(); }
+        if (fd < 0) { print("grep: File not found"); print_newline(); status = 1; }
         else {
             char buf[512];
             int read_bytes = syscall(3, fd, (int)buf, 511);
@@ -88,9 +90,15 @@ void main(void) {
         }
     } else {
         print("Usage: grep <term> <file>"); print_newline();
+        status = 1;
     }
-    
 
-    syscall(1, 0, 0, 0); // EXIT
+
+    /*
+     * Reports usage and open errors. It does NOT yet distinguish "no lines
+     * matched" from "lines matched" the way grep conventionally does - that is
+     * a behaviour change rather than a bug fix, and is recorded as follow-up.
+     */
+    syscall(1, status, 0, 0); // EXIT
     while(1);
 }

@@ -20,10 +20,11 @@
 #include "stat.h"
 
 /* Report kinds understood by sys_ktest_report() in tests/kernel/selftest.c. */
-#define KT_FAIL  0
-#define KT_PASS  1
-#define KT_DONE  2
-#define KT_TICKS 3
+#define KT_FAIL    0
+#define KT_PASS    1
+#define KT_DONE    2
+#define KT_TICKS   3
+#define KT_FREEMEM 4
 
 /**
  * @brief Performs a system call from user mode.
@@ -61,6 +62,16 @@ static void kt_assert(int ok, const char *msg) {
  */
 static int kt_ticks(void) {
     return syscall(SYSCALL_KTEST_REPORT, KT_TICKS, 0, 0);
+}
+
+/**
+ * @brief Reads the physical allocator's free-memory figure, in KB.
+ *
+ * Ring 3 has no view of the frame allocator, and "the parent survived" does not
+ * prove a dead task was actually reclaimed. Test builds only, like kt_ticks().
+ */
+static int kt_free_kb(void) {
+    return syscall(SYSCALL_KTEST_REPORT, KT_FREEMEM, 0, 0);
 }
 
 /*
@@ -679,6 +690,49 @@ void main(void) {
      */
     KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/stat", 0, 0) == 1,
               "[STRICT] [PROC] a tool invoked with no argument exits non-zero");
+
+    /* ------------------------------------------------------------------
+     * A child that crashes.
+     *
+     * Until v0.4.2 the page-fault handler's entire teardown was marking the
+     * task dead and rescheduling. exit_current_process() never ran, so the
+     * parent waiting on WAIT_CHILD was never woken - a user program with an
+     * ordinary null-pointer bug left the shell that started it hung with no
+     * console - and the task never reached the zombie list, so the reaper never
+     * released its address space, page tables, user stacks or process_t.
+     *
+     * Nothing else in the image can produce a user-mode page fault, which is
+     * why /bin/ktest_crash exists. It is embedded in the test kernel only.
+     *
+     * Note the failure mode if this regresses: the exec below never returns and
+     * the whole run hits the QEMU timeout. That is loud, which is what we want -
+     * a hang is the actual symptom, and it cannot be mistaken for a pass.
+     * ------------------------------------------------------------------ */
+    int free_before = kt_free_kb();
+
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/ktest_crash", 0, 0) == 139,
+              "[STRICT] [PROC] a child that faults is reaped and reports 139");
+
+    const char *alive = "[PROC] parent survived a child's segfault\n";
+    KT_ASSERT(syscall(SYSCALL_WRITE, 1, (int)alive, kt_strlen(alive)) == kt_strlen(alive),
+              "[PROC] the parent is still able to cross the boundary afterwards");
+
+    /*
+     * And the address space really came back. Ten crashes, then compare: each
+     * leaked a page directory, its page tables, 32 user stack pages and the
+     * process_t, so a regression shows up as a large, monotonic drop rather
+     * than as noise. The tolerance is generous because the block cache and the
+     * heap move underneath this too.
+     */
+    for (int c = 0; c < 10; c++) {
+        syscall(SYSCALL_EXEC, (int)"/bin/ktest_crash", 0, 0);
+    }
+
+    int free_after = kt_free_kb();
+    KT_ASSERT(free_before > 0 && free_after > 0,
+              "[MEM] the free-memory figure is readable before and after");
+    KT_ASSERT(free_after + 256 >= free_before,
+              "[STRICT] [MEM] ten crashed children did not leak their address spaces");
 
     /* Still alive and still able to cross the boundary after three teardowns. */
     const char *after = "[PROC] parent survived the child teardowns\n";

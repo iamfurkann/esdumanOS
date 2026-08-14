@@ -35,6 +35,16 @@ extern int tests_failed;
  */
 #define KT_REPORT_TICKS 3
 
+/*
+ * Returns pmm_get_free_memory() to the caller.
+ *
+ * The crash-teardown test needs to see whether a task that faults actually gets
+ * reaped, and "the parent survived" alone does not prove that - the leak was the
+ * other half of the defect. Ring 3 cannot read the physical allocator, so it
+ * asks through the same test-only channel as the tick counter.
+ */
+#define KT_REPORT_FREEMEM 4
+
 /**
  * @brief Terminates QEMU with the suite's verdict.
  * @param is_success Non-zero when every assertion passed.

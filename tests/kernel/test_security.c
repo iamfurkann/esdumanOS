@@ -50,7 +50,6 @@ static void test_smap_status(void) {
     
     if (!smap_supported) {
         printk("  [SKIP] SMAP: Not supported by CPU (test skipped, NOT passed)\n");
-        serial_print("  [SKIP] SMAP: Not supported by CPU\n");
         return;
     }
     
@@ -64,7 +63,6 @@ static void test_smap_status(void) {
 
 void run_security_tests(void) {
     printk("\n--- Security and Authorization Tests ---\n");
-    serial_print("\n--- Security and Authorization Tests ---\n");
     
     int original_uid = 0;
     if (current_task != 0) {

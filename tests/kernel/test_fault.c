@@ -36,7 +36,6 @@ extern gdt_entry_t gdt_entries[];
  */
 void run_fault_tests(void) {
     printk("\n--- Fault Handling Infrastructure Tests ---\n");
-    serial_print("\n--- Fault Handling Infrastructure Tests ---\n");
 
     KTEST_ASSERT(KERNEL_STACK_SIZE >= 8192,
                  "Fault: per-process kernel stack is at least 8 KB");

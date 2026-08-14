@@ -31,7 +31,6 @@
  */
 void run_regression_tests(void) {
     printk("\n--- Regression (Past Bug) Tests ---\n");
-    serial_print("\n--- Regression (Past Bug) Tests ---\n");
 
     // =========================================================
     // BUG-01: Dangling Pointer & NULL Free Protection

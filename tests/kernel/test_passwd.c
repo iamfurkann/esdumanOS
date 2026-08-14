@@ -32,7 +32,6 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
  */
 void run_passwd_tests(void) {
     printk("\n--- Passwd & Shadow Security Tests ---\n");
-    serial_print("\n--- Passwd & Shadow Security Tests ---\n");
 
     int original_uid = 0;
     if (current_task != 0) original_uid = current_task->uid;

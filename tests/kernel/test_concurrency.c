@@ -30,7 +30,6 @@
  */
 void run_concurrency_tests(void) {
     printk("\n--- Concurrency (Hardware Atomic Lock) Tests ---\n");
-    serial_print("\n--- Concurrency (Hardware Atomic Lock) Tests ---\n");
 
     // Declare a volatile integer to act as our simulated hardware lock.
     // 'volatile' prevents compiler optimizations from caching the lock's value in a register,

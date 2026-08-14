@@ -21,7 +21,6 @@
  */
 void run_pmm_tests(void) {
     printk("\n--- Physical Memory Manager (PMM) Tests ---\n");
-    serial_print("\n--- Physical Memory Manager (PMM) Tests ---\n");
 
     uint32_t free_mem_before = pmm_get_free_memory();
     uint32_t frame1 = pmm_alloc_frame();

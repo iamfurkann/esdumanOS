@@ -199,6 +199,25 @@ void sys_write(arch_regs_t *regs) {
             regs->eax = dev_table[d_idx].write(kernel_buf, size);
         } else { regs->eax = E_NOENT; }
     }
+    else if (desc->type == FD_TYPE_FILE) {
+        /*
+         * Regular files had no branch here at all, so this fell through to the
+         * E_BADF below - which is why /bin/cp produced an empty destination and
+         * why the shell's ">" could never be wired up.
+         *
+         * The bytes are buffered rather than written: the stored form is one
+         * AES-CBC blob authenticated over its whole plaintext, so it can only be
+         * replaced. The commit happens when the last descriptor closes; see
+         * fs_commit_writes().
+         */
+        if (desc->mode != 1) {
+            regs->eax = E_BADF;   /* opened read-only */
+        } else if (desc->ptr == 0) {
+            regs->eax = E_BADF;
+        } else {
+            regs->eax = fs_write_buffered((vfs_file_t *)desc->ptr, kernel_buf, (uint32_t)size);
+        }
+    }
     else { regs->eax = E_BADF; }
     kfree(kernel_buf);
 }
@@ -340,18 +359,31 @@ void sys_close(arch_regs_t *regs) {
          */
         wakeup_tasks(WAIT_IPC);
     }
-    if (desc->type == FD_TYPE_FILE && desc->ptr != 0) { 
+    int close_status = E_OK;
+
+    if (desc->type == FD_TYPE_FILE && desc->ptr != 0) {
         vfs_file_t *f = (vfs_file_t *)desc->ptr;
         f->ref_count--;
         if (f->ref_count <= 0) {
+            /*
+             * Commit on the LAST reference, not on every close: dup2() can point
+             * several descriptors at one vfs_file_t, and writing the file out
+             * each time one of them closed would replace it repeatedly with a
+             * partial buffer.
+             *
+             * The result is returned to the caller. Swallowing it would turn a
+             * full disk or a destroyed master key into silent data loss - the
+             * exact shape of the defect v0.4.2 closed in /bin/cp.
+             */
+            close_status = fs_commit_writes(f);
             kfree((void *)desc->ptr);
         }
     }
-    
+
     desc->type = FD_TYPE_NONE;
     desc->ptr = 0;
     desc->mode = 0;
-    regs->eax = 0;
+    regs->eax = close_status;
 }
 
 
@@ -422,9 +454,25 @@ void sys_open(arch_regs_t *regs) {
 
     if (fs_open(basename, parent_id, new_file) == 0) {
         new_file->current_offset = 0;
+
+        /*
+         * The mode argument is honoured now. It was read from nowhere and the
+         * descriptor was always marked read-only, which is why /bin/cp passing
+         * O_WRONLY had no effect - and why writing to a file was impossible even
+         * once the descriptor existed.
+         *
+         * Opening for writing truncates: dirty is set here so that a file opened
+         * and closed without a single write commits zero bytes. That is what
+         * "> file" has to mean. The buffer itself is allocated on the first
+         * write, so opening a file costs nothing extra.
+         */
+        uint8_t open_mode = (regs->ecx == 1) ? 1 : 0;
+
+        if (open_mode == 1) new_file->dirty = 1;
+
         current_task->fd_table[fd].type = FD_TYPE_FILE;
         current_task->fd_table[fd].ptr = (uint32_t)new_file;
-        current_task->fd_table[fd].mode = 0;
+        current_task->fd_table[fd].mode = open_mode;
         regs->eax = fd;
     } else {
         kfree(new_file);

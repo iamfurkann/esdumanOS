@@ -88,7 +88,8 @@ TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_crypto.o \
 			tests/kernel/test_entropy.o \
 			tests/kernel/test_bcache.o \
-			src/resources/ktest_user_elf_data.o
+			src/resources/ktest_user_elf_data.o \
+			src/resources/ktest_crash_elf_data.o
 ifeq ($(ARCH), x86)
     # x86
     CC = gcc
@@ -318,6 +319,17 @@ apps/bin/stat.elf: apps/bin/stat.c
 # same way as the /bin programs, but only linked into $(TEST_BIN).
 tests/user/ktest_user.elf: tests/user/ktest_user.c
 	$(CC) $(USER_CFLAGS) tests/user/ktest_user.c -o tests/user/ktest_user.elf
+
+# Faults on purpose, so the crash-teardown path can be tested. Embedded only in
+# $(TEST_BIN) - it must never reach the production image.
+tests/user/ktest_crash.elf: tests/user/ktest_crash.c
+	$(CC) $(USER_CFLAGS) tests/user/ktest_crash.c -o tests/user/ktest_crash.elf
+
+src/resources/ktest_crash_elf_data.c: tests/user/ktest_crash.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool tests/user/ktest_crash.elf tests/user/ktest_crash_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i tests/user/ktest_crash_encrypted.elf | \
+	sed 's/tests_user_ktest_crash_encrypted_elf/ktest_crash_elf/g' > src/resources/ktest_crash_elf_data.c
 
 src/resources/ktest_user_elf_data.c: tests/user/ktest_user.elf tools/encrypt_tool
 	@mkdir -p src/resources

@@ -73,10 +73,33 @@ void page_fault_handler(arch_regs_t *regs) {
     int is_user = regs->err_code & 0x4;
 
     if (is_user) {
-        printk("\n[SEGFAULT] Violation (PID: %d)! Unauthorized memory access: 0x%x\n", 
+        printk("\n[SEGFAULT] Violation (PID: %d)! Unauthorized memory access: 0x%x\n",
                current_task ? current_task->pid : -1, faulting_address);
-        
-        if (current_task) current_task->state = TASK_DEAD; 
+
+        /*
+         * Tear the task down the same way exit() does, rather than only marking
+         * it dead.
+         *
+         * Setting TASK_DEAD and rescheduling was the entire teardown, and it
+         * skipped everything exit_current_process() exists to do: file and pipe
+         * reference counts were never dropped, a parent blocked on WAIT_CHILD
+         * was never woken, and the task was neither unlinked from the run list
+         * nor placed on the zombie list - so the reaper in schedule() never saw
+         * it and its address space, page tables, user stacks, descriptor table
+         * and process_t leaked permanently.
+         *
+         * The visible symptom was worse than the leak: a user program with an
+         * ordinary null-pointer bug left the shell that had exec'd it parked on
+         * WAIT_CHILD forever, with no console.
+         *
+         * 139 is the conventional 128 + SIGSEGV, so a parent can tell a crash
+         * from an ordinary non-zero exit.
+         */
+        if (current_task) {
+            current_task->exit_code = 139;
+            exit_current_process(regs);
+            /* Does not return: it switches away and never resumes this task. */
+        }
         schedule(regs);
     } else {
         extern volatile uint32_t current_fault_handler;

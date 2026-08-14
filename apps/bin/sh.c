@@ -347,6 +347,14 @@ void sys_dmesg(void) { syscall(SYSCALL_DMESG, 0, 0, 0); }
  * @return File descriptor.
  */
 int sys_open(const char *name) { return syscall(SYSCALL_OPEN, (int)name, 0, 0); }
+
+/**
+ * @brief Opens a file for writing, which truncates it.
+ *
+ * The second syscall argument is the mode; it was ignored by the kernel until
+ * v0.4.3, which is why nothing could write to a file. 1 is write.
+ */
+int sys_open_write(const char *name) { return syscall(SYSCALL_OPEN, (int)name, 1, 0); }
 /**
  * @brief Changes the working directory. The kernel resolves the path.
  * @param path Absolute or relative path.
@@ -462,7 +470,8 @@ void show_help(void) {
     printk("    layout tr|us      Set keyboard layout\n");
     printk("    lockdown          Switch system to safe mode\n");
     printk("    clear             Clear the screen\n");
-    printk("\n  Operators: | (pipe), > (redirect), && (AND), || (OR)\n");
+    printk("\n  Operators: | (pipe, two stages), > (redirect), && (AND), || (OR)\n");
+    printk("  Note: > and | cannot be combined in one command.\n");
 }
 
 /**
@@ -588,7 +597,17 @@ int builtin_cat(char **args) {
  * @param args Array of command-line arguments.
  * @param redirect_file File to redirect output to (if any).
  */
-void execute_command(char **args, char *redirect_file) {
+/*
+ * Redirection is set up by the caller rather than in here.
+ *
+ * This function took a redirect_file parameter and never used it - the whole
+ * reason "cmd > file" printed to the terminal and created nothing. Wiring it up
+ * inside the body would have been fragile: there are three early returns, and
+ * any of them would skip the restore and leave the shell's stdout pointing at a
+ * closed file for the rest of the session. run_with_redirect() below wraps the
+ * call instead, so the teardown cannot be bypassed.
+ */
+void execute_command(char **args) {
     if (!args[0]) return;
 
     if (ft_strcmp(args[0], "cat") == 0) {
@@ -877,6 +896,58 @@ void execute_command(char **args, char *redirect_file) {
              */
             last_exit_status = exec_res;
         }
+    }
+}
+
+/**
+ * @brief Runs a command with its standard output sent to a file.
+ *
+ * Opening for writing truncates, so the file only has to exist first; if it does
+ * not, it is created empty. The kernel buffers what is written and commits the
+ * whole thing when the last descriptor closes, which is why both descriptors
+ * below have to be closed for the file to appear on disk.
+ *
+ * fd 12 holds the saved stdout. The pipe path uses 10 and 11 for the same
+ * purpose, so this stays clear of both.
+ *
+ * @param args Tokenised command.
+ * @param redirect_file Target path.
+ */
+void run_with_redirect(char **args, char *redirect_file) {
+    int fd = sys_open_write(redirect_file);
+
+    if (fd < 0) {
+        /* Does not exist yet - open() does not create. */
+        if (sys_create_file(redirect_file, "") != E_OK) {
+            printk("sh: cannot create "); printk(redirect_file); printk("\n");
+            last_exit_status = 1;
+            return;
+        }
+        fd = sys_open_write(redirect_file);
+    }
+
+    if (fd < 0) {
+        printk("sh: cannot open "); printk(redirect_file); printk("\n");
+        last_exit_status = 1;
+        return;
+    }
+
+    dup2(1, 12);
+    dup2(fd, 1);
+
+    execute_command(args);
+
+    dup2(12, 1);
+    sys_close(12);
+
+    /*
+     * The commit happens on the last close, and the status it reports is the
+     * only signal that the write reached the disk - a full disk or a destroyed
+     * master key surfaces here and nowhere else.
+     */
+    if (sys_close(fd) != E_OK) {
+        printk("sh: write to "); printk(redirect_file); printk(" failed\n");
+        last_exit_status = 1;
     }
 }
 
@@ -1257,13 +1328,17 @@ void main(void) {
                         int pfd[2];
                         if (pipe(pfd) >= 0) {
                             dup2(1, 10); dup2(0, 11);
-                            dup2(pfd[1], 1); execute_command(args, redirect_file); dup2(10, 1);
+                            /* Redirection combined with a pipe is not supported:
+                             * the parser takes whichever it meets first, so the
+                             * other is passed through as a literal argument. */
+                            dup2(pfd[1], 1); execute_command(args); dup2(10, 1);
                             sys_close(pfd[1]);
-                            dup2(pfd[0], 0); execute_command(pipe_args, 0); dup2(11, 0);
+                            dup2(pfd[0], 0); execute_command(pipe_args); dup2(11, 0);
                             sys_close(pfd[0]);
                         } else printk("Error: Failed to create pipe!\n");
                     } else {
-                        execute_command(args, redirect_file);
+                        if (redirect_file) run_with_redirect(args, redirect_file);
+                        else execute_command(args);
                     }
                 }
             }

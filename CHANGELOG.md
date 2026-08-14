@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4-alpha] - 2026-08-14
+
+Header tidy-up before `fork`/`wait`. No behaviour change: the 445 assertions pass
+unaltered, which is the point — the compiler is this release's test.
+
+All 43 headers were audited. The good news first: **no circular includes and no guard
+macro collisions.** The header graph is a clean DAG. The problems were in declarations.
+
+### Fixed
+
+- **`timer_ticks` was declared without `volatile`.** `arch/x86/cpu/timer.c` defines it
+  `volatile` and increments it from IRQ0; `rtc.h` declared it plain. The tree builds at
+  `-O2`, so a loop waiting on the counter through that declaration could have had the
+  load hoisted out of it and spun forever. Nothing reads it that way today — every
+  caller goes through `timer_get_ticks()` — so this was a loaded gun rather than a live
+  miscompile, and it is the same defect class as the historical
+  `schedule_kernel_timer()` declared twice with disagreeing signatures.
+
+  It survived because **`timer.c` included none of the headers that declare what it
+  defines**, so no definition was ever compared against its declaration. That is fixed
+  alongside it: the file now includes `rtc.h`, `isr.h` and `signal.h`.
+- **The last three lines of `rtc.h` sat outside the include guard**, after the `#endif`.
+  Repeated `extern` declarations are legal so nothing broke, but the first typedef or
+  inline added there would have broken every translation unit that includes it, at once.
+- **Four ELF blob lengths were declared `const uint32_t` where the other eleven are
+  `unsigned int`** — and `xxd -i`, which generates all fifteen, emits `unsigned int`. So
+  four disagreed with their own definitions. Incompatible types across translation units
+  is undefined behaviour the linker cannot catch.
+- **`init_elf.h` used `uint8_t` with no `#include` at all.** It compiled only because its
+  one consumer includes `kernel.h` on the line above; swapping those two lines broke the
+  build.
+- **Host tests were compiled with `-I./include`, which made `<stdio.h>` resolve to the
+  kernel's own header** rather than the host's. Measured both ways: with `-I` a bare
+  `printf` call fails to compile; with `-iquote` it reaches the host libc. The rules use
+  `-iquote` now, so quoted includes still find the kernel headers and angled ones do not.
+  A dead `-I./crypto` went with it — there are no headers in that directory.
+
+  The three host tests already declared `printf` by hand and `test_crypto.c` carried a
+  comment saying system headers had been removed, while still including `<stdio.h>`. The
+  include is gone and the hand-written declaration is what remains, which is what the
+  comment always claimed: this project ships no third-party library, and a host test
+  borrows exactly one symbol to print a result.
+
+### Removed
+
+- Six declarations of things that do not exist: `init_signals()` (renamed to
+  `init_kernel_timers()` and the declaration left behind), `auth_fail_ticks[16]` (a
+  global-era leftover — it is a per-process PCB field now), `errno` (the kernel returns
+  negative `E_*` codes and never had one), `__bss_end` (the linker script provides
+  `_bss_end`, with one underscore), and the unused `signal_t` type.
+- Three duplicate declarations: `register_kernel_timer` and `process_pending_kernel_timers`
+  (both owned by `signal.h`), and `init_elf`/`init_elf_len` (owned by `init_elf.h`).
+- `src/init_elf.h` — empty, unguarded, and not even on the include path.
+- Two unused header includes (`pipe.h` → `registers.h`, `crypto.h` → `arch.h`) and 20
+  unused includes across the kernel sources, each verified symbol by symbol.
+
+### Changed
+
+- The 49 assembly interrupt stubs are declared together in `isr.h`. Fourteen were there
+  and thirty-five in `idt.c`, in two blocks a refactor script had appended at different
+  times — exactly complementary, which is the giveaway that nobody chose the split.
+
+### Deliberately not done
+
+`kernel.h` is still a god header: 23 includes for symbols it does not use itself, pulled
+in by 11 files, several of them only as a route to `stdio.h`. Splitting it ripples
+through every consumer and does not belong in a patch. The same goes for moving
+`fs_max_sectors` out of `bcache.h`, moving `klog_write_char`/`dump_klog` into `klog.h`,
+and adding the ~20 direct includes that would let the load-bearing chains
+(`libft.h` → `kheap.h`, `stdio.h` → `tty.h`, `serial.h` → `io.h`) be trimmed. Those have
+an ordering dependency: the direct includes must land before the chains are cut, or the
+build breaks.
+
 ## [0.4.3-alpha] - 2026-08-14
 
 The kernel can write to a file through a descriptor. Two defects recorded in v0.4.2

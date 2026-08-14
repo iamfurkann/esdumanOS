@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.4.3--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.4.4--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.3-alpha
+**Version:** 0.4.4-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -91,6 +91,13 @@ everything else. That single gap was why `/bin/cp` produced empty files and why 
 shell's `>` could not be connected to anything. Both work now, within semantics the
 disk format dictates: a write is buffered and committed whole when the last descriptor
 closes, so there is no appending and no writing into the middle of a file.
+
+v0.4.4 is a header tidy-up ahead of `fork`/`wait`, with no behaviour change. It found
+three real defects hiding in declarations: `timer_ticks` was declared without the
+`volatile` its definition carries, three declarations in `rtc.h` sat outside the include
+guard, and four of the fifteen embedded-ELF lengths were declared with a type that
+disagreed with their definitions. The first survived because `timer.c` included none of
+the headers that declare what it defines — so nothing ever compared the two.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -408,7 +415,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.4.3-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.4.4-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -431,7 +438,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.4.3-alpha.iso \
+    -cdrom esdumanOS-v0.4.4-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -650,7 +657,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.4.3-alpha)
+|   |-- kernel.h                     Master header (version 0.4.4-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API

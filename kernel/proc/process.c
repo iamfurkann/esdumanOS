@@ -121,6 +121,7 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     new_task->wait_reason = WAIT_NONE;
     new_task->sleep_deadline = 0;
     new_task->sleep_active = 0;
+    new_task->exit_code = 0;
     new_task->wait_mutex = 0;
     new_task->held_mutex = 0;
     new_task->pending_signals = 0;
@@ -371,6 +372,23 @@ void exit_current_process(arch_regs_t *regs) {
         if (p->pid == parent_pid && p->state == TASK_WAITING && p->wait_reason == WAIT_CHILD) {
             p->state = TASK_RUNNING;
             p->wait_reason = WAIT_NONE;
+
+            /*
+             * Hand the child's status up.
+             *
+             * Written into the parent's *saved* frame, not a live one: the
+             * parent is blocked, so schedule() will restore this copy into the
+             * real frame when it next runs, and sys_exec()'s return value is
+             * whatever sits in eax at that moment. Writing anywhere else - or
+             * writing after the parent had already resumed - is the mistake
+             * sys_exec() documents in its own comment about publishing before
+             * sleeping.
+             *
+             * Until this landed the parent kept the E_OK sys_exec() had put
+             * there before blocking, so every program appeared to succeed.
+             */
+            p->regs.eax = (uint32_t)curr->exit_code;
+
             next_fg = p->pid;
             break;
         }

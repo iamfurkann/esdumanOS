@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.0-alpha
+**Version:** 0.4.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -650,11 +650,17 @@ The kernel exposes 50 system calls through `INT 0x80`. The syscall number is pas
 | Number | Name | Description |
 |--------|------|-------------|
 | 1 | `EXIT` | Terminate the current process |
-| 5 | `EXEC` | Load and execute an ELF binary |
+| 5 | `EXEC` | Load and execute an ELF binary; blocks until it exits, then returns its status |
 | 7 | `SET_PRIORITY` | Set process scheduling priority |
 | 51 | `GETPID` | Get the process ID of the caller |
 | 52 | `SLEEP` | Block the caller for a number of **milliseconds** |
 | 99 | `YIELD` | Voluntarily yield the CPU |
+
+`EXEC` returns a negative errno when the program could not be started, and otherwise
+the child's exit status once it has finished — statuses are masked to 0-255, so the
+two cannot be confused. There is no separate `wait()` yet: `EXEC` blocks the caller on
+`WAIT_CHILD` for the child's lifetime, which is what makes returning the status
+possible without one.
 
 `SLEEP` takes milliseconds rather than seconds because `TIMER_HZ` is 100, giving a
 10 ms resolution that a seconds-only call could not reach; the shell's `sleep`

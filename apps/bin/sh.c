@@ -800,7 +800,17 @@ void execute_command(char **args, char *redirect_file) {
             printk("sh: command not found: "); printk(args[0]); printk("\n");
             last_exit_status = 127;
         } else {
-            last_exit_status = 0;
+            /*
+             * The child's own exit status, which exec() now returns once the
+             * child has finished. This used to be a hardcoded 0, so every
+             * program that started at all counted as having succeeded and the
+             * && and || below could not tell one outcome from the other:
+             * "stat /no_such_file && echo CHAINED" printed CHAINED.
+             *
+             * Negative already means the program could not be started, and an
+             * exit status is 0-255, so the two never collide.
+             */
+            last_exit_status = exec_res;
         }
     }
 }

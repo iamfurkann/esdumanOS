@@ -650,8 +650,35 @@ void main(void) {
      * ------------------------------------------------------------------ */
     for (int child = 0; child < 3; child++) {
         int ex = syscall(SYSCALL_EXEC, (int)"/bin/hello", 0, 0);
-        KT_ASSERT(ex == E_OK, "[PROC] exec() of a child that exits returns E_OK");
+        KT_ASSERT(ex == 0, "[PROC] exec() of a child that exits 0 returns 0");
     }
+
+    /*
+     * The child's status has to survive the trip up.
+     *
+     * exit() discarded its argument and nothing anywhere held a status, so a
+     * parent learned only that its child had finished. exec() therefore always
+     * reported success, and the shell's && and || could not tell one outcome
+     * from the other: "stat /no_such_file && echo CHAINED" printed CHAINED.
+     *
+     * /bin/stat exits 1 when it cannot stat its argument, which makes it the
+     * one tool already in the image that can show a non-zero status arriving
+     * intact instead of being flattened to E_OK. The success case is asserted
+     * beside it, because a version that simply returned 1 unconditionally would
+     * satisfy the first assertion on its own.
+     */
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/stat", 0, (int)"/no_such_file_at_all") == 1,
+              "[STRICT] [PROC] exec() returns the child's non-zero exit status");
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/stat", 0, (int)"/etc") == 0,
+              "[STRICT] [PROC] and returns 0 when the same child succeeds");
+
+    /*
+     * A usage error is a failure too. /bin/stat exited 0 when given no argument
+     * at all, which reported "no file given" as success - harmless while
+     * statuses went nowhere, and wrong the moment they started arriving.
+     */
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/stat", 0, 0) == 1,
+              "[STRICT] [PROC] a tool invoked with no argument exits non-zero");
 
     /* Still alive and still able to cross the boundary after three teardowns. */
     const char *after = "[PROC] parent survived the child teardowns\n";

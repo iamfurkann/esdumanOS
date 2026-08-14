@@ -130,6 +130,21 @@ typedef struct process_s {
     uint32_t sleep_deadline;
     uint8_t sleep_active;
 
+    /*
+     * Status this task passed to exit(), 0-255.
+     *
+     * sys_exit() used to discard its argument outright and nothing anywhere
+     * held an exit status, so a parent could learn that its child had finished
+     * but never how it went. The shell's && and || are built on exactly that
+     * answer, and with none available it recorded success unconditionally -
+     * "stat /no_such_file && echo CHAINED" printed CHAINED.
+     *
+     * Masked to the low 8 bits on the way in, which is both what POSIX exposes
+     * through wait() and what keeps the value from ever looking like the
+     * negative errno sys_exec() returns when a program could not be started.
+     */
+    int exit_code;
+
     task_state_t state;
     wait_reason_t wait_reason;
     mutex_t *wait_mutex;

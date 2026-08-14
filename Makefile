@@ -46,6 +46,7 @@ CORE_OBJS = kernel/core/kernel.o \
 			src/resources/grep_elf_data.o \
 			src/resources/head_elf_data.o \
 			src/resources/date_elf_data.o \
+			src/resources/stat_elf_data.o \
 			fs/bcache.o \
             fs/vfs.o \
             fs/crypto_fs.o \
@@ -309,6 +310,9 @@ apps/bin/head.elf: apps/bin/head.c
 apps/bin/date.elf: apps/bin/date.c
 	$(CC) $(USER_CFLAGS) apps/bin/date.c -o apps/bin/date.elf
 
+apps/bin/stat.elf: apps/bin/stat.c
+	$(CC) $(USER_CFLAGS) apps/bin/stat.c -o apps/bin/stat.elf
+
 
 # Ring 3 half of the kernel self-test suite. Built, encrypted and embedded the
 # same way as the /bin programs, but only linked into $(TEST_BIN).
@@ -415,6 +419,12 @@ src/resources/date_elf_data.c: apps/bin/date.elf tools/encrypt_tool
 	@./tools/encrypt_tool apps/bin/date.elf apps/bin/date_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i apps/bin/date_encrypted.elf | \
 	sed 's/apps_bin_date_encrypted_elf/date_elf/g' > src/resources/date_elf_data.c
+
+src/resources/stat_elf_data.c: apps/bin/stat.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/stat.elf apps/bin/stat_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/stat_encrypted.elf | \
+	sed 's/apps_bin_stat_encrypted_elf/stat_elf/g' > src/resources/stat_elf_data.c
 
 
 test:

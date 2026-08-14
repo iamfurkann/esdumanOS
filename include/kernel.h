@@ -8,8 +8,8 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    0
-#define OS_VERSION_MINOR    3
-#define OS_VERSION_PATCH    1
+#define OS_VERSION_MINOR    4
+#define OS_VERSION_PATCH    0
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
@@ -127,5 +127,6 @@ extern unsigned char kill_elf[]; extern unsigned int kill_elf_len;
 extern unsigned char grep_elf[]; extern unsigned int grep_elf_len;
 extern unsigned char head_elf[]; extern unsigned int head_elf_len;
 extern unsigned char date_elf[]; extern unsigned int date_elf_len;
+extern unsigned char stat_elf[]; extern unsigned int stat_elf_len;
 
 #endif //KERNEL_H

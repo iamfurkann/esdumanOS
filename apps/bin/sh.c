@@ -137,8 +137,32 @@ uint32_t hex_to_int(const char *hex_str) {
 }
 
 /**
+ * @brief Converts a decimal string to a non-negative integer.
+ *
+ * Separate from hex_to_int() above, which is what the shell had and which would
+ * read "10" as sixteen. Anything that is not a digit ends the number, and a
+ * string with no leading digit at all reports -1 rather than 0 - "sleep abc"
+ * should complain, not return instantly.
+ *
+ * @param str Decimal string.
+ * @return The parsed value, or -1 when the string does not start with a digit.
+ */
+int dec_to_int(const char *str) {
+    if (!str || *str < '0' || *str > '9') return -1;
+
+    int val = 0;
+    while (*str >= '0' && *str <= '9') {
+        /* Stop well short of overflow; nothing here needs large numbers. */
+        if (val > 100000000) return -1;
+        val = val * 10 + (*str - '0');
+        str++;
+    }
+    return val;
+}
+
+/**
  * @brief Computes a salted DJB2 hash for a string.
- * 
+ *
  * @param str String to hash.
  * @return The computed hash.
  */
@@ -407,6 +431,7 @@ void show_help(void) {
     printk("\n  Process & System:\n");
     printk("    exec [program]    Execute an ELF binary\n");
     printk("    kill [pid] [sig]  Send signal to a process\n");
+    printk("    sleep [seconds]   Pause for a number of seconds\n");
     printk("    su                Switch to root user\n");
     printk("    reboot            Reboot the system\n");
     printk("    halt              Halt the processor\n");
@@ -719,6 +744,20 @@ void execute_command(char **args, char *redirect_file) {
     else if (ft_strcmp(args[0], "dmesg") == 0) {
         sys_dmesg();
     }
+    else if (ft_strcmp(args[0], "sleep") == 0) {
+        /*
+         * Seconds here, milliseconds at the syscall. The kernel takes the finer
+         * unit because TIMER_HZ gives it 10 ms of resolution and nothing else
+         * could reach it; the shell keeps the unit people expect from sleep(1).
+         */
+        int seconds = args[1] ? dec_to_int(args[1]) : -1;
+        if (seconds < 0) {
+            printk("Usage: sleep <seconds>\n");
+            last_exit_status = 1;
+        } else {
+            last_exit_status = syscall(SYSCALL_SLEEP, seconds * 1000, 0, 0) == 0 ? 0 : 1;
+        }
+    }
     else {
         if (ft_strlen(args[0]) > 58) {
             printk("sh: command name too long (max 58 characters)\n");
@@ -773,7 +812,7 @@ static const char *builtin_commands[] = {
     "cat", "cat_raw", "cd", "clear", "dmesg", "echo", "env", "exec",
     "exit", "export", "halt", "help", "hexdump", "kill", "layout",
     "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
-    "rm", "su", "write",
+    "rm", "sleep", "su", "write",
     0  // sentinel
 };
 

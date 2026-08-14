@@ -648,7 +648,132 @@ void main(void) {
               "[STAT] back to root for the remaining sections");
 
     /* ------------------------------------------------------------------
-     * 9. Child process round trip.
+     * 9. Writing to a file through a descriptor.
+     *
+     * sys_write had no branch for a regular file at all, so every write to one
+     * returned E_BADF. That is why /bin/cp produced an empty destination and
+     * why the shell's ">" could never be wired up.
+     *
+     * The semantics under test are deliberately narrower than POSIX, because
+     * the stored form allows nothing wider: a file is one AES-CBC blob
+     * authenticated over its whole plaintext, so it can be replaced but never
+     * appended to. Writes are therefore buffered and committed once, when the
+     * last descriptor closes.
+     * ------------------------------------------------------------------ */
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/tmp", 0, 0) == E_OK,
+              "[WRITE] chdir(/tmp) for the write tests");
+
+    KT_ASSERT(syscall(SYSCALL_CREATE_FILE, (int)"wtest.txt", (int)"", 0) == E_OK,
+              "[WRITE] target file created");
+
+    const char *wpayload = "written through a descriptor";
+    int wlen = kt_strlen(wpayload);
+
+    int wfd = syscall(SYSCALL_OPEN, (int)"wtest.txt", 1, 0);
+    KT_ASSERT(wfd >= 0, "[WRITE] open() for writing succeeds");
+
+    if (wfd >= 0) {
+        KT_ASSERT(syscall(SYSCALL_WRITE, wfd, (int)wpayload, wlen) == wlen,
+                  "[STRICT] [WRITE] write() to a file reports the full byte count");
+
+        /*
+         * The commit is on close, and this is what proves it: the file on disk
+         * is still the empty one until the descriptor goes away.
+         */
+        KT_ASSERT(syscall(SYSCALL_STAT, (int)"wtest.txt", (int)&st, 0) == E_OK && st.st_size == 0,
+                  "[STRICT] [WRITE] the file is unchanged while the descriptor is open");
+
+        KT_ASSERT(syscall(SYSCALL_CLOSE, wfd, 0, 0) == E_OK,
+                  "[WRITE] close() commits the buffered write");
+
+        KT_ASSERT(syscall(SYSCALL_STAT, (int)"wtest.txt", (int)&st, 0) == E_OK &&
+                  st.st_size == (unsigned int)wlen,
+                  "[STRICT] [WRITE] and the new size is visible once it has closed");
+
+        /* And the bytes survived the encrypt/decrypt round trip. */
+        int rfd = syscall(SYSCALL_OPEN, (int)"wtest.txt", 0, 0);
+        KT_ASSERT(rfd >= 0, "[WRITE] the written file reopens for reading");
+        if (rfd >= 0) {
+            char rb[64];
+            for (int i = 0; i < 64; i++) rb[i] = 0;
+
+            KT_ASSERT(syscall(SYSCALL_READ, rfd, (int)rb, 64) == wlen,
+                      "[STRICT] [WRITE] read() returns exactly the bytes written");
+
+            int same = 1;
+            for (int i = 0; i < wlen; i++) { if (rb[i] != wpayload[i]) same = 0; }
+            KT_ASSERT(same, "[STRICT] [WRITE] and they come back byte for byte");
+
+            /* A descriptor opened for reading must refuse writes. */
+            KT_ASSERT(syscall(SYSCALL_WRITE, rfd, (int)"x", 1) < 0,
+                      "[STRICT] [WRITE] writing to a read-only descriptor is refused");
+
+            syscall(SYSCALL_CLOSE, rfd, 0, 0);
+        }
+    }
+
+    /*
+     * Opening for writing truncates. Open and close without writing anything,
+     * and the file must come back empty - that is what "> file" has to mean, and
+     * it is why the dirty flag is set at open rather than at the first write.
+     */
+    int tfd = syscall(SYSCALL_OPEN, (int)"wtest.txt", 1, 0);
+    KT_ASSERT(tfd >= 0, "[WRITE] reopening for writing succeeds");
+    if (tfd >= 0) {
+        KT_ASSERT(syscall(SYSCALL_CLOSE, tfd, 0, 0) == E_OK,
+                  "[WRITE] closing it again commits");
+        KT_ASSERT(syscall(SYSCALL_STAT, (int)"wtest.txt", (int)&st, 0) == E_OK && st.st_size == 0,
+                  "[STRICT] [WRITE] opening for writing truncated the file");
+    }
+
+    /*
+     * The commit belongs to the LAST reference, not to every close.
+     *
+     * dup2() can point several descriptors at one open file. Committing on each
+     * close would rewrite the file repeatedly from a partial buffer, and the
+     * first close would publish a half-written file.
+     */
+    int d1 = syscall(SYSCALL_OPEN, (int)"wtest.txt", 1, 0);
+    KT_ASSERT(d1 >= 0, "[WRITE] open for the duplicate-descriptor check");
+    if (d1 >= 0) {
+        KT_ASSERT(syscall(SYSCALL_WRITE, d1, (int)"abc", 3) == 3,
+                  "[WRITE] three bytes buffered");
+        KT_ASSERT(syscall(SYSCALL_DUP2, d1, 9, 0) == 9,
+                  "[WRITE] dup2() gives a second descriptor onto the same file");
+
+        syscall(SYSCALL_CLOSE, d1, 0, 0);
+        KT_ASSERT(syscall(SYSCALL_STAT, (int)"wtest.txt", (int)&st, 0) == E_OK && st.st_size == 0,
+                  "[STRICT] [WRITE] closing one of two descriptors does not commit");
+
+        KT_ASSERT(syscall(SYSCALL_CLOSE, 9, 0, 0) == E_OK,
+                  "[WRITE] closing the last one does");
+        KT_ASSERT(syscall(SYSCALL_STAT, (int)"wtest.txt", (int)&st, 0) == E_OK && st.st_size == 3,
+                  "[STRICT] [WRITE] and the file now holds what was buffered");
+    }
+
+    /*
+     * End to end through a real tool. /bin/cp has always done the right thing -
+     * open, read, write, close - and produced an empty file because the kernel
+     * dropped every write. This is the assertion that says it works now, and it
+     * goes through exec and the argument string rather than calling the
+     * syscalls directly, which is where v0.3.1's defect lived.
+     */
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/cp", 0, (int)"wtest.txt wcopy.txt") == 0,
+              "[WRITE] cp reports success");
+
+    esd_stat_t cst;
+    KT_ASSERT(syscall(SYSCALL_STAT, (int)"wcopy.txt", (int)&cst, 0) == E_OK,
+              "[WRITE] cp created the destination");
+    KT_ASSERT(cst.st_size == 3,
+              "[STRICT] [WRITE] and copied the contents rather than leaving it empty");
+
+    syscall(SYSCALL_RM_FILE, (int)"wtest.txt", 0, 0);
+    syscall(SYSCALL_RM_FILE, (int)"wcopy.txt", 0, 0);
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"/", 0, 0) == E_OK,
+              "[WRITE] back to root");
+
+    /* ------------------------------------------------------------------
+     * 10. Child process round trip.
      *
      * The only path that drives process teardown end to end: exec() a child,
      * the child exits, and the zombie reaper in schedule() releases both its
@@ -740,7 +865,7 @@ void main(void) {
               "[PROC] parent still functional after the reaper ran");
 
     /* ------------------------------------------------------------------
-     * 10. LOCKDOWN.
+     * 11. LOCKDOWN.
      *
      * Deliberately the very last thing: it destroys the master key, and
      * security levels only ever go up, so every encrypted filesystem operation

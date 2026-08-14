@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1-alpha] - 2026-08-14
+
+### Fixed
+
+- **Exit statuses were discarded, so `&&` and `||` decided nothing.** `exit()` never
+  read its argument, no field anywhere held a status, and `exec()` reported `E_OK` as
+  soon as the child had *started*. The shell then recorded success unconditionally.
+  The result was a shell whose conditional operators were decorative:
+
+  ```
+  # stat /no_such_file || echo FAILED
+  stat: cannot stat '/no_such_file'
+  # stat /no_such_file && echo CHAINED
+  stat: cannot stat '/no_such_file'
+  CHAINED
+  ```
+
+  `||` never fired and `&&` always did, whatever the command had done.
+
+  All four links are now connected: `exit()` records its argument in the PCB, masked
+  to the low 8 bits; `exit_current_process()` writes it into the waiting parent's
+  saved frame; `exec()` returns it instead of `E_OK`; and the shell uses it. A failure
+  to start is still a negative errno, and an exit status is 0-255, so the two cannot
+  be confused.
+
+  This needed no `fork()`. `exec()` already blocks the caller on `WAIT_CHILD` until
+  the child finishes, which is functionally a `wait()` — the only thing missing was
+  carrying the number back. The same plumbing is what a real `wait()` will use.
+
+  Nothing caught it because every assertion checked that `exec()` succeeded, and by
+  the old contract it always did.
+
+- **`/bin/stat` reported a usage error as success.** Invoked with no argument it
+  printed `stat: no file given` and exited 0. Harmless while statuses went nowhere,
+  and wrong the moment they started arriving — `stat && echo CHAINED` printed
+  `CHAINED` without a file having been named. Found by the first run of the fix
+  above, which is the point of connecting the chain at all.
+
 ## [0.4.0-alpha] - 2026-08-14
 
 Adds the syscalls a program needs to ask about things rather than only do them:

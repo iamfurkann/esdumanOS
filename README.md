@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.4.5--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.4.6--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.5-alpha
+**Version:** 0.4.6-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -106,6 +106,15 @@ and then dropped, and every process has no handler registered by default. `SIG_K
 `SIG_TERM` now terminate a target that has not handled them. The same release stops a new
 process control block carrying whatever the heap last held, and stops a pid in use from
 being issued twice; both are fields `fork()` would have copied.
+
+v0.4.6 touches no kernel code. It makes `make fuzz` explain itself: libFuzzer's runtime
+uses the `POPCNT` instruction, and on a CPU without it the target died with `SIGILL`
+inside the sanitizer, reported only as "deadly signal" and with a stack trace pointing at
+the one place the fault was not. That is reachable whenever the host is an emulated x86 —
+QEMU's default CPU model omits the instruction — so it went unseen until development moved
+onto Apple Silicon. The same release pins CI to a fixed runner image instead of the
+floating `ubuntu-latest`, so a toolchain upgrade is something chosen rather than
+discovered.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -350,6 +359,19 @@ unattended and so creates both accounts with the password `test`.
 | `openssl` | 1.1+ | Build-time ELF encryption tooling |
 | `python3` | 3.6+ | Test and tooling scripts |
 
+The host may be 64-bit; `gcc-multilib` is what lets a 64-bit compiler emit the
+32-bit objects this kernel is built from, and it is what CI uses. A 32-bit host
+works too but is not required by anything here.
+
+> **Developing inside an emulated x86 VM?** The host CPU must implement `POPCNT`.
+> QEMU's default `qemu64` CPU model does not, and libFuzzer's runtime uses that
+> instruction — so `make fuzz` dies with `SIGILL` inside the sanitizer before any
+> of this project's code runs, reported only as "deadly signal". Start the VM with
+> `-cpu max` (or any model from Nehalem onward) and confirm with
+> `grep -c popcnt /proc/cpuinfo`. This bites on Apple Silicon, where an x86 guest
+> is always emulated; real hardware and the CI runners are unaffected. `make fuzz`
+> now checks for it and says so rather than failing this way.
+
 ### Installing Dependencies
 
 **Ubuntu / Debian:**
@@ -359,6 +381,10 @@ sudo apt-get update
 sudo apt-get install -y gcc-multilib nasm make qemu-system-x86 \
     grub-common grub-pc-bin xorriso mtools libssl-dev python3
 ```
+
+A minimal Debian netinst does not ship everything the build needs. Add
+`make`, `git`, `xxd` (the ELF embedding step calls `xxd -i`), and `bear` if you
+want a `compile_commands.json` for your editor.
 
 **Fedora:**
 
@@ -423,7 +449,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.4.5-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.4.6-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -446,7 +472,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.4.5-alpha.iso \
+    -cdrom esdumanOS-v0.4.6-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -666,7 +692,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.4.5-alpha)
+|   |-- kernel.h                     Master header (version 0.4.6-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API

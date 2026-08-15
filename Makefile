@@ -534,8 +534,28 @@ test_smap:
 		fi; \
 	fi
 
+# Refuse to start rather than fail unreadably on a CPU without POPCNT.
+#
+# libFuzzer computes the hamming distance between compared values, which its
+# runtime does with the POPCNT instruction. A CPU that does not implement it
+# raises SIGILL inside __sanitizer_cov_trace_const_cmp8, before any code in this
+# project runs - and libFuzzer's own handler reports that as "deadly signal"
+# without ever naming the signal, so the output points at the fuzz harness and
+# not at the machine. Diagnosing it from that output takes hours.
+#
+# Reachable on an emulated x86 host: QEMU's default qemu64 CPU model has no
+# POPCNT, so developing on Apple Silicon means hitting this unless the VM is
+# started with -cpu max. Real hardware and the CI runners are unaffected. See
+# the note in README.md under Requirements.
 fuzz:
 	@echo "--- Starting Fuzzing (libFuzzer) ---"
+	@grep -q '\bpopcnt\b' /proc/cpuinfo || { \
+		echo "ERROR: this CPU does not implement POPCNT, which libFuzzer's runtime requires."; \
+		echo "       It would abort with SIGILL before reaching any of this project's code."; \
+		echo "       On an emulated host, start the VM with '-cpu max' (QEMU's default"; \
+		echo "       qemu64 model omits POPCNT). See README.md, Requirements."; \
+		exit 1; \
+	}
 	@mkdir -p tests/host/corpus
 	@clang -g -O1 -fsanitize=fuzzer,address -iquote ./include -DARCH_X86 tests/host/c/fuzz_parser.c kernel/proc/elf_validate.c -o tests/host/fuzz_parser
 	@echo "Testing known crash (corpus) files, then generating new attack vectors..."

@@ -90,7 +90,8 @@ TEST_OBJS = tests/kernel/selftest.o \
 			tests/kernel/test_entropy.o \
 			tests/kernel/test_bcache.o \
 			src/resources/ktest_user_elf_data.o \
-			src/resources/ktest_crash_elf_data.o
+			src/resources/ktest_crash_elf_data.o \
+			src/resources/ktest_signal_elf_data.o
 ifeq ($(ARCH), x86)
     # x86
     CC = gcc
@@ -331,6 +332,18 @@ src/resources/ktest_crash_elf_data.c: tests/user/ktest_crash.elf tools/encrypt_t
 	@./tools/encrypt_tool tests/user/ktest_crash.elf tests/user/ktest_crash_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i tests/user/ktest_crash_encrypted.elf | \
 	sed 's/tests_user_ktest_crash_encrypted_elf/ktest_crash_elf/g' > src/resources/ktest_crash_elf_data.c
+
+# Signals itself fatally, so the self-signalled half of the default action can be
+# tested. Only a real Ring 3 process returns through syscall_handler(), which is
+# where apply_default_signal_action() runs. Embedded only in $(TEST_BIN).
+tests/user/ktest_signal.elf: tests/user/ktest_signal.c
+	$(CC) $(USER_CFLAGS) tests/user/ktest_signal.c -o tests/user/ktest_signal.elf
+
+src/resources/ktest_signal_elf_data.c: tests/user/ktest_signal.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool tests/user/ktest_signal.elf tests/user/ktest_signal_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i tests/user/ktest_signal_encrypted.elf | \
+	sed 's/tests_user_ktest_signal_encrypted_elf/ktest_signal_elf/g' > src/resources/ktest_signal_elf_data.c
 
 src/resources/ktest_user_elf_data.c: tests/user/ktest_user.elf tools/encrypt_tool
 	@mkdir -p src/resources

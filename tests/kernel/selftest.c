@@ -37,6 +37,14 @@ extern unsigned int ktest_user_elf_len;
 extern unsigned char ktest_crash_elf[];
 extern unsigned int ktest_crash_elf_len;
 
+/*
+ * Companion payload that sends itself SIG_KILL. Installed for the same reason as
+ * the crash payload: apply_default_signal_action() runs only on the way out of
+ * syscall_handler(), so only a real Ring 3 process can reach it. Test builds only.
+ */
+extern unsigned char ktest_signal_elf[];
+extern unsigned int ktest_signal_elf_len;
+
 
 
 /**
@@ -276,6 +284,11 @@ static void run_user_mode_tests(void) {
     fs_delete("ktest_crash", bin_id);
     KTEST_ASSERT(fs_create_file_raw("ktest_crash", ktest_crash_elf, ktest_crash_elf_len, bin_id) == E_OK,
                  "[RING3] crash payload written to /bin/ktest_crash");
+
+    /* The deliberate-self-kill companion, for the signal default action. */
+    fs_delete("ktest_signal", bin_id);
+    KTEST_ASSERT(fs_create_file_raw("ktest_signal", ktest_signal_elf, ktest_signal_elf_len, bin_id) == E_OK,
+                 "[RING3] self-kill payload written to /bin/ktest_signal");
 
     asm volatile("sti");
 

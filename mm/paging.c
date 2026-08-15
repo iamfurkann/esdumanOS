@@ -9,8 +9,8 @@
 #include "kheap.h"
 #include "klog.h"
 #include "errno.h"
-#include "libft.h"
 #include "serial.h"
+#include "uaccess.h"
 uint32_t *page_directory;
 
 /**
@@ -324,7 +324,30 @@ int copy_user_space(uint32_t dst_pd) {
                 break;
             }
 
-            ft_memcpy((void *)TEMP_MAP_VADDR, (const void *)vaddr, PAGE_SIZE);
+            /*
+             * copy_from_user() rather than a plain copy, because the source is
+             * user memory and this is Ring 0 reading it.
+             *
+             * With SMAP enabled the processor forbids that outright: a supervisor
+             * read of a user-accessible page raises a page fault with the present
+             * bit set, which the handler reports as a kernel fault and turns into
+             * a panic. It cost a CI failure to find, because SMAP is only enabled
+             * in one of the three test configurations - the other two ran this
+             * happily.
+             *
+             * The window is what is needed here; the range check and fault fixup
+             * that come with it are a bonus. A PTE that reads as present but does
+             * not resolve becomes E_NOMEM and a failed fork rather than a panic in
+             * the middle of one.
+             */
+            if (copy_from_user((void *)TEMP_MAP_VADDR, (const void *)vaddr, PAGE_SIZE) != E_OK) {
+                unmap_page(TEMP_MAP_VADDR);
+                pmm_free_frame(frame);
+                klog(LOG_LEVEL_ERROR, "VMM", "fork: a mapped user page could not be read.");
+                result = E_FAULT;
+                break;
+            }
+
             unmap_page(TEMP_MAP_VADDR);
 
             pages[n].vaddr = vaddr;

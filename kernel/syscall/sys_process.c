@@ -89,9 +89,13 @@ void sys_fork(arch_regs_t *regs) {
         return;
     }
 
-    if (copy_user_space(child_pd) != E_OK) {
+    int copy_result = copy_user_space(child_pd);
+    if (copy_result != E_OK) {
         cleanup_process_memory(child_pd);
-        regs->eax = E_NOMEM;
+        /* Reported as it came back: E_NOMEM for exhausted frames, E_FAULT for a
+         * page the tables claimed was there and could not be read. The two say
+         * different things about what went wrong. */
+        regs->eax = (uint32_t)copy_result;
         return;
     }
 

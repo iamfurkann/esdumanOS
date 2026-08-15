@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.4.6--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.5.0--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.6-alpha
+**Version:** 0.5.0-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -116,6 +116,16 @@ onto Apple Silicon. The same release pins CI to a fixed runner image instead of 
 floating `ubuntu-latest`, so a toolchain upgrade is something chosen rather than
 discovered.
 
+v0.5.0 adds `fork()` and `wait()`. Until now every process in this system came from an
+ELF file: `exec` built an address space and filled it from disk, and the caller blocked
+until the result exited. That is enough to run a program and not enough to run two, which
+is why the shell executes `cmd1 | cmd2` one stage at a time and deadlocks when the first
+stage outgrows the pipe buffer. A process can now be made from a process — the child gets
+a private copy of its parent's memory, descriptors, signal handlers and registers, and
+returns from the call as if it had made it itself. The shell does not use any of this
+yet; that is the next release, and it is deliberately separate so that `fork` is verified
+before anything is built on it.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -125,7 +135,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 15 user-space programs and 28 shell builtins
-- 24 kernel self-test modules and CI pipeline
+- 25 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -143,7 +153,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 50 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 55 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
 | **Kernel Logging** | 8 KB in-memory ring buffer logger (dmesg equivalent), readable through the `dmesg` syscall. Not persisted to disk — `/var/log` is created at first boot but nothing is written there yet |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
@@ -449,7 +459,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.4.6-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.5.0-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -472,7 +482,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.4.6-alpha.iso \
+    -cdrom esdumanOS-v0.5.0-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -636,7 +646,7 @@ esdumanOS/
 |   |   |-- pipe.c                   Anonymous and named pipes
 |   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   |-- syscall.c                Dispatcher, 50 system calls
+|   |   |-- syscall.c                Dispatcher, 55 system calls
 |   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
 |       |-- security.c               Security levels, master key lifetime
@@ -692,7 +702,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.4.6-alpha)
+|   |-- kernel.h                     Master header (version 0.5.0-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
@@ -723,7 +733,7 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 50 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 55 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 ### Process Management
 
@@ -734,13 +744,26 @@ The kernel exposes 50 system calls through `INT 0x80`. The syscall number is pas
 | 7 | `SET_PRIORITY` | Set process scheduling priority |
 | 51 | `GETPID` | Get the process ID of the caller |
 | 52 | `SLEEP` | Block the caller for a number of **milliseconds** |
+| 53 | `FORK` | Duplicate the caller; returns 0 in the child and its pid in the parent |
+| 54 | `WAIT` | Collect a finished child's exit status; blocks if none has finished yet |
 | 99 | `YIELD` | Voluntarily yield the CPU |
 
 `EXEC` returns a negative errno when the program could not be started, and otherwise
 the child's exit status once it has finished — statuses are masked to 0-255, so the
-two cannot be confused. There is no separate `wait()` yet: `EXEC` blocks the caller on
-`WAIT_CHILD` for the child's lifetime, which is what makes returning the status
-possible without one.
+two cannot be confused. It blocks the caller on `WAIT_CHILD` for the child's lifetime,
+which is how it returns a status at all, and it predates `WAIT` rather than being
+replaced by it.
+
+`FORK` copies the caller's user pages eagerly, not copy-on-write, and carries over its
+descriptors, working directory, uid, signal handlers, priority and FPU state. It returns
+`E_AGAIN` when `MAX_TASKS` live tasks already exist and `E_NOMEM` when the address space
+could not be duplicated.
+
+`WAIT` returns a child's status, or `E_CHILD` when the caller has none left to wait for —
+an error rather than a block, so a parent that called it one time too many does not sleep
+until the machine is rebooted. A child that finishes while its parent is busy leaves its
+status in a fixed table until it is collected, which is what makes both orders work: the
+parent arriving first and waiting, and the child finishing first.
 
 `SLEEP` takes milliseconds rather than seconds because `TIMER_HZ` is 100, giving a
 10 ms resolution that a seconds-only call could not reach; the shell's `sleep`
@@ -928,13 +951,22 @@ The following are known constraints of the current implementation. These are doc
   single global. Making the kernel preemptible means fixing all of that first,
   starting with the interrupt frame layout, which cannot currently describe a
   Ring 0 frame.
-- **No fork() syscall.** Process creation is exec-only; child processes do not inherit parent memory.
-- **A pipeline can deadlock.** With no `fork()`, the shell runs `cmd1 | cmd2`
-  one stage at a time rather than concurrently, so the first stage writes into a
-  4 KB pipe with nothing draining it. A first stage that produces more than that
-  blocks and never resumes. This was unreachable until v0.4.3 made file writes
+- **The shell does not use `fork()` yet.** The syscall exists as of v0.5.0 and the
+  kernel supports it, but `sh` still runs everything through `exec`, which blocks
+  it until the program finishes. Moving the shell over is the next release.
+- **A pipeline can deadlock**, and will until that happens. The shell runs
+  `cmd1 | cmd2` one stage at a time rather than concurrently, so the first stage
+  writes into a 4 KB pipe with nothing draining it; a first stage producing more
+  than that blocks and never resumes. Unreachable until v0.4.3 made file writes
   work — before then nothing could generate enough output to fill the buffer.
-  `fork()` is the fix, not a larger buffer.
+- **No job control.** There is no `&`, no `jobs`, and no way to hold a shell
+  prompt while another process runs. This is why `kill` went five releases without
+  anyone noticing it did nothing: there was no way to have a live target and a
+  prompt at the same time.
+- **Copies on fork are eager, not copy-on-write.** A child gets a private copy of
+  every page its parent had mapped, made at the moment of the call. Correct, and
+  more expensive than it needs to be — COW requires reference counting on physical
+  frames, which the teardown path does not have.
 - **No mmap() or brk().** User-space programs cannot dynamically allocate memory beyond their initial ELF segments and stack.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.
@@ -974,7 +1006,7 @@ Near-term priorities for the project, roughly in order:
 | P1 | Bounded string operations throughout user space |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
-| P3 | Fork/wait syscalls for proper process hierarchy |
+| P1 | Move the shell onto `fork`, for concurrent pipelines and job control |
 | P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments |
 | P3 | ANSI escape code support in terminal |
 | P3 | Expanded /dev device drivers |

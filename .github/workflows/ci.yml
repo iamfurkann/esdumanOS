@@ -8,7 +8,13 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which is a moving target: GitHub rolls it
+    # onto the next LTS on its own schedule, and that changes the toolchain under
+    # a tree nobody touched. This project builds with -Wall -Wextra and a major
+    # GCC or Clang bump reliably surfaces new diagnostics, so the upgrade is
+    # something to run deliberately - change this line, watch what breaks - and
+    # not something to discover from a red build on an unrelated pull request.
+    runs-on: ubuntu-24.04
     env:
       # ELF encryption key for CI builds (NOT a login password).
       # Embedded in kernel binary — provides tamper resistance only.

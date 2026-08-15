@@ -13,86 +13,104 @@ ARCH ?= x86
 # with extra defines (see test_kernel) without having to re-quote all of CFLAGS.
 EXTRA_CFLAGS ?=
 
-CORE_OBJS = kernel/core/kernel.o \
-			kernel/core/klog.o \
-			kernel/core/uaccess.o \
-            kernel/proc/signal.o \
-            kernel/proc/process.o \
-            kernel/proc/pipe.o \
-			kernel/proc/elf_validate.o \
-            kernel/proc/elf.o \
-            kernel/syscall/syscall.o \
-			kernel/syscall/sys_fs.o \
-			kernel/syscall/sys_ipc.o \
-			kernel/syscall/sys_process.o \
-			kernel/syscall/sys_sec.o \
-			kernel/syscall/sys_utils.o \
-			kernel/security/passwd.o \
-			kernel/security/security.o \
-			kernel/security/entropy.o \
-			kernel/security/stack_protect.o \
-            src/resources/init_elf_data.o \
-            src/resources/hello_elf_data.o \
-            src/resources/clear_elf_data.o \
-            src/resources/echo_elf_data.o \
-			src/resources/sh_elf_data.o \
-			src/resources/touch_elf_data.o \
-			src/resources/rm_elf_data.o \
-			src/resources/mv_elf_data.o \
-			src/resources/cp_elf_data.o \
-			src/resources/free_elf_data.o \
-			src/resources/whoami_elf_data.o \
-			src/resources/kill_elf_data.o \
-			src/resources/grep_elf_data.o \
-			src/resources/head_elf_data.o \
-			src/resources/date_elf_data.o \
-			src/resources/stat_elf_data.o \
-			fs/bcache.o \
-            fs/vfs.o \
-            fs/crypto_fs.o \
-			fs/devfs.o \
-            mm/pmm.o \
-            mm/paging.o \
-            mm/kheap.o \
-            lib/stdio.o \
-            lib/stack.o \
-			lib/utils.o \
-			lib/utils2.o \
-            crypto/aes.o \
-			crypto/sha256.o \
-			crypto/hmac.o \
-			crypto/pbkdf2.o \
-			crypto/chacha20.o
+# Build flavour, and the object tree that belongs to it.
+#
+# Test builds compile the same sources with -DPBKDF2_DEV_ITERATIONS, which make
+# cannot see: a flag change does not make an object out of date. Objects were
+# therefore shared between `make` and `make test_kernel`, and the only defence
+# was deleting them before every test run - which is why a full rebuild cost two
+# minutes, and why a production image built without `make clean` first would
+# quietly inherit the reduced iteration count.
+#
+# Separate trees remove the hazard by construction rather than by discipline, and
+# incremental builds work again: change one file, compile one file.
+BUILD ?= prod
+BUILD_DIR := build/$(BUILD)
 
-TEST_OBJS = tests/kernel/selftest.o \
-            tests/kernel/test_string.o \
-            tests/kernel/test_memory.o \
-            tests/kernel/test_pipe.o \
-            tests/kernel/test_vfs.o \
-			tests/kernel/test_devfs.o \
-			tests/kernel/test_passwd.o \
-            tests/kernel/test_security.o \
-            tests/kernel/test_stress.o \
-            tests/kernel/test_adversarial.o \
-            tests/kernel/test_integration.o \
-            tests/kernel/test_regression.o \
-			tests/kernel/test_concurrency.o \
-            tests/kernel/test_paging.o \
-            tests/kernel/test_pmm.o \
-			tests/kernel/test_lifecycle.o \
-			tests/kernel/test_fork.o \
-			tests/kernel/test_fault.o \
-            tests/kernel/test_syscall.o \
-            tests/kernel/test_process.o \
-			tests/kernel/test_signal.o \
-			tests/kernel/test_reap.o \
-			tests/kernel/test_elf.o \
-            tests/kernel/test_crypto.o \
-			tests/kernel/test_entropy.o \
-			tests/kernel/test_bcache.o \
-			src/resources/ktest_user_elf_data.o \
-			src/resources/ktest_crash_elf_data.o \
-			src/resources/ktest_signal_elf_data.o
+CORE_SRCS = kernel/core/kernel.c \
+			kernel/core/klog.c \
+			kernel/core/uaccess.c \
+            kernel/proc/signal.c \
+            kernel/proc/process.c \
+            kernel/proc/pipe.c \
+			kernel/proc/elf_validate.c \
+            kernel/proc/elf.c \
+            kernel/syscall/syscall.c \
+			kernel/syscall/sys_fs.c \
+			kernel/syscall/sys_ipc.c \
+			kernel/syscall/sys_process.c \
+			kernel/syscall/sys_sec.c \
+			kernel/syscall/sys_utils.c \
+			kernel/security/passwd.c \
+			kernel/security/security.c \
+			kernel/security/entropy.c \
+			kernel/security/stack_protect.c \
+            src/resources/init_elf_data.c \
+            src/resources/hello_elf_data.c \
+            src/resources/clear_elf_data.c \
+            src/resources/echo_elf_data.c \
+			src/resources/sh_elf_data.c \
+			src/resources/touch_elf_data.c \
+			src/resources/rm_elf_data.c \
+			src/resources/mv_elf_data.c \
+			src/resources/cp_elf_data.c \
+			src/resources/free_elf_data.c \
+			src/resources/whoami_elf_data.c \
+			src/resources/kill_elf_data.c \
+			src/resources/grep_elf_data.c \
+			src/resources/head_elf_data.c \
+			src/resources/date_elf_data.c \
+			src/resources/stat_elf_data.c \
+			fs/bcache.c \
+            fs/vfs.c \
+            fs/crypto_fs.c \
+			fs/devfs.c \
+            mm/pmm.c \
+            mm/paging.c \
+            mm/kheap.c \
+            lib/stdio.c \
+            lib/stack.c \
+			lib/utils.c \
+			lib/utils2.c \
+            crypto/aes.c \
+			crypto/sha256.c \
+			crypto/hmac.c \
+			crypto/pbkdf2.c \
+			crypto/chacha20.c
+
+CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
+
+TEST_SRCS = tests/kernel/selftest.c \
+            tests/kernel/test_string.c \
+            tests/kernel/test_memory.c \
+            tests/kernel/test_pipe.c \
+            tests/kernel/test_vfs.c \
+			tests/kernel/test_devfs.c \
+			tests/kernel/test_passwd.c \
+            tests/kernel/test_security.c \
+            tests/kernel/test_stress.c \
+            tests/kernel/test_adversarial.c \
+            tests/kernel/test_integration.c \
+            tests/kernel/test_regression.c \
+			tests/kernel/test_concurrency.c \
+            tests/kernel/test_paging.c \
+            tests/kernel/test_pmm.c \
+			tests/kernel/test_lifecycle.c \
+			tests/kernel/test_fork.c \
+			tests/kernel/test_fault.c \
+            tests/kernel/test_syscall.c \
+            tests/kernel/test_process.c \
+			tests/kernel/test_signal.c \
+			tests/kernel/test_reap.c \
+			tests/kernel/test_elf.c \
+            tests/kernel/test_crypto.c \
+			tests/kernel/test_entropy.c \
+			tests/kernel/test_bcache.c \
+			src/resources/ktest_user_elf_data.c \
+			src/resources/ktest_crash_elf_data.c \
+			src/resources/ktest_signal_elf_data.c
+
+TEST_OBJS = $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 ifeq ($(ARCH), x86)
     # x86
     CC = gcc
@@ -110,20 +128,24 @@ ifeq ($(ARCH), x86)
     QEMU = qemu-system-i386
     QEMU_FLAGS = -cdrom $(ISO) -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
     
-    ARCH_OBJS = arch/x86/boot/boot.o \
-                arch/x86/cpu/gdt.o  \
-                arch/x86/cpu/gdt_s.o \
-                arch/x86/cpu/idt.o \
-                arch/x86/cpu/idt_s.o \
-                arch/x86/cpu/isr.o \
-                arch/x86/cpu/timer.o \
-                arch/x86/cpu/tss.o \
-                mm/paging_s.o \
-                drivers/tty.o \
-                drivers/keyboard.o \
-                drivers/ata.o \
-                drivers/rtc.o \
-				drivers/serial.o \
+    ARCH_ASM_SRCS = arch/x86/boot/boot.asm \
+                arch/x86/cpu/gdt_s.asm \
+                arch/x86/cpu/idt_s.asm \
+                mm/paging_s.asm
+
+    ARCH_C_SRCS = arch/x86/cpu/gdt.c \
+                arch/x86/cpu/idt.c \
+                arch/x86/cpu/isr.c \
+                arch/x86/cpu/timer.c \
+                arch/x86/cpu/tss.c \
+                drivers/tty.c \
+                drivers/keyboard.c \
+                drivers/ata.c \
+                drivers/rtc.c \
+                drivers/serial.c
+
+    ARCH_OBJS = $(ARCH_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
+                $(ARCH_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 
 else ifeq ($(ARCH), riscv64)
     # RISC-V (64-bit)
@@ -152,9 +174,12 @@ else ifeq ($(ARCH), riscv64)
     QEMU = qemu-system-riscv64
     QEMU_FLAGS = -machine virt -bios default -kernel myos.bin -drive format=raw,file=disk.img,if=none,id=d0 -device virtio-blk-device,drive=d0 -display curses
 
-    ARCH_OBJS = arch/riscv/boot/boot.o \
-                arch/riscv/cpu/trap.o \
-                arch/riscv/drivers/uart.o
+    ARCH_ASM_SRCS =
+    ARCH_C_SRCS = arch/riscv/boot/boot.c \
+                arch/riscv/cpu/trap.c \
+                arch/riscv/drivers/uart.c
+
+    ARCH_OBJS = $(ARCH_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 else
     $(error "Unsupported architecture: $(ARCH). Please select x86 or riscv64.")
 endif
@@ -168,7 +193,7 @@ OBJS = $(CORE_OBJS) $(ARCH_OBJS)
 
 BIN = myos.bin
 TEST_BIN = myos_test.bin
-LIBC = lib/libc.a
+LIBC = $(BUILD_DIR)/lib/libc.a
 
 # Release version, read out of the one place that defines it.
 #
@@ -236,21 +261,53 @@ PBKDF2_TEST_ITERATIONS ?= 100000
 # this purpose.
 QEMU_TEST_CPU ?=
 
+# Run a single test module instead of all of them: make test_kernel MODULE=fork
+#
+# A full run boots the OS and executes every module, which under nested emulation
+# costs minutes whether or not the change being tested touches any of it. The
+# name is appended to the kernel command line and selftest.c looks it up in its
+# module table; an unknown name lists what is available and fails, rather than
+# running nothing and reporting a pass.
+#
+# "ring3" runs only the user-mode payload. An empty MODULE runs everything, which
+# is what CI does and what a release has to pass.
+MODULE ?=
+ifeq ($(strip $(MODULE)),)
+    KERNEL_PASS := selftest
+else
+    KERNEL_PASS := selftest:$(strip $(MODULE))
+endif
+
 .PHONY: all clean run run-dev debug restart reset-disk test test_kernel test_smap fuzz start
 
 all: $(ISO)
 
 .PHONY: force_libc
 
+# libc goes into the same per-flavour tree as everything else. It carries no
+# flag that currently differs between the two, but sharing one archive between
+# builds compiled differently is exactly the hazard this split exists to remove,
+# and it would be found the hard way the first time it stopped being true.
+#
+# The delegation is unconditional on purpose. Making it depend on lib/*.c instead
+# would skip the sub-make when only a header had changed, and headers are half of
+# what libft is compiled against - the sub-make is the only thing that knows its
+# own dependencies, so it gets asked every time and decides for itself. With
+# --no-print-directory it says nothing at all when there is nothing to do.
 $(LIBC): force_libc
-	$(MAKE) -C lib
+	@$(MAKE) --no-print-directory -C lib BUILD_DIR=../$(BUILD_DIR)/lib
 
 force_libc:
 
-%.o: %.asm
+# The mkdir is per-object rather than an order-only prerequisite on the directory:
+# a directory's timestamp changes whenever anything is written into it, which
+# would make every object in it look out of date on the next build.
+$(BUILD_DIR)/%.o: %.asm
+	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
 
-%.o: %.c
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $< -o $@
 
 $(BIN): $(LIBC) $(OBJS)
@@ -472,23 +529,21 @@ test:
 
 	@python3 -m unittest discover -s tests/host/python -p "test_*.py"
 
-# $(OBJS) are shared with the production binary and make does not track CFLAGS
-# changes, so a stale object built at the production PBKDF2 cost would silently
-# be reused and the suite would time out again. Force a rebuild instead.
+# Built into build/test, which is what makes this incremental.
 #
-# WARNING: the objects left behind afterwards carry -DPBKDF2_DEV_ITERATIONS.
-# Run `make clean` before building a production image, or myos.bin inherits the
-# reduced iteration count. Splitting test and production object trees would
-# remove this hazard for good.
+# These objects carry -DPBKDF2_DEV_ITERATIONS and the production ones do not, and
+# make cannot tell them apart by flags - it only compares timestamps. They used to
+# share one tree, so every test run began by deleting every object and paying for
+# a full rebuild, and a production image built without `make clean` first would
+# quietly inherit the reduced iteration count. Separate trees end both.
 test_kernel: hello.elf
-	@rm -f $(OBJS) $(TEST_OBJS) $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(BIN) $(TEST_BIN)
-	@$(MAKE) EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
 	@echo "--- Running Kernel QEMU Self-Tests (PBKDF2=$(PBKDF2_TEST_ITERATIONS) iterations, CPU='$(QEMU_TEST_CPU)') ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
-	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) $(QEMU_TEST_CPU) -append "kernel_pass=selftest" \
+	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) $(QEMU_TEST_CPU) -append "kernel_pass=$(KERNEL_PASS)" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-d int,cpu_reset -D qemu.log \
@@ -513,11 +568,10 @@ test_kernel: hello.elf
 # exit codes as test_kernel: a supervisor access to user memory that bypasses
 # copy_to_user() faults here and must fail the build rather than be swallowed.
 test_smap:
-	@rm -f $(OBJS) $(TEST_OBJS) $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(BIN) $(TEST_BIN)
-	@$(MAKE) EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
 	@echo "[SMAP TEST] Running kernel self-tests with -cpu max (SMEP/SMAP enabled)..."
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=selftest" \
+	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=$(KERNEL_PASS)" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none -no-reboot; then \
@@ -585,14 +639,17 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 	$(QEMU) $(QEMU_FLAGS)
 
 clean:
-	$(MAKE) -C lib clean
+	# build/ holds every flavour's objects, so one rm covers prod, test and dev -
+	# including lib/libc.a, which now lives inside each of them.
+	rm -rf build
 	rm -f apps/bin/hello.o apps/bin/hello.elf hello.elf apps/init.o apps/init.elf apps/init_encrypted.elf tools/encrypt_tool apps/hello_encrypted.elf
 	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf
 	rm -f tests/user/*.elf
 	rm -rf src/resources/*_data.c src/resources/*.o
 	rm -f disk.img kernel_log.txt
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/test_elf_validation tests/host/fuzz_parser
-	rm -rf $(OBJS) $(TEST_OBJS) $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(BIN) $(TEST_BIN) isodir message.txt gizli.txt
+	rm -f $(BIN) $(TEST_BIN)
+	rm -rf isodir message.txt gizli.txt
 	# Wildcard, not just $(ISO): a version bump renames the ISO, and the image
 	# built under the previous version would otherwise never be cleaned up.
 	rm -f esdumanOS-v*.iso myos.iso
@@ -604,8 +661,10 @@ clean:
 # Fast development build + run. Reduces PBKDF2 to 1000 iterations for instant
 # password setup. Preserves disk.img across runs to skip first-boot setup.
 # Usage: make run-dev
-run-dev: CFLAGS += -DPBKDF2_DEV_ITERATIONS=1000
-run-dev: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
+# Builds into build/dev. The reduced iteration count used to be applied by adding
+# to CFLAGS for this target, which put dev-cost objects into the tree the release
+# image is linked from - the same hazard the test targets had.
+run-dev: apps/init.elf tools/encrypt_tool hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
 	@echo "--- [DEV 1/4] Encrypting ELF binaries..."
 	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
@@ -620,7 +679,7 @@ run-dev: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf ap
 	@xxd -i apps/bin/echo_encrypted.elf | sed 's/apps_bin_echo_encrypted_elf/echo_elf/g' > src/resources/echo_elf_data.c
 	@xxd -i apps/bin/sh_encrypted.elf | sed 's/apps_bin_sh_encrypted_elf/sh_elf/g' > src/resources/sh_elf_data.c
 	@echo "--- [DEV 3/4] Rebuilding kernel (dev mode, PBKDF2=1000)..."
-	@$(MAKE) CFLAGS="$(CFLAGS)" $(ISO)
+	@$(MAKE) BUILD=dev EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=1000' $(ISO)
 	@echo "--- [DEV 4/4] Launching QEMU..."
 	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	$(QEMU) $(QEMU_FLAGS)

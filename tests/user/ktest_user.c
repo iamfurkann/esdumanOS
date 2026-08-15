@@ -84,6 +84,32 @@ static int kt_free_kb(void) {
 #define TICKS_PER_SEC 100
 
 /**
+ * @brief Probe object for the address space separation check.
+ *
+ * Lives in the payload's own data, so fork() has to copy it. `volatile` because
+ * the parent's assertion reads a value the compiler can see nothing writing -
+ * the write it is looking for happens in another address space.
+ */
+static volatile int fork_probe = 0;
+
+/**
+ * @brief Terminates a forked child. Does not return.
+ *
+ * Every child in this file leaves through here, and the loop below the exit is
+ * the reason why. exit() does not return, but if it ever did - or if a fork()
+ * regression left a "child" that was really the parent - execution would fall
+ * into the rest of this suite, reach KT_DONE, and end the run early with every
+ * later assertion silently missing. A hang is caught by the QEMU timeout and
+ * reported as a failure; a truncated run looks like a pass.
+ *
+ * @param code Exit status for the parent to collect.
+ */
+static void kt_child_exit(int code) {
+    syscall(SYSCALL_EXIT, code, 0, 0);
+    while (1) { }
+}
+
+/**
  * @brief Calculates the length of a null-terminated string.
  *
  * @param s The string to measure.
@@ -892,7 +918,107 @@ void main(void) {
               "[SIGNAL] the parent is still able to cross the boundary afterwards");
 
     /* ------------------------------------------------------------------
-     * 11. LOCKDOWN.
+     * 11. fork() and wait().
+     *
+     * Only a real Ring 3 process can test this. A forked child resumes at its
+     * parent's instruction, in its own address space, and reports its own
+     * assertions - none of which the kernel-mode modules can express, running as
+     * they do against a synthetic task that never returns to user mode.
+     *
+     * Every child below leaves through kt_child_exit(). That is not tidiness: a
+     * child that fell through would carry on executing this suite, reach KT_DONE
+     * and end the run early, with every assertion after it silently missing.
+     * ------------------------------------------------------------------ */
+    int fork_free_before = kt_free_kb();
+
+    /* The child observes 0, the parent observes a pid. */
+    int child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        KT_ASSERT(1, "[FORK] the child returns from fork() with 0 and runs");
+
+        const char *cmsg = "[FORK] child inherited stdout\n";
+        KT_ASSERT(syscall(SYSCALL_WRITE, 1, (int)cmsg, kt_strlen(cmsg)) == kt_strlen(cmsg),
+                  "[STRICT] [FORK] the child inherited the parent's descriptors");
+        KT_ASSERT(syscall(SYSCALL_GETUID, 0, 0, 0) == uid,
+                  "[STRICT] [FORK] the child inherited the parent's uid");
+
+        kt_child_exit(42);
+    }
+
+    KT_ASSERT(child > 0, "[STRICT] [FORK] fork() returns the child's pid to the parent");
+    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == 42,
+              "[STRICT] [FORK] wait() returns the status the child exited with");
+
+    /* ------------------------------------------------------------------
+     * Separate address spaces.
+     *
+     * The assertion the whole release rests on. A fork() that shared frames
+     * instead of copying them would satisfy every other check here and fail as
+     * two processes overwriting each other, or as a double free at teardown.
+     * ------------------------------------------------------------------ */
+    fork_probe = 0x1111;
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        KT_ASSERT(fork_probe == 0x1111, "[STRICT] [FORK] the child starts with the parent's memory");
+        fork_probe = 0x2222;
+        KT_ASSERT(fork_probe == 0x2222, "[FORK] the child can write to its copy");
+        kt_child_exit(0);
+    }
+
+    syscall(SYSCALL_WAIT, 0, 0, 0);
+    KT_ASSERT(fork_probe == 0x1111,
+              "[STRICT] [FORK] the child's write did not reach the parent");
+
+    /* ------------------------------------------------------------------
+     * A status parked before anyone asked for it.
+     *
+     * The order exec() could never produce: the child finishes while the parent
+     * is busy. Before the status table existed, reap_task() had nowhere to put
+     * this and the value was simply dropped, so the wait() below would have
+     * blocked forever on a child that no longer existed.
+     *
+     * The sleep is what creates the ordering - the kernel is not preemptible, so
+     * a child only runs once its parent gives up the CPU.
+     * ------------------------------------------------------------------ */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        kt_child_exit(7);
+    }
+
+    syscall(SYSCALL_SLEEP, 300, 0, 0);
+    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == 7,
+              "[STRICT] [FORK] a status parked before wait() was called is still delivered");
+
+    /* Nothing left to collect: wait() must report that rather than block on it. */
+    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == E_CHILD,
+              "[STRICT] [FORK] wait() with no children reports E_CHILD instead of blocking");
+
+    /* ------------------------------------------------------------------
+     * Repeated forks return every frame.
+     *
+     * Each child costs a page directory, its page tables and a copy of every user
+     * page this payload has mapped. A leak of even one frame per child would be
+     * invisible in a single round and fatal in a shell that forks per command.
+     * ------------------------------------------------------------------ */
+    int rounds = 0;
+    for (int i = 0; i < 8; i++) {
+        int c = syscall(SYSCALL_FORK, 0, 0, 0);
+        if (c == 0) kt_child_exit(0);
+        if (c < 0) break;
+        syscall(SYSCALL_WAIT, 0, 0, 0);
+        rounds++;
+    }
+
+    KT_ASSERT(rounds == 8, "[FORK] every fork/wait round completed");
+
+    int fork_free_after = kt_free_kb();
+    KT_ASSERT(fork_free_before > 0 && fork_free_after > 0,
+              "[MEM] the free-memory figure is readable around the fork rounds");
+    KT_ASSERT(fork_free_after + 256 >= fork_free_before,
+              "[STRICT] [MEM] repeated forks did not leak their address spaces");
+
+    /* ------------------------------------------------------------------
+     * 12. LOCKDOWN.
      *
      * Deliberately the very last thing: it destroys the master key, and
      * security levels only ever go up, so every encrypted filesystem operation

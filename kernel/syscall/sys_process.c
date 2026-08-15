@@ -19,6 +19,7 @@
 #include "stack.h"
 #include "uaccess.h"
 #include "bcache.h"
+#include "paging.h"
 #include "rtc.h"
 
 static int copy_user_string(char *destination, const char *source, size_t max_len) {
@@ -44,6 +45,155 @@ void sys_exit(arch_regs_t *regs) {
         current_task->exit_code = (int)(regs->ebx & 0xFF);
     }
     exit_current_process(regs);
+}
+
+/**
+ * @brief Duplicates the calling process.
+ *
+ * Every process in this system has so far come from an ELF image: exec() builds
+ * an address space and fills it from a file, and the caller blocks until the
+ * result exits. That is enough to run a program and not enough to run two at
+ * once, which is why the shell executes `cmd1 | cmd2` one stage at a time and
+ * deadlocks when the first stage outgrows the pipe buffer.
+ *
+ * fork() is the other way to make a process: not from a file, but from a process.
+ * The child gets a private copy of the parent's memory, its open descriptors, its
+ * signal handlers and its registers, and returns from this call as if it had made
+ * it itself.
+ *
+ * The order matters. Everything that can fail happens before the child becomes
+ * visible to the scheduler - the directory, the page copies, the PCB - because a
+ * task that is already on the run list cannot be un-created, only reaped, and
+ * reaping a task that has never run is a path with no other caller.
+ *
+ * @param regs Live syscall frame of the parent. The child's saved frame is taken
+ *             from it, so both resume at the instruction after the trap.
+ */
+void sys_fork(arch_regs_t *regs) {
+    if (current_task == 0) {
+        regs->eax = E_SRCH;
+        return;
+    }
+
+    /* Checked here rather than after the copying, so a fork that cannot succeed
+     * costs a comparison instead of an address space. */
+    if (!check_free_task_slot()) {
+        klog(LOG_LEVEL_WARN, "PROCESS", "fork: refused, task limit reached.");
+        regs->eax = E_AGAIN;
+        return;
+    }
+
+    uint32_t child_pd = clone_page_directory();
+    if (child_pd == 0) {
+        regs->eax = E_NOMEM;
+        return;
+    }
+
+    int copy_result = copy_user_space(child_pd);
+    if (copy_result != E_OK) {
+        cleanup_process_memory(child_pd);
+        /* Reported as it came back: E_NOMEM for exhausted frames, E_FAULT for a
+         * page the tables claimed was there and could not be read. The two say
+         * different things about what went wrong. */
+        regs->eax = (uint32_t)copy_result;
+        return;
+    }
+
+    /* uid, cwd_id and parent_pid come from current_task inside create_process(),
+     * which is exactly the inheritance fork() wants - see its comment on cwd_id,
+     * written when this call was still hypothetical. */
+    int child_pid = create_process(regs->eip, regs->useresp, child_pd);
+    if (child_pid < 0) {
+        cleanup_process_memory(child_pd);
+        regs->eax = child_pid;
+        return;
+    }
+
+    process_t *child = 0;
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->pid == child_pid) { child = p; break; }
+    }
+
+    if (child == 0) {
+        /* create_process() reported success and the task is not in the list it
+         * appends to. Nothing can be recovered from that safely. */
+        klog(LOG_LEVEL_ERROR, "PROCESS", "fork: the new task is missing from the run list.");
+        cleanup_process_memory(child_pd);
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    inherit_pcb_state(child, current_task);
+    inherit_fd_table(child, current_task);
+
+    /*
+     * The child resumes where the parent is standing.
+     *
+     * Copied from the live frame rather than rebuilt, so cs, ss, eflags and every
+     * register match the parent exactly - the child is the same program at the
+     * same instruction, and anything create_process() filled in for a fresh ELF
+     * image would be wrong here. regs->eip already points past the int 0x80, so
+     * neither side re-enters this call.
+     *
+     * Written into the child's *saved* frame, which is what schedule() restores
+     * the first time it picks the task up. The one existing precedent for writing
+     * a return value anywhere but the live frame is reap_task(), delivering an
+     * exit status to a blocked parent; the rule is the same, and so is the reason
+     * it has to happen before any context switch.
+     */
+    child->regs = *regs;
+    child->regs.eax = 0;
+
+    klog_int(LOG_LEVEL_DEBUG, "PROCESS", "fork: child created", child_pid);
+
+    regs->eax = child_pid;
+}
+
+/**
+ * @brief Waits for a child to finish and returns its exit status.
+ *
+ * The counterpart to fork(). exec() has always delivered a status by blocking the
+ * caller first and letting reap_task() write into its saved frame, which works
+ * only because the parent cannot possibly be doing anything else. A forked child
+ * runs independently, so the two orders both have to work: the parent arriving
+ * first and waiting, and the child finishing first and leaving the status behind.
+ *
+ * Parked statuses are checked before blocking, which is what makes the second
+ * order work. Checking after would block a parent whose child had already exited,
+ * and nothing would ever wake it.
+ *
+ * @param regs Live syscall frame. On return eax holds the child's status, or
+ *             E_CHILD when the caller has no children left to wait for.
+ */
+void sys_wait(arch_regs_t *regs) {
+    if (current_task == 0) {
+        regs->eax = E_SRCH;
+        return;
+    }
+
+    int status = 0;
+    if (take_parked_status(current_task->pid, &status)) {
+        regs->eax = (uint32_t)status;
+        return;
+    }
+
+    /*
+     * No status waiting and no child to produce one. Returning an error rather
+     * than blocking matters: a parent that called wait() one time too many would
+     * otherwise sleep until the machine was rebooted.
+     */
+    if (!has_pending_children(current_task->pid)) {
+        regs->eax = E_CHILD;
+        return;
+    }
+
+    /*
+     * Block. reap_task() writes the status into this task's saved frame and marks
+     * it runnable again, the same delivery sys_exec() relies on - so nothing is
+     * published into eax here, because whatever were written would be overwritten
+     * by exactly that.
+     */
+    sleep_current_task(regs, WAIT_CHILD);
 }
 
 /**

@@ -253,8 +253,103 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
 }
 
 /**
+ * @brief Gives a new task a copy of another's open descriptors.
+ *
+ * Both callers of this need the same thing and for the same reason: a task
+ * created from another one keeps what the original had open. exec() has done it
+ * since descriptors existed, and fork() cannot do otherwise - a child that lost
+ * its parent's stdout would have nowhere to write.
+ *
+ * Sharing a descriptor means sharing the object behind it, so every copied entry
+ * takes a reference: a pipe end bumps the count for its own direction, and a file
+ * bumps ref_count. Without that the first of the two tasks to close or exit would
+ * destroy the pipe, or commit and free the file, out from under the other.
+ *
+ * A file whose ref_count is already out of range is treated as a dangling pointer
+ * and the descriptor is dropped rather than copied. That guard predates fork(); it
+ * exists because a stale vfs_file_t reaching a second task turns one
+ * use-after-free into two.
+ *
+ * Standard descriptors are deliberately not defaulted here. exec() opens them for
+ * a program that arrives with none, which is right for a fresh image and wrong for
+ * a fork: a child inherits the parent's descriptors exactly, closed ones included.
+ *
+ * @param child  Task receiving the copies. Its table must already be allocated.
+ * @param parent Task to copy from.
+ */
+void inherit_fd_table(process_t *child, process_t *parent) {
+    if (child == 0 || parent == 0) return;
+    if (child->fd_table == 0 || parent->fd_table == 0) return;
+
+    for (uint32_t k = 0; k < parent->fd_table_size; k++) {
+        if (k >= child->fd_table_size) break;
+
+        child->fd_table[k] = parent->fd_table[k];
+
+        if (child->fd_table[k].type == 3 && child->fd_table[k].ptr != 0) {
+            pipe_t *p = (pipe_t *)child->fd_table[k].ptr;
+            if (child->fd_table[k].mode == 1) p->write_refs++;
+            else p->read_refs++;
+        }
+        else if (child->fd_table[k].type == 2 && child->fd_table[k].ptr != 0) {
+            vfs_file_t *f = (vfs_file_t *)child->fd_table[k].ptr;
+            if (f->ref_count >= 0 && f->ref_count < 1000) {
+                f->ref_count++;
+            } else {
+                child->fd_table[k].type = 0;
+                child->fd_table[k].ptr = 0;
+                klog_int(LOG_LEVEL_WARN, "PROCESS",
+                         "Use-After-Free Protection: Invalid file pointer cleared FD", (int)k);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Copies the parent state a forked child continues with.
+ *
+ * create_process() already inherits uid and cwd_id from the creating task, so
+ * those are not repeated here. What is left is everything a process accumulates
+ * while running, which exec() deliberately discards - a new program image starts
+ * with default handlers and no arguments - and which fork() must carry over
+ * because the child is the same program at the same instruction.
+ *
+ * The FPU state is copied rather than reset. The child resumes mid-expression as
+ * far as it knows, and an fninit underneath it would change the value of a
+ * computation already in flight.
+ *
+ * auth_fail_ticks is copied for a different reason: it is a rate limit, not
+ * context. sys_auth() makes a task wait after a failed password attempt, and a
+ * child starting with the counter clear would let a caller fork its way out of the
+ * delay and retry at full speed.
+ *
+ * Deliberately not copied: the mailbox, which is addressed to a pid and would
+ * deliver the same message twice; pending_signals and in_signal_handler, so the
+ * child does not re-enter a handler its parent was already inside; and every
+ * scheduler and lock field, since the child holds no lock and waits on nothing.
+ *
+ * @param child  Freshly created task.
+ * @param parent Task being forked.
+ */
+void inherit_pcb_state(process_t *child, process_t *parent) {
+    if (child == 0 || parent == 0) return;
+
+    for (int i = 0; i < MAX_USER_SIGNALS; i++) {
+        child->signal_handlers[i] = parent->signal_handlers[i];
+    }
+
+    child->base_priority = parent->base_priority;
+    child->current_priority = parent->current_priority;
+    child->auth_fail_ticks = parent->auth_fail_ticks;
+
+    ft_memcpy(child->cmd_args, parent->cmd_args, sizeof(child->cmd_args));
+    ft_memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
+    child->fpu_initialized = parent->fpu_initialized;
+}
+
+/**
  * @brief Set the priority of a task.
- * 
+ *
  * @param pid Process ID.
  * @param new_priority The new priority value.
  */
@@ -374,6 +469,128 @@ void cleanup_process_memory(uint32_t page_directory_phys) {
     pmm_free_frame(page_directory_phys);
 
     klog(LOG_LEVEL_DEBUG, "PMM", "User process memory (PD, PT, PTE) fully reclaimed.");
+}
+
+/**
+ * @brief A child's exit status, held until its parent asks for it.
+ */
+typedef struct {
+    int parent_pid;
+    int child_pid;
+    int exit_code;
+    uint32_t seq;      /**< Arrival order, so "oldest" means something when full. */
+    uint8_t used;
+} exit_slot_t;
+
+/*
+ * Parked exit statuses.
+ *
+ * Until fork() there was only one way to learn how a child had finished:
+ * exec() blocked the caller, and reap_task() wrote the status straight into its
+ * saved frame. That works because the parent is *always* already waiting - it
+ * blocked before the child could run.
+ *
+ * fork() breaks that. A child can exit while its parent is doing something else
+ * entirely, and the status has to survive until wait() is called - which may be
+ * never. These slots hold it in the meantime.
+ *
+ * MAX_TASKS entries is the ceiling by construction: a status can only be parked
+ * by a task that existed, and no more than MAX_TASKS exist at once.
+ */
+static exit_slot_t exit_slots[MAX_TASKS];
+static uint32_t exit_slot_seq = 1;
+
+/**
+ * @brief Stores a child's exit status for a parent that is not waiting yet.
+ *
+ * @param parent_pid Parent to deliver to.
+ * @param child_pid  Child that exited.
+ * @param exit_code  Status to hold.
+ */
+static void park_exit_status(int parent_pid, int child_pid, int exit_code) {
+    int slot = -1;
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (!exit_slots[i].used) { slot = i; break; }
+    }
+
+    if (slot == -1) {
+        /*
+         * Full. Every entry belongs to a parent that has not called wait(), so
+         * something is already leaking statuses; drop the oldest rather than the
+         * newest, and say so. Silently discarding the arriving one would lose the
+         * status of the child that just exited, which is the one a caller is most
+         * likely to be about to ask for.
+         */
+        uint32_t oldest = 0xFFFFFFFF;
+        for (int i = 0; i < MAX_TASKS; i++) {
+            if (exit_slots[i].seq < oldest) { oldest = exit_slots[i].seq; slot = i; }
+        }
+        klog_int(LOG_LEVEL_WARN, "PROCESS",
+                 "wait: status table full, discarded the status of PID", exit_slots[slot].child_pid);
+    }
+
+    exit_slots[slot].parent_pid = parent_pid;
+    exit_slots[slot].child_pid = child_pid;
+    exit_slots[slot].exit_code = exit_code;
+    exit_slots[slot].seq = exit_slot_seq++;
+    exit_slots[slot].used = 1;
+}
+
+/**
+ * @brief Takes one parked status belonging to a parent, oldest first.
+ *
+ * @param parent_pid    Parent asking.
+ * @param exit_code_out Receives the status when one is found.
+ * @return 1 when a status was taken, 0 when the parent has none parked.
+ */
+int take_parked_status(int parent_pid, int *exit_code_out) {
+    int slot = -1;
+    uint32_t oldest = 0xFFFFFFFF;
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (exit_slots[i].used && exit_slots[i].parent_pid == parent_pid) {
+            if (exit_slots[i].seq < oldest) { oldest = exit_slots[i].seq; slot = i; }
+        }
+    }
+
+    if (slot == -1) return 0;
+
+    if (exit_code_out) *exit_code_out = exit_slots[slot].exit_code;
+    exit_slots[slot].used = 0;
+    return 1;
+}
+
+/**
+ * @brief Discards every status parked for a parent that is itself gone.
+ *
+ * Nobody will ever collect them, and the slots are a fixed resource shared by
+ * every process.
+ *
+ * @param parent_pid Parent being reaped.
+ */
+static void drop_parked_statuses(int parent_pid) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (exit_slots[i].used && exit_slots[i].parent_pid == parent_pid) {
+            exit_slots[i].used = 0;
+        }
+    }
+}
+
+/**
+ * @brief Whether a task still has children that could report a status.
+ *
+ * @param pid Parent to check.
+ * @return 1 when at least one live child or parked status exists, 0 otherwise.
+ */
+int has_pending_children(int pid) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (exit_slots[i].used && exit_slots[i].parent_pid == pid) return 1;
+    }
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->parent_pid == pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) return 1;
+    }
+    return 0;
 }
 
 /**
@@ -506,6 +723,24 @@ void reap_task(process_t *victim) {
             break;
         }
     }
+
+    /*
+     * Nobody was waiting, so hold the status until somebody asks.
+     *
+     * Before fork() this case could not arise: exec() was the only way to have a
+     * child, and it blocked the caller before the child could run, so a parent was
+     * always already sitting in WAIT_CHILD by the time this ran. A forked child
+     * exits whenever it likes, and a status dropped here is one wait() can never
+     * return.
+     *
+     * Statuses parked for a parent that never collects them are released when that
+     * parent is itself reaped, below.
+     */
+    if (woken_parent == 0 && parent_pid > 0) {
+        park_exit_status(parent_pid, victim->pid, victim->exit_code);
+    }
+
+    drop_parked_statuses(victim->pid);
 
     /*
      * The terminal only changes hands when the task holding it dies, or when a

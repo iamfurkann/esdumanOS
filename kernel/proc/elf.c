@@ -276,29 +276,11 @@ load_success:
 
         if (new_task != 0 && current_task != 0)
         {
-            for (uint32_t k = 0; k < current_task->fd_table_size; k++)
-            {
-                if (k < new_task->fd_table_size) {
-                    new_task->fd_table[k] = current_task->fd_table[k];
-                    if (new_task->fd_table[k].type == 3 && new_task->fd_table[k].ptr != 0)
-                    {
-                        pipe_t *p = (pipe_t *)new_task->fd_table[k].ptr;
-                        if (new_task->fd_table[k].mode == 1) p->write_refs++;
-                        else p->read_refs++;
-                    }
-                    else if (new_task->fd_table[k].type == 2 && new_task->fd_table[k].ptr != 0)
-                    {
-                        vfs_file_t *f = (vfs_file_t *)new_task->fd_table[k].ptr;
-                        if (f->ref_count >= 0 && f->ref_count < 1000) {
-                            f->ref_count++;
-                        } else {
-                            new_task->fd_table[k].type = 0;
-                            new_task->fd_table[k].ptr = 0;
-                            klog_int(LOG_LEVEL_WARN, "ELF", "Use-After-Free Protection: Invalid file pointer cleared FD", k);
-                        }
-                    }
-                }
-            }
+            /* Shared with fork(), which needs exactly the same reference-counted
+             * copy. The standard descriptors below are not part of it: they are
+             * what a fresh program image needs, and a forked child inherits its
+             * parent's table verbatim instead. */
+            inherit_fd_table(new_task, current_task);
 
             if (new_task->fd_table[0].type == 0)
             {

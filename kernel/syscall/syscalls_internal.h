@@ -28,6 +28,10 @@ uint32_t hash_djb2_salted(const char *str);
 void sys_exit(arch_regs_t *regs);
 /** @brief Syscall handler for executing a new process */
 void sys_exec(arch_regs_t *regs);
+/** @brief Syscall handler for duplicating the calling process */
+void sys_fork(arch_regs_t *regs);
+/** @brief Syscall handler for waiting on a child and collecting its status */
+void sys_wait(arch_regs_t *regs);
 /** @brief Syscall handler for setting process priority */
 void sys_set_priority(arch_regs_t *regs);
 /** @brief Syscall handler for yielding the CPU */

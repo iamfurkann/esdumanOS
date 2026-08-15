@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0-alpha] - 2026-08-15
+
+A process can be made from a process. 503 assertions, 0 failures, up from 490.
+
+Every process in this system has so far come from a file: `exec` builds an address space,
+fills it from an ELF image, and blocks the caller until the result exits. That is enough
+to run a program and not enough to run two — which is why the shell executes `cmd1 | cmd2`
+one stage at a time and deadlocks when the first stage outgrows the pipe buffer.
+
+**Scope is the kernel and its tests.** The shell still runs everything through `exec`.
+Moving it onto `fork` is the next release, deliberately separate: building the shell on
+an unverified `fork` would mean testing two unknowns at once.
+
+### Added
+
+- **`fork()` (syscall 53).** The child gets a private copy of the parent's user pages,
+  its open descriptors, its working directory, uid, signal handlers, priority and FPU
+  state, and returns from the call as if it had made it itself — 0 in the child, the
+  child's pid in the parent. Everything that can fail happens before the child becomes
+  visible to the scheduler, because a task already on the run list cannot be un-created,
+  only reaped.
+- **`wait()` (syscall 54)**, with a fixed table of parked exit statuses. `exec` never
+  needed one: it blocks the caller before the child can run, so a parent is always
+  already waiting by the time `reap_task()` delivers. A forked child exits whenever it
+  likes, and a status dropped at that point is one `wait()` could never return. Both
+  orders now work — the parent arriving first, and the child finishing first. A parent
+  with no children left gets `E_CHILD` rather than a block that nothing would end.
+- **`copy_user_space()`**, the half of `fork` that copies memory. Two passes, because no
+  single directory can see both sides: with the parent's directory live every source page
+  is readable at its own address and is copied into a fresh frame through
+  `TEMP_MAP_VADDR`, then the clone is loaded into CR3 and the recorded pages are installed
+  with `map_page()` — which already builds intermediate tables, sets U/S bits and rejects
+  conflicts. Hand-rolling that would have been a second implementation of it.
+- `tests/kernel/test_fork.c` and a Ring 3 `fork`/`wait` section in the test payload, 24
+  assertions between them. The ones that matter are negative: a `fork` that shared frames
+  instead of copying them would pass every content check and fail later, as two processes
+  overwriting each other or as a double free at teardown.
+
+### Changed
+
+- **`inherit_fd_table()` is shared between `exec` and `fork`.** It was inline in the ELF
+  loader; both callers need the same reference-counted copy, and a descriptor whose
+  refcount is not taken means the first of the two tasks to exit destroys the pipe or
+  commits and frees the file out from under the other. Standard descriptors are still
+  defaulted in the loader alone — a fresh image needs them opened, a fork inherits the
+  parent's table verbatim, closed entries included.
+
+### Security
+
+- **`auth_fail_ticks` is inherited by a forked child.** It is the cooldown `sys_auth()`
+  imposes after a failed password attempt. A child starting with it clear would let a
+  caller fork its way out of the delay and keep guessing at full speed — the copy is a
+  rate limit, not context, and it is the one PCB field here that is carried over for a
+  reason that is not continuity.
+
+### Known issues
+
+Copies are eager rather than copy-on-write. A child duplicates every page its parent had
+mapped at the moment of the call, which is correct and more expensive than it needs to be.
+COW requires reference counting on physical frames, and `cleanup_process_memory()` frees
+every user frame it finds unconditionally — a shared frame would be released twice. That
+is a change to the teardown path and a piece of work in its own right.
+
+The pipeline deadlock is unchanged, because the shell has not moved yet. So is everything
+else on the shell side: `rm` on a directory orphans its contents, every `~` expands
+through one shared buffer, `grep` reads only the first 511 bytes, and `/bin/rm`,
+`/bin/mv` and `/bin/kill` stay shadowed by builtins.
+
 ## [0.4.6-alpha] - 2026-08-15
 
 Housekeeping before `fork`. No kernel code changes and no assertion count change — this

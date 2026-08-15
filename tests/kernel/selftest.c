@@ -404,6 +404,7 @@ void run_all_selftests(void) {
         run_paging_tests();
         run_pmm_tests();
         run_lifecycle_tests();
+        run_fork_tests();
         run_fault_tests();
         run_syscall_tests();
         run_process_tests();

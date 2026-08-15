@@ -80,6 +80,7 @@ TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_paging.o \
             tests/kernel/test_pmm.o \
 			tests/kernel/test_lifecycle.o \
+			tests/kernel/test_fork.o \
 			tests/kernel/test_fault.o \
             tests/kernel/test_syscall.o \
             tests/kernel/test_process.o \

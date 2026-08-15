@@ -395,6 +395,7 @@ void run_all_selftests(void) {
         run_syscall_tests();
         run_process_tests();
         run_signal_tests();
+        run_reap_tests();
         run_elf_tests();
         run_crypto_tests();
         run_entropy_tests();

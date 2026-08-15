@@ -84,6 +84,7 @@ TEST_OBJS = tests/kernel/selftest.o \
             tests/kernel/test_syscall.o \
             tests/kernel/test_process.o \
 			tests/kernel/test_signal.o \
+			tests/kernel/test_reap.o \
 			tests/kernel/test_elf.o \
             tests/kernel/test_crypto.o \
 			tests/kernel/test_entropy.o \

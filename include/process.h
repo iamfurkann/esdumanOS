@@ -247,9 +247,25 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs);
 
 /**
  * @brief Unlocks a mutex and wakes up a waiting task if any.
+ *
+ * Releases the lock only if the running task is the one holding it.
+ *
  * @param m Pointer to the mutex to unlock.
  */
 void mutex_unlock(mutex_t *m);
+
+/**
+ * @brief Releases a mutex on behalf of a named owner, waking a waiter if any.
+ *
+ * The form reap_task() needs: a task being killed is not the task running, so
+ * the ownership test cannot be made against current_task. Performs none of the
+ * interrupt or multitasking checks of its own - mutex_unlock() is the guarded
+ * entry point for ordinary unlocking.
+ *
+ * @param m Pointer to the mutex to release.
+ * @param owner Task the lock must belong to; nothing happens if it does not.
+ */
+void mutex_release_owned_by(mutex_t *m, process_t *owner);
 
 /**
  * @brief Registers a custom signal handler for the current process.
@@ -306,9 +322,34 @@ void init_multitasking(void);
 
 /**
  * @brief Checks for pending signals and prepares the task to execute them.
+ *
+ * Handler delivery only; an unhandled fatal signal is left pending for
+ * apply_default_signal_action(). Safe to call from schedule().
+ *
  * @param regs Pointer to the saved registers of the current task.
  */
 void check_and_deliver_signals(arch_regs_t *regs);
+
+/**
+ * @brief Terminates the running task if it holds an unhandled fatal signal.
+ *
+ * Call only from the return-to-user path. It reaches exit_current_process(),
+ * which calls schedule(), so calling it from the scheduler recurses.
+ *
+ * @param regs Live interrupt frame of the returning task.
+ */
+void apply_default_signal_action(arch_regs_t *regs);
+
+/**
+ * @brief Releases a task's resources and hands it to the zombie reaper.
+ *
+ * Everything a task's death entails except switching away from it, so that a
+ * task can be ended by something other than itself. The address space is not
+ * freed here; the reaper in schedule() does that.
+ *
+ * @param victim Task to reap; may or may not be the running task.
+ */
+void reap_task(process_t *victim);
 
 
 // --- Added by Refactor Script ---

@@ -11,6 +11,7 @@
 #include "klog.h"
 #include "errno.h"
 #include "kheap.h"
+#include "libft.h"
 #include "pmm.h"
 #include "paging.h"
 #include "process.h"
@@ -79,8 +80,49 @@ void init_multitasking(void) {
 }
 
 /**
+ * @brief Allocate a process id no other task is currently holding.
+ *
+ * next_pid only ever moved forward and was reset to 2 on overflow, with nothing
+ * checking whether the value it landed on was still in use. At one pid per
+ * exec() the wrap is far away, but a duplicate pid is not a cosmetic problem:
+ * kill(), the foreground bookkeeping and the parent search in reap_task() all
+ * identify a task by pid alone, and each stops at the first match it finds - so
+ * a signal or an exit status would be delivered to whichever namesake happened
+ * to sit earlier in the list.
+ *
+ * Zombies are scanned alongside live tasks. A zombie still carries the pid its
+ * parent has yet to be told about, so reusing that number before the reaper has
+ * run would let the parent collect a status from the wrong task.
+ *
+ * The scan is bounded: at most MAX_TASKS live tasks and the zombies not yet
+ * reaped can be holding pids, so a free one is always found within that many
+ * steps.
+ *
+ * @return A pid held by no live or unreaped task.
+ */
+static int allocate_pid(void) {
+    for (;;) {
+        if (next_pid < 0 || next_pid == 0x7FFFFFFF) {
+            next_pid = 2;
+        }
+
+        int candidate = next_pid++;
+        int taken = 0;
+
+        for (process_t *p = task_list_head; p != 0 && !taken; p = p->next) {
+            if (p->pid == candidate) taken = 1;
+        }
+        for (process_t *z = zombie_tasks_head; z != 0 && !taken; z = z->next) {
+            if (z->pid == candidate) taken = 1;
+        }
+
+        if (!taken) return candidate;
+    }
+}
+
+/**
  * @brief Create a new process.
- * 
+ *
  * @param eip Instruction pointer (entry point).
  * @param esp Stack pointer.
  * @param cr3 Page directory physical address.
@@ -90,13 +132,26 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     process_t *new_task = (process_t *)kmalloc(sizeof(process_t));
     if (!new_task) {
         klog(LOG_LEVEL_ERROR, "PROCESS", "Could not create new process: Out of memory.");
-        return E_NOMEM; 
+        return E_NOMEM;
     }
-    
-    if (next_pid < 0 || next_pid == 0x7FFFFFFF) {
-        next_pid = 2; 
-    }
-    new_task->pid = next_pid++;
+
+    /*
+     * A fresh PCB starts as all zeroes.
+     *
+     * The explicit initialisers below cover every field this function has a
+     * meaningful value for, and they used to be the only initialisation there
+     * was - so cmd_args, fpu_state, signal_saved_regs and the mailbox entered
+     * each new process carrying whatever the kernel heap had last left there.
+     * Nothing read those fields before writing them, which is why it never
+     * showed, but fork() copies a PCB as a whole and would hand the child that
+     * garbage rather than the parent's state.
+     *
+     * This also subsumes the two hand-written loops that used to clear the
+     * kernel stack and the register frame further down.
+     */
+    ft_memset(new_task, 0, sizeof(process_t));
+
+    new_task->pid = allocate_pid();
 
     /*
      * cwd_id is inherited alongside uid. The very first task has no creator to
@@ -163,15 +218,7 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     new_task->msg_tail = 0;
     new_task->msg_count = 0;
 
-    uint8_t *kstack_ptr = (uint8_t *)new_task->kstack;
-    for (int j = 0; j < KERNEL_STACK_SIZE; j++) {
-        kstack_ptr[j] = 0;
-    }
-
     new_task->page_directory = cr3;
-
-    uint8_t *ptr = (uint8_t *)&new_task->regs;
-    for (uint32_t j = 0; j < sizeof(arch_regs_t); j++) ptr[j] = 0;
 
     new_task->regs.cs = GDT_USER_CS;
     new_task->regs.ds = GDT_USER_DS;
@@ -330,68 +377,110 @@ void cleanup_process_memory(uint32_t page_directory_phys) {
 }
 
 /**
- * @brief Exit the current process and clean up its resources.
- * 
- * @param regs Pointer to the current CPU registers.
+ * @brief Release a task's resources and hand it to the zombie reaper.
+ *
+ * Everything the death of a task entails except leaving it: the resources go
+ * back, a parent blocked in wait() is woken with the status, the task leaves the
+ * run list and joins the zombie list. What it deliberately does not do is switch
+ * away - that is the caller's business, and only exit_current_process() has it.
+ *
+ * The split exists because a task can now die without being the one running.
+ * kill() reaps its target from inside the killer's syscall, and fork()/wait()
+ * will need the same "settle this task's affairs" step without a context switch
+ * attached to it. When all of this lived in exit_current_process() there was no
+ * way to end a task other than by being it.
+ *
+ * @param victim Task to reap. May be current_task or any other live task.
  */
-void exit_current_process(arch_regs_t *regs) {
-    if (current_task == 0) return;
-    process_t *curr = current_task;
+void reap_task(process_t *victim) {
+    if (victim == 0 || victim->state == TASK_DEAD) return;
 
-    if (curr->held_mutex != 0) {
-        mutex_unlock(curr->held_mutex);
+    /*
+     * The idle task is not reapable.
+     *
+     * It is the scheduler's guarantee that there is always something to pick,
+     * and schedule() reaches it through a named pointer rather than through the
+     * task list - so reaping it would leave that pointer aimed at memory the
+     * zombie reaper has already freed, and the next schedule() would read a dead
+     * process_t before panicking about having nowhere to go.
+     *
+     * This never came up while dying meant calling exit(): the idle task is a
+     * Ring 3 loop that only ever yields. A working kill() makes it reachable.
+     */
+    if (victim == idle_task) {
+        klog(LOG_LEVEL_WARN, "PROCESS", "Refused to reap the idle task.");
+        return;
     }
 
-    for (uint32_t i = 0; i < curr->fd_table_size; i++) {
-        if (curr->fd_table && curr->fd_table[i].type != 0) {
-            if (curr->fd_table[i].type == 3 && curr->fd_table[i].ptr != 0) {
-                pipe_t *p = (pipe_t *)curr->fd_table[i].ptr;
-                if (curr->fd_table[i].mode == 1) p->write_refs--;
+    /*
+     * Released against the victim, not against whoever is running.
+     *
+     * mutex_unlock() identifies the owner as current_task, which was the same
+     * thing while only a task's own exit could release its locks. Reached from
+     * kill() it is not: the ownership test would compare the mutex against the
+     * killer's pid, fail, and leave a lock held by a task that no longer exists
+     * - permanently, since nothing else ever revisits it. Anything waiting on
+     * that mutex would block for the rest of the boot.
+     */
+    if (victim->held_mutex != 0) {
+        mutex_release_owned_by(victim->held_mutex, victim);
+    }
+
+    for (uint32_t i = 0; i < victim->fd_table_size; i++) {
+        if (victim->fd_table && victim->fd_table[i].type != 0) {
+            if (victim->fd_table[i].type == 3 && victim->fd_table[i].ptr != 0) {
+                pipe_t *p = (pipe_t *)victim->fd_table[i].ptr;
+                if (victim->fd_table[i].mode == 1) p->write_refs--;
                 else p->read_refs--;
 
                 if (p->read_refs <= 0 && p->write_refs <= 0) {
                     destroy_pipe(p);
                 }
-                /* An exiting task dropping its end is the same event a close is;
+                /* A dying task dropping its end is the same event a close is;
                  * without this a peer blocked in pipe_read()/pipe_write() waited
                  * for the rest of the boot. See sys_close(). */
                 wakeup_tasks(WAIT_IPC);
             }
-            else if (curr->fd_table[i].type == 2 && curr->fd_table[i].ptr != 0) {
+            else if (victim->fd_table[i].type == 2 && victim->fd_table[i].ptr != 0) {
                 /* Same commit-on-last-reference rule as sys_close(): a program
-                 * that writes and then exits without closing would otherwise
-                 * lose everything it wrote. Nothing can be reported from here,
-                 * so a failure is logged by fs_commit_writes() itself. */
-                vfs_file_t *f = (vfs_file_t *)curr->fd_table[i].ptr;
+                 * that writes and then dies without closing would otherwise lose
+                 * everything it wrote. Nothing can be reported from here, so a
+                 * failure is logged by fs_commit_writes() itself. */
+                vfs_file_t *f = (vfs_file_t *)victim->fd_table[i].ptr;
                 f->ref_count--;
                 if (f->ref_count <= 0) {
                     fs_commit_writes(f);
-                    kfree((void *)curr->fd_table[i].ptr);
+                    kfree((void *)victim->fd_table[i].ptr);
                 }
             }
-            curr->fd_table[i].type = 0;
-            curr->fd_table[i].ptr = 0;
-            curr->fd_table[i].mode = 0;
+            victim->fd_table[i].type = 0;
+            victim->fd_table[i].ptr = 0;
+            victim->fd_table[i].mode = 0;
         }
     }
-    
-    if (curr->fd_table) {
-        kfree(curr->fd_table);
-        curr->fd_table = 0;
+
+    if (victim->fd_table) {
+        kfree(victim->fd_table);
+        victim->fd_table = 0;
+        victim->fd_table_size = 0;
     }
 
     /*
-     * The address space is NOT reclaimed here. This code is still executing on
-     * curr's kernel stack with curr's directory in CR3, so freeing its page
-     * tables would unmap the ground we are standing on. The task is handed to
-     * the zombie list below and the reaper in schedule() releases both the
-     * process_t and the address space once another task's directory is live.
+     * The address space is NOT reclaimed here.
+     *
+     * When the victim is the running task this code is executing on its kernel
+     * stack with its directory in CR3, so freeing its page tables would unmap
+     * the ground we are standing on. The task is handed to the zombie list below
+     * and the reaper in schedule() releases both the process_t and the address
+     * space once another task's directory is live - which for a victim that was
+     * never the running task is already true, so that reaper pass frees it.
      */
-    int parent_pid = curr->parent_pid;
-    curr->state = TASK_DEAD; 
-    curr->wait_mutex = 0;
+    int parent_pid = victim->parent_pid;
+    victim->state = TASK_DEAD;
+    victim->wait_mutex = 0;
+    victim->pending_signals = 0;
 
-    int next_fg = -1;
+    process_t *woken_parent = 0;
     for (process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->pid == parent_pid && p->state == TASK_WAITING && p->wait_reason == WAIT_CHILD) {
             p->state = TASK_RUNNING;
@@ -411,51 +500,89 @@ void exit_current_process(arch_regs_t *regs) {
              * Until this landed the parent kept the E_OK sys_exec() had put
              * there before blocking, so every program appeared to succeed.
              */
-            p->regs.eax = (uint32_t)curr->exit_code;
+            p->regs.eax = (uint32_t)victim->exit_code;
 
-            next_fg = p->pid;
+            woken_parent = p;
             break;
         }
     }
 
-    if (next_fg == -1) {
+    /*
+     * The terminal only changes hands when the task holding it dies, or when a
+     * shell blocked on this task wakes up to take it back.
+     *
+     * This used to reassign foreground_task on every exit, which was
+     * indistinguishable from the rule below while the only way to die was to be
+     * the running - and therefore foreground - task. kill() breaks that: reaping
+     * a task the user is not looking at must not take the terminal away from the
+     * shell they are typing into.
+     */
+    if (woken_parent != 0) {
+        foreground_task = woken_parent->pid;
+    } else if (victim->pid == foreground_task) {
+        foreground_task = -1;
         for (process_t *p = task_list_head; p != 0; p = p->next) {
-            if (p != curr && (p->state == TASK_RUNNING || p->state == TASK_WAITING)) {
-                next_fg = p->pid;
+            if (p != victim && (p->state == TASK_RUNNING || p->state == TASK_WAITING)) {
+                foreground_task = p->pid;
                 break;
             }
         }
     }
 
-    if (next_fg != -1) {
-        foreground_task = next_fg;
-    } else {
+    // Remove from linked list
+    if (victim->prev) victim->prev->next = victim->next;
+    else task_list_head = victim->next;
+
+    if (victim->next) victim->next->prev = victim->prev;
+    else task_list_tail = victim->prev;
+
+    victim->prev = 0;
+    victim->next = zombie_tasks_head;
+    zombie_tasks_head = victim;
+}
+
+/**
+ * @brief Whether any task is still able to run.
+ *
+ * Asked separately from the foreground bookkeeping above. Folding the two
+ * together - treating "no foreground task" as "nothing left to run" - would
+ * announce a shutdown whenever a task died while foreground_task happened to be
+ * unset, which is its value for the whole of early boot.
+ *
+ * @return 1 while at least one task is runnable or blocked, 0 otherwise.
+ */
+static int any_task_alive(void) {
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->state == TASK_RUNNING || p->state == TASK_WAITING) return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Exit the current process and clean up its resources.
+ *
+ * @param regs Pointer to the current CPU registers.
+ */
+void exit_current_process(arch_regs_t *regs) {
+    if (current_task == 0) return;
+
+    reap_task(current_task);
+
+    if (!any_task_alive()) {
         klog(LOG_LEVEL_INFO, "KERNEL", "Last running process terminated. Halting system.");
-        
+
         printk("\n\n=======================================================\n");
         printk("      esdumanOS SAFELY SHUT DOWN        \n");
         printk("      You may now safely turn off your computer.        \n");
         printk("=======================================================\n\n");
-        
+
         asm volatile("cli; hlt");
     }
-    
-    // Remove from linked list
-    if (curr->prev) curr->prev->next = curr->next;
-    else task_list_head = curr->next;
-    
-    if (curr->next) curr->next->prev = curr->prev;
-    else task_list_tail = curr->prev;
-    
-    
+
     // Switch to next task before freeing curr memory!
     // But schedule uses current_task. We must set current_task to 0 so schedule picks another.
-    
-    curr->next = zombie_tasks_head;
-    zombie_tasks_head = curr;
+    current_task = 0;
 
-    current_task = 0; 
-    
     schedule(regs);
 }
 
@@ -821,6 +948,32 @@ void mutex_lock(mutex_t *m, arch_regs_t *regs) {
  * 
  * @param m Pointer to the mutex to unlock.
  */
+void mutex_release_owned_by(mutex_t *m, process_t *owner) {
+    if (m == 0 || owner == 0) return;
+    if (m->locked != 1 || m->owner_pid != owner->pid) return;
+
+    m->locked = 0;
+    m->owner_pid = -1;
+    owner->held_mutex = 0;
+
+    process_t *next_to_wake = 0;
+    int max_prio = -1;
+
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->state == TASK_WAITING && p->wait_reason == WAIT_MUTEX && p->wait_mutex == m) {
+            if ((int)p->current_priority > max_prio) {
+                max_prio = p->current_priority;
+                next_to_wake = p;
+            }
+        }
+    }
+    if (next_to_wake != 0) {
+        next_to_wake->state = TASK_RUNNING;
+        next_to_wake->wait_reason = WAIT_NONE;
+        next_to_wake->wait_mutex = 0;
+    }
+}
+
 void mutex_unlock(mutex_t *m) {
     if (!multitasking_enabled || current_task == 0) return;
 
@@ -828,31 +981,11 @@ void mutex_unlock(mutex_t *m) {
     asm volatile ("pushf; pop %0" : "=r"(eflags));
     if (!(eflags & 0x200)) return;
 
-    asm volatile("cli"); 
-    
-    if (m->locked == 1 && m->owner_pid == current_task->pid) {
-        m->locked = 0;
-        m->owner_pid = -1;
-        current_task->held_mutex = 0;
+    asm volatile("cli");
 
-        process_t *next_to_wake = 0;
-        int max_prio = -1;
+    mutex_release_owned_by(m, current_task);
 
-        for (process_t *p = task_list_head; p != 0; p = p->next) {
-            if (p->state == TASK_WAITING && p->wait_reason == WAIT_MUTEX && p->wait_mutex == m) {
-                if ((int)p->current_priority > max_prio) {
-                    max_prio = p->current_priority;
-                    next_to_wake = p;
-                }
-            }
-        }
-        if (next_to_wake != 0) {
-            next_to_wake->state = TASK_RUNNING;
-            next_to_wake->wait_reason = WAIT_NONE;
-            next_to_wake->wait_mutex = 0;
-        }
-    }
-    asm volatile("sti"); 
+    asm volatile("sti");
 }
 
 /**
@@ -873,8 +1006,38 @@ void register_user_signal(int sig_num, uint32_t handler_addr) {
 }
 
 /**
+ * @brief Whether a signal terminates a process that has not handled it.
+ *
+ * Only the two signals that mean "stop running" have a default action. Every
+ * other signal keeps the behaviour it has always had: the pending bit is set,
+ * and if nothing is registered to receive it, nothing happens.
+ *
+ * @param sig_num The signal number.
+ * @return 1 for SIG_KILL and SIG_TERM, 0 otherwise.
+ */
+static int signal_terminates_by_default(int sig_num) {
+    return sig_num == SIG_KILL || sig_num == SIG_TERM;
+}
+
+/**
  * @brief Send a signal to a user process.
- * 
+ *
+ * A signal with no handler registered used to be recorded and then discarded by
+ * check_and_deliver_signals(), which meant kill() could not actually kill
+ * anything: a process that had never called signal() ignored every signal sent
+ * to it, and a runaway task could not be stopped by any means the system
+ * offered. SIG_KILL and SIG_TERM now fall back to terminating the target.
+ *
+ * A target that is not the running task is reaped here and now. The victim is
+ * not executing - the kernel is not preemptible, so any task other than this one
+ * is parked at a syscall or interrupt boundary with its frame saved in p->regs
+ * and nothing live on its kernel stack - so there is no context to unwind and
+ * reap_task() can settle its affairs directly.
+ *
+ * A target that IS the running task cannot be reaped from here: the caller is
+ * mid-syscall on that task's stack. The pending bit is left set instead, and
+ * apply_default_signal_action() terminates it on the way back out to user mode.
+ *
  * @param target_pid The target process ID.
  * @param sig_num The signal number.
  */
@@ -883,6 +1046,21 @@ void send_user_signal(int target_pid, int sig_num) {
     for (process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->pid == target_pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) {
             p->pending_signals |= (1 << sig_num);
+
+            if (p->signal_handlers[sig_num] == 0 && signal_terminates_by_default(sig_num)
+                && p != idle_task) {
+                if (p != current_task) {
+                    /* 128 + signal number, the same encoding a shell reports a
+                     * signalled child with. exit_code is masked to 8 bits on the
+                     * exit() path, and 128 + 15 still fits. */
+                    p->exit_code = 128 + sig_num;
+                    klog_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by signal: PID", p->pid);
+                    reap_task(p);
+                    return;
+                }
+                /* Self-signalled: handled on the syscall return path. */
+            }
+
             if (p->state == TASK_WAITING) {
                 p->state = TASK_RUNNING;
                 p->wait_reason = WAIT_NONE;
@@ -894,37 +1072,94 @@ void send_user_signal(int target_pid, int sig_num) {
 
 /**
  * @brief Check for and deliver pending signals to the current process.
- * 
+ *
+ * Handler delivery only. A pending signal that terminates by default and has no
+ * handler is left pending for apply_default_signal_action() to act on, because
+ * this function is also called from the tail of schedule() - against the task
+ * that has just been picked to run - and terminating a task from there would
+ * re-enter schedule() through exit_current_process().
+ *
  * @param regs Pointer to the current CPU registers.
  */
 void check_and_deliver_signals(arch_regs_t *regs) {
     if (current_task == 0 || regs == 0) return;
     process_t *curr = current_task;
-    
-    if (curr->in_signal_handler) return; 
+
+    if (curr->in_signal_handler) return;
 
     if (curr->pending_signals > 0) {
         for (int i = 0; i < MAX_USER_SIGNALS; i++) {
             if (curr->pending_signals & (1 << i)) {
-                
-                curr->pending_signals &= ~(1 << i);
-                
+
                 uint32_t handler = curr->signal_handlers[i];
+
+                if (handler == 0 && signal_terminates_by_default(i)) {
+                    continue;
+                }
+
+                curr->pending_signals &= ~(1 << i);
+
                 if (handler != 0) {
                     if (!validate_user_pointer((const void *)handler, 1)) {
                         klog_int(LOG_LEVEL_ERROR, "SIGNAL", "Invalid Handler Address detected during delivery! PID", curr->pid);
                         curr->signal_handlers[i] = 0;
                         return;
                     }
-                    
+
                     curr->signal_saved_regs = *regs;
                     curr->in_signal_handler = 1;
                     regs->eip = handler;
-                    
-                    return; 
+
+                    return;
                 }
             }
         }
+    }
+}
+
+/**
+ * @brief Terminate the running task if it holds an unhandled fatal signal.
+ *
+ * The self-signalled half of the default action. send_user_signal() reaps any
+ * other task on the spot, but it cannot reap the task whose syscall it is
+ * running inside; that one is left with the pending bit set and terminated here,
+ * on the way back out to user mode, which is where exit_current_process() is
+ * safe to call.
+ *
+ * Called from exactly one place - the end of syscall_handler(), after the
+ * syscall bookkeeping is closed out. It must not be called from schedule(): this
+ * function calls exit_current_process(), which calls schedule().
+ *
+ * @param regs Live interrupt frame of the returning task.
+ */
+void apply_default_signal_action(arch_regs_t *regs) {
+    if (current_task == 0 || regs == 0) return;
+
+    process_t *curr = current_task;
+    if (curr->pending_signals == 0) return;
+
+    /*
+     * The idle task cannot be terminated - see reap_task(). send_user_signal()
+     * records the signal before it decides what to do with it, so the bit can be
+     * sitting here even though the send declined to act on it; drop it rather
+     * than walking into an exit that reap_task() will refuse anyway.
+     */
+    if (curr == idle_task) {
+        curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM));
+        return;
+    }
+
+    for (int i = 0; i < MAX_USER_SIGNALS; i++) {
+        if ((curr->pending_signals & (1 << i)) == 0) continue;
+        if (curr->signal_handlers[i] != 0) continue;
+        if (!signal_terminates_by_default(i)) continue;
+
+        curr->pending_signals &= ~(1 << i);
+        curr->exit_code = 128 + i;
+
+        klog_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
+        exit_current_process(regs);
+        return;
     }
 }
 
@@ -947,13 +1182,14 @@ void restore_signal_context(arch_regs_t *regs) {
  *
  * The task list is a dynamically allocated linked list, so there is no fixed
  * table to run out of — but a ceiling is still enforced. Every process costs a
- * process_t on the kernel heap (~5 KB, including its 4 KB kernel stack and FPU
- * save area) plus a page directory, its page tables and 32 pages of user stack.
- * Without a cap an unprivileged loop of exec() exhausts the kernel heap, and a
- * kmalloc() failure there is far harder to survive than a rejected exec.
+ * process_t on the kernel heap (~9 KB, including its 8 KB kernel stack and
+ * 512-byte FPU save area) plus a page directory, its page tables and 32 pages of
+ * user stack. Without a cap an unprivileged loop of exec() exhausts the kernel
+ * heap, and a kmalloc() failure there is far harder to survive than a rejected
+ * exec.
  *
- * Only live tasks count: exit_current_process() unlinks a task before handing it
- * to the zombie reaper, so slots come back as processes terminate.
+ * Only live tasks count: reap_task() unlinks a task before handing it to the
+ * zombie reaper, so slots come back as processes terminate.
  *
  * @return 1 when another process fits, 0 once MAX_TASKS live tasks exist.
  */

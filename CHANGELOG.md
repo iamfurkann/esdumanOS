@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6-alpha] - 2026-08-15
+
+Housekeeping before `fork`. No kernel code changes and no assertion count change — this
+is entirely about the build environment and what it tells you when it breaks.
+
+### Fixed
+
+- **`make fuzz` now says why it cannot run instead of dying unreadably.** libFuzzer's
+  runtime computes the hamming distance between compared values with the `POPCNT`
+  instruction. A CPU that does not implement it raises `SIGILL` inside
+  `__sanitizer_cov_trace_const_cmp8` — before any code in this project runs — and
+  libFuzzer's own handler reports that as `deadly signal` without ever naming the signal.
+  The stack trace points at the fuzz harness, which is the one place the fault is not.
+
+  This is reachable on an emulated x86 host: QEMU's default `qemu64` CPU model omits
+  `POPCNT`, so developing on Apple Silicon hits it unless the VM is started with
+  `-cpu max`. Real hardware and the CI runners are unaffected, which is why it took a
+  host change to surface at all. The target now checks `/proc/cpuinfo` first and prints
+  the cause and the fix.
+
+### Changed
+
+- **CI runs on `ubuntu-24.04` rather than `ubuntu-latest`.** The floating label moves onto
+  the next LTS on GitHub's schedule, and that swaps the toolchain under a tree nobody
+  touched. This project builds with `-Wall -Wextra`, where a major GCC or Clang bump
+  reliably surfaces new diagnostics — worth running deliberately, not discovering from a
+  red build on an unrelated pull request.
+
+### Documentation
+
+- The `POPCNT` requirement for emulated hosts, in README's Requirements section, with the
+  one-line check that confirms it.
+- A note that the build host may be 64-bit — `gcc-multilib` is what makes that work and is
+  what CI has always used, but the README never said so outright.
+- The packages a minimal Debian netinst leaves out that the build needs: `make`, `git`,
+  and `xxd`, which the ELF embedding step calls.
+
 ## [0.4.5-alpha] - 2026-08-15
 
 Process lifecycle groundwork for `fork`/`wait`, and the bug that groundwork turns out to

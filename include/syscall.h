@@ -123,6 +123,10 @@
 #define SYSCALL_GETPID          51
 /** @brief Block the calling process for a number of milliseconds */
 #define SYSCALL_SLEEP           52
+/** @brief Duplicate the calling process; returns 0 in the child, its pid in the parent */
+#define SYSCALL_FORK            53
+/** @brief Wait for a child to finish; returns its exit status */
+#define SYSCALL_WAIT            54
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

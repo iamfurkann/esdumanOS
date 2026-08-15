@@ -341,6 +341,53 @@ void check_and_deliver_signals(arch_regs_t *regs);
 void apply_default_signal_action(arch_regs_t *regs);
 
 /**
+ * @brief Gives a new task a reference-counted copy of another's descriptors.
+ *
+ * Shared by exec() and fork(). Standard descriptors are not defaulted here — that
+ * is exec()'s business, since a forked child inherits the parent's table verbatim.
+ *
+ * @param child  Task receiving the copies; its table must already be allocated.
+ * @param parent Task to copy from.
+ */
+void inherit_fd_table(process_t *child, process_t *parent);
+
+/**
+ * @brief Copies the accumulated parent state a forked child continues with.
+ *
+ * Signal handlers, priority, arguments, FPU state and the authentication rate
+ * limit. uid and cwd_id are not repeated — create_process() already inherits them
+ * from the creating task.
+ *
+ * @param child  Freshly created task.
+ * @param parent Task being forked.
+ */
+void inherit_pcb_state(process_t *child, process_t *parent);
+
+/**
+ * @brief Takes one exit status parked for a parent, oldest first.
+ *
+ * A child that finishes while its parent is not blocked in wait() leaves its
+ * status behind rather than losing it. Before fork() this could not happen — the
+ * only way to have a child was exec(), which blocks the caller first.
+ *
+ * @param parent_pid    Parent asking.
+ * @param exit_code_out Receives the status when one is found.
+ * @return 1 when a status was taken, 0 when none is parked for that parent.
+ */
+int take_parked_status(int parent_pid, int *exit_code_out);
+
+/**
+ * @brief Whether a task has any child that could still report a status.
+ *
+ * Counts both live children and statuses already parked, so wait() can tell "not
+ * yet" from "never" and refuse to block on the second.
+ *
+ * @param pid Parent to check.
+ * @return 1 when something is still outstanding, 0 otherwise.
+ */
+int has_pending_children(int pid);
+
+/**
  * @brief Releases a task's resources and hands it to the zombie reaper.
  *
  * Everything a task's death entails except switching away from it, so that a

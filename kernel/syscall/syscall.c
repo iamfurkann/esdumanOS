@@ -58,6 +58,8 @@ void syscall_handler(arch_regs_t *regs) {
         //sys_process.c
         case SYSCALL_EXIT:         sys_exit(regs); break;
         case SYSCALL_EXEC:         sys_exec(regs); break;
+        case SYSCALL_FORK:         sys_fork(regs); break;
+        case SYSCALL_WAIT:         sys_wait(regs); break;
         case SYSCALL_SET_PRIORITY: sys_set_priority(regs); break;
         case SYSCALL_YIELD:        sys_yield(regs); break;
         case SYSCALL_GETUID:       sys_getuid(regs); break;

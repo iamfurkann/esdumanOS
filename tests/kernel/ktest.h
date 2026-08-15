@@ -163,6 +163,7 @@ void run_fault_tests(void);
 void run_syscall_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
+void run_reap_tests(void);
 void run_crypto_tests(void);
 void run_entropy_tests(void);
 void run_bcache_tests(void);

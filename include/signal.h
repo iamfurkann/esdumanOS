@@ -9,6 +9,17 @@
  */
 #define MAX_SIGNALS 32
 
+/*
+ * The two signals that terminate a process which has not handled them.
+ *
+ * Both numbers were already in use - kill(1) sent a bare 9 with a comment
+ * explaining what it meant - but nothing named them, so the default action added
+ * in the kernel had nothing to agree with. Numbered as POSIX does, which is what
+ * the shell's "terminated by signal" reporting assumes.
+ */
+#define SIG_KILL  9
+#define SIG_TERM 15
+
 /**
  * @brief Type definition for a signal handler callback function.
  * This function is executed when the corresponding signal is triggered.

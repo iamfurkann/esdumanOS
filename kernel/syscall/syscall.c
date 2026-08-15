@@ -138,4 +138,19 @@ void syscall_handler(arch_regs_t *regs) {
     if (caller && from_user) {
         caller->in_syscall = 0;
     }
+
+    /*
+     * Last, and only here.
+     *
+     * A task that signalled itself fatally cannot be reaped at the point the
+     * signal was sent - that code is running on this task's kernel stack inside
+     * its own syscall. This is the boundary where exit_current_process() is
+     * safe, and it comes after the syscall bookkeeping above so that nothing
+     * writes to the task once it has been handed to the zombie list.
+     *
+     * Deliberately not folded into check_and_deliver_signals(): that one is also
+     * called from the tail of schedule(), and terminating a task from there
+     * would re-enter schedule().
+     */
+    apply_default_signal_action(regs);
 }

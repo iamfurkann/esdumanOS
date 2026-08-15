@@ -3,6 +3,16 @@
  * @brief Sends a signal to a process
  */
 
+/*
+ * Syscall and signal numbers are written out as literals here, as they are in
+ * every other user program. Two reasons, and both are load-bearing:
+ * include/signal.h cannot be included from user code - it reaches arch.h through
+ * registers.h, and USER_CFLAGS carries no -DARCH_X86, so the architecture #error
+ * fires - and tests/host/c/test_elf_sast.c asserts that each program contains
+ * the literal call text for the syscalls it is supposed to make. The numbers
+ * below are named in include/syscall.h and include/signal.h.
+ */
+
 /**
  * @brief Invokes a system call
  * @param num System call number
@@ -72,9 +82,12 @@ void main(void) {
             print("kill: pid must be positive"); print_newline();
             status = 1;
         } else {
-            int res = syscall(25, pid, 9, 0); // SYSCALL_KILL (SIGKILL=9)
+            int res = syscall(25, pid, 9, 0); // SYSCALL_KILL (SIG_KILL=9)
             if (res < 0) { print("kill: Failed"); print_newline(); status = 1; }
-            else { print("kill: Sent signal"); print_newline(); }
+            /* The signal now has a default action, so a target with no handler
+             * really is gone once this returns - it used to be recorded and
+             * dropped, and "Sent signal" was the whole of what happened. */
+            else { print("kill: Terminated"); print_newline(); }
         }
     }
 

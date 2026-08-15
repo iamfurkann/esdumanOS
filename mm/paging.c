@@ -6,8 +6,10 @@
  */
 #include "paging.h"
 #include "pmm.h"
+#include "kheap.h"
 #include "klog.h"
 #include "errno.h"
+#include "libft.h"
 #include "serial.h"
 uint32_t *page_directory;
 
@@ -211,5 +213,162 @@ pmm_free_frame(new_pd_phys);
 
     unmap_page(TEMP_MAP_VADDR);
 
-    return new_pd_phys; 
+    return new_pd_phys;
+}
+
+/**
+ * @brief One user page recorded between the two halves of copy_user_space().
+ */
+typedef struct {
+    uint32_t vaddr;
+    uint32_t frame;
+    uint32_t flags;
+} copied_page_t;
+
+/**
+ * @brief Counts the present pages below the kernel split in the running directory.
+ *
+ * @return Number of present user-space pages.
+ */
+static uint32_t count_user_pages(void) {
+    uint32_t *pd = (uint32_t *)RECURSIVE_PD_VADDR;
+    uint32_t count = 0;
+
+    for (uint32_t pde = 0; pde < 768; pde++) {
+        if ((pd[pde] & 1) == 0) continue;
+
+        uint32_t *pt = (uint32_t *)(RECURSIVE_PT_VADDR + (pde * PAGE_SIZE));
+        for (uint32_t pte = 0; pte < 1024; pte++) {
+            if (pt[pte] & 1) count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * @brief Copies every present user page of the running address space into a clone.
+ *
+ * clone_page_directory() produces a directory that shares the kernel half and has
+ * nothing at all below it. This is the other half of fork(): the child needs the
+ * parent's user pages, and it needs its own copies of them.
+ *
+ * **Full copies, not copy-on-write.** cleanup_process_memory() releases every user
+ * frame it finds unconditionally, so a frame shared between two address spaces
+ * would be freed twice - the second free handing a live page back to the
+ * allocator. COW needs reference counting on the frame, which is a change to the
+ * teardown path and a piece of work in its own right.
+ *
+ * Two passes, because no single directory can see both sides of the copy:
+ *
+ * 1. With the parent's directory still live, every source page is readable at its
+ *    own virtual address. A fresh frame is allocated for each one and mapped into
+ *    TEMP_MAP_VADDR - which lives in the shared kernel half, so it resolves in any
+ *    address space - and the page is copied through that window. Where each copy
+ *    belongs is recorded rather than installed.
+ * 2. The clone is loaded into CR3 and the recorded pages are installed with
+ *    map_page(), which builds the intermediate page tables, sets the U/S bits and
+ *    rejects conflicts exactly as it does anywhere else. Hand-rolling that here
+ *    would be a second implementation of it.
+ *
+ * Running with a foreign directory in CR3 is safe for the same reason the window
+ * is: kernel text, the kernel heap the stack is on, the page frame bitmap, the
+ * klog buffer and the VGA mapping are all in the half that every directory shares.
+ *
+ * @param dst_pd Physical address of the directory to populate, from
+ *               clone_page_directory().
+ * @return E_OK, or E_NOMEM if a frame, a page table or the record array could not
+ *         be allocated. On failure any frame not yet installed is released here;
+ *         the ones already installed belong to @p dst_pd, and the caller's
+ *         cleanup_process_memory() reclaims them with the rest of it.
+ */
+int copy_user_space(uint32_t dst_pd) {
+    if (dst_pd == 0) return E_INVAL;
+
+    uint32_t page_count = count_user_pages();
+    if (page_count == 0) return E_OK;
+
+    copied_page_t *pages = (copied_page_t *)kmalloc(sizeof(copied_page_t) * page_count);
+    if (!pages) {
+        klog(LOG_LEVEL_ERROR, "VMM", "fork: out of memory recording the page list.");
+        return E_NOMEM;
+    }
+
+    uint32_t *pd = (uint32_t *)RECURSIVE_PD_VADDR;
+    uint32_t n = 0;
+    int result = E_OK;
+
+    /* Pass 1: duplicate the contents, parent's directory still in CR3. */
+    for (uint32_t pde = 0; pde < 768 && result == E_OK; pde++) {
+        if ((pd[pde] & 1) == 0) continue;
+
+        uint32_t *pt = (uint32_t *)(RECURSIVE_PT_VADDR + (pde * PAGE_SIZE));
+        for (uint32_t pte = 0; pte < 1024; pte++) {
+            if ((pt[pte] & 1) == 0) continue;
+
+            /* count_user_pages() walked the same tables a moment ago and nothing
+             * can have run since - the kernel is not preemptible - but the bound
+             * is cheap and the alternative is a heap overrun. */
+            if (n >= page_count) break;
+
+            uint32_t vaddr = (pde << 22) | (pte << 12);
+            uint32_t frame = pmm_alloc_frame();
+            if (frame == 0xFFFFFFFF) {
+                klog(LOG_LEVEL_ERROR, "VMM", "fork: out of frames copying user space.");
+                result = E_NOMEM;
+                break;
+            }
+
+            if (map_page(TEMP_MAP_VADDR, frame, PAGE_KERNEL_ONLY) != E_OK) {
+                pmm_free_frame(frame);
+                result = E_NOMEM;
+                break;
+            }
+
+            ft_memcpy((void *)TEMP_MAP_VADDR, (const void *)vaddr, PAGE_SIZE);
+            unmap_page(TEMP_MAP_VADDR);
+
+            pages[n].vaddr = vaddr;
+            pages[n].frame = frame;
+            /* Carry the source permissions over verbatim. A page the parent could
+             * not write must not become writable in the child. */
+            pages[n].flags = pt[pte] & 0xFFF;
+            n++;
+        }
+    }
+
+    /* Pass 2: install them, clone's directory in CR3. */
+    uint32_t installed = 0;
+    if (result == E_OK && n > 0) {
+        uint32_t parent_pd;
+        uint32_t eflags;
+
+        asm volatile("pushf; pop %0" : "=r"(eflags));
+        asm volatile("cli");
+        asm volatile("mov %%cr3, %0" : "=r"(parent_pd));
+        asm volatile("mov %0, %%cr3" :: "r"(dst_pd) : "memory");
+
+        for (uint32_t i = 0; i < n; i++) {
+            if (map_page(pages[i].vaddr, pages[i].frame, pages[i].flags) != E_OK) {
+                result = E_NOMEM;
+                break;
+            }
+            installed++;
+        }
+
+        asm volatile("mov %0, %%cr3" :: "r"(parent_pd) : "memory");
+        if (eflags & 0x200) {
+            asm volatile("sti");
+        }
+    }
+
+    for (uint32_t i = installed; i < n; i++) {
+        pmm_free_frame(pages[i].frame);
+    }
+
+    kfree(pages);
+
+    if (result == E_OK) {
+        klog_int(LOG_LEVEL_DEBUG, "VMM", "fork: user pages copied", (int)n);
+    }
+    return result;
 }

@@ -99,6 +99,21 @@ extern uint32_t *page_directory;
 extern uint32_t clone_page_directory(void);
 
 /**
+ * @brief Copies every present user page of the running address space into a clone.
+ *
+ * The other half of what fork() needs: clone_page_directory() produces an address
+ * space with nothing below the kernel split, and this fills it with private copies
+ * of the caller's pages. Full copies, not copy-on-write — cleanup_process_memory()
+ * frees every user frame it finds unconditionally, so a shared frame would be
+ * released twice.
+ *
+ * @param dst_pd Physical address of a directory from clone_page_directory().
+ * @return E_OK, or E_NOMEM. Frames that were not installed are released here;
+ *         those that were belong to @p dst_pd and go with cleanup_process_memory().
+ */
+int copy_user_space(uint32_t dst_pd);
+
+/**
  * @brief Releases every frame owned by an address space, then the directory.
  *
  * Frees the user-space page tables (directory entries 0..767) and the frames

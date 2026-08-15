@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.5.0--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.5.1--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.5.0-alpha
+**Version:** 0.5.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -125,6 +125,14 @@ a private copy of its parent's memory, descriptors, signal handlers and register
 returns from the call as if it had made it itself. The shell does not use any of this
 yet; that is the next release, and it is deliberately separate so that `fork` is verified
 before anything is built on it.
+
+v0.5.1 changes no kernel code at all. Test and production builds compiled the same
+sources with different flags into the same objects, and make cannot see a flag change —
+so every test run began by deleting every object and paying for a full rebuild, and a
+release image built without `make clean` first would quietly inherit the reduced PBKDF2
+iteration count. Each flavour now has its own tree under `build/`, which removes the
+hazard by construction and makes incremental builds work again: a one-file change takes
+seconds instead of two minutes.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -432,6 +440,12 @@ make
 make clean
 ```
 
+Objects go into `build/<flavour>/`, mirroring the source tree — `build/prod` for the
+release image, `build/test` for the self-test binary, `build/dev` for `make run-dev`.
+The three differ by compiler flags that make cannot see, so they are kept apart by
+directory instead: `make` and `make test_kernel` can be run in any order without a
+`clean` between them, and an incremental build recompiles only what changed.
+
 > `make ARCH=riscv64` stops with a diagnostic: the Makefile carries a RISC-V
 > branch, but `arch/riscv/` is not present in this tree. Only `ARCH=x86` builds.
 
@@ -459,7 +473,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.5.0-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.5.1-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -482,7 +496,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.5.0-alpha.iso \
+    -cdrom esdumanOS-v0.5.1-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -570,8 +584,14 @@ make test
 # Run parser fuzzing with 54 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 23 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 25 kernel-mode modules, then a Ring 3 payload
 make test_kernel
+
+# Run one module instead of all of them, for iteration
+make test_kernel MODULE=fork
+
+# Run only the Ring 3 payload
+make test_kernel MODULE=ring3
 
 # Same suite on a CPU that exposes RDRAND, to cover the strong-entropy path
 make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
@@ -581,6 +601,14 @@ make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
 # payload covers the boundary from the correct side.
 make test_smap
 ```
+
+`MODULE=` names one of the modules in the table at the top of
+`tests/kernel/selftest.c`, or `ring3` for the user-mode payload alone. It exists
+because a full run boots the OS and executes everything, which costs minutes on an
+emulated host whether or not the change under test touches any of it. An unknown
+name lists what is available and fails the run rather than executing nothing and
+reporting a pass. **CI always runs the full suite**, and so must a release: a
+filtered run proves one module, not the tree.
 
 ### Kernel Test Modules
 
@@ -702,7 +730,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.5.0-alpha)
+|   |-- kernel.h                     Master header (version 0.5.1-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API

@@ -80,6 +80,8 @@ passwords.txt
 
 # QEMU logs
 qemu.log
+# Serial output from `make run` and `make run-dev`, written by QEMU_FLAGS.
+kernel_log.txt
 
 # Generated test files
 message.txt

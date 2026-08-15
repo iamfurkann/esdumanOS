@@ -5,6 +5,98 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5-alpha] - 2026-08-15
+
+Process lifecycle groundwork for `fork`/`wait`, and the bug that groundwork turns out to
+fix. Nothing here is new functionality — it is the ability to end a task without being
+that task, which the kernel simply did not have.
+
+`exit_current_process()` welded three jobs into one body: release the task's resources,
+publish its status to a parent blocked in `wait()`, and switch away from it. `wait()`
+needs the first two without the third, so the split was going to happen inside v0.5.0
+regardless. Doing it here means the `fork` patch carries one unknown instead of two, and
+it means the split arrives with its own tests.
+
+### Fixed
+
+- **`kill` did nothing to a process that had not registered a handler.** `send_user_signal()`
+  set a pending bit, and `check_and_deliver_signals()` cleared that bit again with no
+  handler to hand it to — so a signal to a process that had never called `signal()` was
+  recorded and dropped. Every process is such a process by default, which made `kill(1)`
+  a no-op against exactly the runaway task a user needs it for. `SIG_KILL` and `SIG_TERM`
+  now terminate a target that has not handled them, with an exit status of `128 + signal`
+  — the same encoding the page fault handler already used for `SIGSEGV`.
+
+  A target that is not the running task is reaped where the signal is sent. That is sound
+  because the kernel is not preemptible: any task other than the current one is parked at
+  a syscall or interrupt boundary with its frame saved in its PCB and nothing live on its
+  kernel stack, so there is no context to unwind.
+- **`create_process()` left four PCB fields holding whatever the kernel heap last put
+  there** — `cmd_args`, `fpu_state`, `signal_saved_regs` and the mailbox. Nothing read
+  them before writing them, so it never showed. It would have showed in v0.5.0: `fork()`
+  copies a PCB as a whole, and the child would have inherited heap garbage rather than
+  its parent's state. The PCB is zeroed at allocation now, which also subsumes the two
+  hand-written loops that used to clear the kernel stack and the register frame.
+- **A pid in use could be handed out a second time.** `next_pid` only moved forward and
+  reset to 2 on overflow, with nothing checking what it landed on. `kill()`, the
+  foreground bookkeeping and the parent search all identify a task by pid and stop at the
+  first match, so two tasks sharing a number would send signals and exit statuses to
+  whichever sat earlier in the list. Two billion `exec()` calls away in practice — but
+  `fork()` is what makes pids cheap enough to spend, and the check belongs in the function
+  `fork()` mirrors. Zombies are scanned alongside live tasks: a zombie still carries the
+  pid its parent has yet to be told about.
+- **A mutex held by a killed task is released.** `mutex_unlock()` identifies the owner as
+  `current_task`, which was the same thing while a task's locks could only be dropped by
+  its own exit. Reached from `kill()` it is not: the ownership test would be made against
+  the killer, fail quietly, and strand the lock on a task that no longer exists — and
+  nothing revisits a mutex afterwards, so every later waiter would block for the rest of
+  the boot. `mutex_release_owned_by()` takes the owner as an argument; `mutex_unlock()` is
+  now the guarded entry point that passes `current_task` to it.
+- **Killing a background task no longer takes the terminal from the shell.**
+  `foreground_task` was reassigned on every exit, which was indistinguishable from the
+  correct rule while the only way to die was to be the running — and therefore foreground
+  — task. Now the terminal moves when its holder dies, or when a shell blocked on the
+  dying task wakes to take it back.
+
+### Added
+
+- `reap_task()` — everything a task's death entails except leaving it. The address space
+  is still not freed there; the zombie reaper in `schedule()` does that once another
+  task's directory is live.
+- `apply_default_signal_action()`, called from exactly one place: the end of
+  `syscall_handler()`, after the syscall bookkeeping is closed out. A task that signalled
+  itself fatally cannot be reaped at the point the signal is sent — that code is running
+  on its own kernel stack — so it is terminated on the way back out to user mode.
+
+  Deliberately *not* folded into `check_and_deliver_signals()`, which is also called from
+  the tail of `schedule()`: terminating a task from there would re-enter `schedule()`
+  through `exit_current_process()`. For the same reason `check_and_deliver_signals()` now
+  leaves an unhandled fatal signal pending instead of clearing it.
+- `SIG_KILL` and `SIG_TERM` in `signal.h`. Both numbers were already in use — `kill(1)`
+  sent a bare `9` with a comment explaining what it meant — but nothing named them.
+- `tests/kernel/test_reap.c`, 31 assertions. Victims are given a real cloned address
+  space rather than the fabricated `cr3` the other scheduler tests use: the zombie reaper
+  loads that directory into CR3, and a made-up value there is a triple fault rather than
+  a failed assertion.
+
+### Security
+
+- **The idle task is not reapable.** A working `kill()` made it reachable for the first
+  time, and `schedule()` reaches the idle task through a named pointer rather than through
+  the run list — so reaping it would have left that pointer aimed at memory the zombie
+  reaper had already freed, giving an unprivileged `kill 0` a use-after-free on the way
+  into a panic. Refused in `reap_task()`, so every caller is covered.
+
+### Known issues
+
+The pipeline deadlock is unchanged and still reachable: the shell runs `cmd1 | cmd2`
+sequentially, so a first stage producing more than 4 KB blocks with no reader. `fork` is
+the fix, in v0.5.0. `rm <dir>` still orphans its contents, `~` still expands through one
+shared buffer, `grep` still reads only the first 511 bytes of a file, and `/bin/rm`,
+`/bin/mv` and `/bin/kill` are still shadowed by builtins — all shell-side, and all
+deliberately left for after `fork` lands, since the shell is rewritten for concurrent
+pipelines then anyway.
+
 ## [0.4.4-alpha] - 2026-08-14
 
 Header tidy-up before `fork`/`wait`. No behaviour change: the 445 assertions pass

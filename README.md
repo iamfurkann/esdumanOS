@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.4.4--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.4.5--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.4.4-alpha
+**Version:** 0.4.5-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -99,6 +99,14 @@ guard, and four of the fifteen embedded-ELF lengths were declared with a type th
 disagreed with their definitions. The first survived because `timer.c` included none of
 the headers that declare what it defines — so nothing ever compared the two.
 
+v0.4.5 splits process teardown apart ahead of `fork`/`wait`. Ending a task and switching
+away from it were one function, so the only way to end a task was to *be* it — which is
+why `kill` could not kill: a signal to a process with no handler registered was recorded
+and then dropped, and every process has no handler registered by default. `SIG_KILL` and
+`SIG_TERM` now terminate a target that has not handled them. The same release stops a new
+process control block carrying whatever the heap last held, and stops a pid in use from
+being issued twice; both are fields `fork()` would have copied.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -108,7 +116,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 15 user-space programs and 28 shell builtins
-- 23 kernel self-test modules and CI pipeline
+- 24 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -415,7 +423,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.4.4-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.4.5-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -438,7 +446,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.4.4-alpha.iso \
+    -cdrom esdumanOS-v0.4.5-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -477,7 +485,8 @@ env                   List environment variables
 export KEY VALUE      Set environment variable (two words, not KEY=VALUE)
 sleep <seconds>       Pause for a number of seconds
 exec <program>        Execute an ELF binary
-kill <pid> <signal>   Send a signal to a process (decimal)
+kill <pid> <signal>   Send a signal to a process (decimal). 9 and 15 terminate a
+                      target that has not registered a handler for them.
 su                    Switch to root (prompts for the root password)
 dmesg                 Display the kernel log
 meminfo               Display memory usage (root only)
@@ -657,7 +666,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.4.4-alpha)
+|   |-- kernel.h                     Master header (version 0.4.5-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
@@ -894,6 +903,12 @@ The following are known constraints of the current implementation. These are doc
   starting with the interrupt frame layout, which cannot currently describe a
   Ring 0 frame.
 - **No fork() syscall.** Process creation is exec-only; child processes do not inherit parent memory.
+- **A pipeline can deadlock.** With no `fork()`, the shell runs `cmd1 | cmd2`
+  one stage at a time rather than concurrently, so the first stage writes into a
+  4 KB pipe with nothing draining it. A first stage that produces more than that
+  blocks and never resumes. This was unreachable until v0.4.3 made file writes
+  work — before then nothing could generate enough output to fill the buffer.
+  `fork()` is the fix, not a larger buffer.
 - **No mmap() or brk().** User-space programs cannot dynamically allocate memory beyond their initial ELF segments and stack.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.

@@ -18,9 +18,92 @@
 #include "syscall.h"
 #include "rtc.h"
 #include "pmm.h"
+#include "multiboot.h"
 
 int tests_passed = 0;
 int tests_failed = 0;
+
+/*
+ * Defined in kernel/core/kernel.c. Not declared in a header because nothing
+ * outside the boot path has ever needed the command line; the test suite needs
+ * it to find out which module it was asked to run.
+ */
+extern multiboot_info_t global_mboot_info;
+
+/**
+ * @brief One selectable kernel-mode test module.
+ */
+typedef struct {
+    const char *name;
+    void (*run)(void);
+} ktest_module_t;
+
+/*
+ * Every kernel-mode module, in the order a full run executes them.
+ *
+ * This used to be a straight sequence of calls. As a table it can also be
+ * searched, which is what makes `make test_kernel MODULE=fork` possible - and
+ * the order is still the order, so a full run is unchanged.
+ */
+static const ktest_module_t kernel_modules[] = {
+    { "string",      run_string_tests },
+    { "memory",      run_memory_tests },
+    { "pipe",        run_pipe_tests },
+    { "vfs",         run_vfs_tests },
+    { "devfs",       run_devfs_tests },
+    { "passwd",      run_passwd_tests },
+    { "security",    run_security_tests },
+    { "stress",      run_stress_tests },
+    { "adversarial", run_adversarial_tests },
+    { "integration", run_integration_tests },
+    { "regression",  run_regression_tests },
+    { "concurrency", run_concurrency_tests },
+    { "paging",      run_paging_tests },
+    { "pmm",         run_pmm_tests },
+    { "lifecycle",   run_lifecycle_tests },
+    { "fork",        run_fork_tests },
+    { "fault",       run_fault_tests },
+    { "syscall",     run_syscall_tests },
+    { "process",     run_process_tests },
+    { "signal",      run_signal_tests },
+    { "reap",        run_reap_tests },
+    { "elf",         run_elf_tests },
+    { "crypto",      run_crypto_tests },
+    { "entropy",     run_entropy_tests },
+    { "bcache",      run_bcache_tests },
+    { 0, 0 }
+};
+
+/**
+ * @brief Reads the module name from `kernel_pass=selftest:<name>`, if given.
+ *
+ * A bare `selftest` runs everything, which is what CI does and what a release
+ * has to pass. The suffix exists for iteration: a full run boots the OS and
+ * executes every module, and under nested emulation that costs minutes whether
+ * or not the change being tested touched any of it.
+ *
+ * @param out Buffer receiving the name; set to the empty string when absent.
+ * @param max Size of @p out.
+ */
+static void read_module_filter(char *out, uint32_t max) {
+    out[0] = '\0';
+
+    if (!(global_mboot_info.flags & 0x00000004)) return;
+
+    char *cmdline = (char *)global_mboot_info.cmdline;
+    if (!cmdline) return;
+
+    char *at = ft_strstr(cmdline, "selftest:");
+    if (!at) return;
+
+    at += 9; /* past "selftest:" */
+    uint32_t i = 0;
+    while (at[i] && at[i] != ' ' && i < max - 1) {
+        out[i] = at[i];
+        i++;
+    }
+    out[i] = '\0';
+}
 
 /*
  * Ring 3 test payload, built from tests/user/ktest_user.c, encrypted with the
@@ -333,6 +416,16 @@ void run_all_selftests(void) {
     asm volatile("mov %%cr4, %0" : "=r"(cr4_now));
     int smap_active = (cr4_now >> 21) & 1;
 
+    /*
+     * Which modules to run. Empty means all of them, which is what CI passes and
+     * what a release has to pass; a name runs that one alone, and "ring3" runs
+     * only the user-mode payload. Nothing else in the suite changes behaviour
+     * based on this - a filtered run is the same code, just less of it.
+     */
+    char module_filter[32];
+    read_module_filter(module_filter, sizeof(module_filter));
+    int run_ring3 = (module_filter[0] == '\0') || (ft_strcmp(module_filter, "ring3") == 0);
+
     // Create a mock task structure so syscalls have valid fd_table and uid
     static process_t dummy_task;
     static file_descriptor_t dummy_fds[16];
@@ -388,34 +481,35 @@ void run_all_selftests(void) {
         printk("\n[KTEST] SMAP active: kernel-mode modules skipped.\n");
         printk("        They simulate user space from Ring 0, which SMAP forbids.\n");
         printk("        The Ring 3 payload exercises the boundary properly.\n");
-    } else {
-        run_string_tests();
-        run_memory_tests();
-        run_pipe_tests();
-        run_vfs_tests();
-        run_devfs_tests();
-        run_passwd_tests();
-        run_security_tests();
-        run_stress_tests();
-        run_adversarial_tests();
-        run_integration_tests();
-        run_regression_tests();
-        run_concurrency_tests();
-        run_paging_tests();
-        run_pmm_tests();
-        run_lifecycle_tests();
-        run_fork_tests();
-        run_fault_tests();
-        run_syscall_tests();
-        run_process_tests();
-        run_signal_tests();
-        run_reap_tests();
-        run_elf_tests();
-        run_crypto_tests();
-        run_entropy_tests();
-        run_bcache_tests();
-
+    } else if (module_filter[0] == '\0') {
+        for (int i = 0; kernel_modules[i].name != 0; i++) {
+            kernel_modules[i].run();
+        }
         printk("\n*** KERNEL-MODE SELF-TESTS FINISHED ***\n");
+    } else if (!run_ring3) {
+        const ktest_module_t *chosen = 0;
+        for (int i = 0; kernel_modules[i].name != 0; i++) {
+            if (ft_strcmp(kernel_modules[i].name, module_filter) == 0) {
+                chosen = &kernel_modules[i];
+                break;
+            }
+        }
+
+        if (chosen) {
+            printk("\n[KTEST] Running one module: %s\n", module_filter);
+            chosen->run();
+        } else {
+            /*
+             * Loud rather than silent. A typo in MODULE= would otherwise run
+             * nothing, report zero failures, and look exactly like a pass.
+             */
+            printk("\n[KTEST] No module named '%s'. Available:\n", module_filter);
+            for (int i = 0; kernel_modules[i].name != 0; i++) {
+                printk("        %s\n", kernel_modules[i].name);
+            }
+            printk("        ring3\n");
+            KTEST_ASSERT(0, "[KTEST] MODULE names an existing test module");
+        }
     }
 
     /*
@@ -432,7 +526,18 @@ void run_all_selftests(void) {
         saved_head->next = 0;
     }
 
-    run_user_mode_tests();
+    if (run_ring3) {
+        run_user_mode_tests();   /* iret's into Ring 3 and does not come back */
+    }
+
+    /*
+     * Only reachable when a single kernel-mode module was asked for. The Ring 3
+     * half normally ends the run from inside a syscall, so without this a
+     * filtered run would finish its module and then sit in the halt loop
+     * kernel_main() falls into, and QEMU would report a timeout instead of a
+     * result.
+     */
+    ktest_finish();
 
     /* Only reached when the Ring 3 handoff failed; report what we have. */
     ktest_finish();

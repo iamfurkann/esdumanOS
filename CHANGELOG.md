@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1-alpha] - 2026-08-15
+
+No kernel code changes. 503 assertions, unaltered — the point of this release is that
+getting to them stops costing two minutes.
+
+### Fixed
+
+- **Test and production objects no longer share a tree.** They are compiled from the same
+  sources with different flags — test builds carry `-DPBKDF2_DEV_ITERATIONS` — and make
+  cannot see a flag change: it compares timestamps, and a differently-compiled object of
+  the same age looks current. The only defence was deleting every object before each test
+  run, which is why `make clean` was mandatory and why a full rebuild was the price of
+  running the suite at all.
+
+  Worse than slow, it was a live hazard in the other direction: a release image built
+  without `make clean` first linked whatever the last test run had left behind, and
+  inherited its reduced iteration count. The Makefile carried a warning saying exactly
+  that, and named this fix.
+
+  Objects now go to `build/<flavour>/`, mirroring the source tree — `prod`, `test` and
+  `dev`, the last for `make run-dev`, which had the same problem and was reducing PBKDF2
+  cost directly into the production tree. `make` and `make test_kernel` can now be run in
+  any order, and a one-file change recompiles one file.
+- **`lib/libc.a` was shared across all three flavours too.** No flag that currently
+  differs reaches libft, so nothing was wrong today — but one archive serving builds
+  compiled differently is the hazard this release exists to remove, and it would have
+  been found the hard way the first time that stopped being true. It builds into the
+  per-flavour tree with everything else.
+- **libft was never rebuilt when a header changed.** `lib/Makefile` compiled with the
+  `-MMD -MP` the parent exports, generated a `.d` file for every object, and then never
+  read them. A change to a header under `include/` rebuilt every kernel object that used
+  it and left libft's alone, so the archive could carry objects compiled against a
+  version of a header that no longer existed — the kind of mismatch that surfaces as a
+  struct with the wrong layout, a long way from the change that caused it. The
+  dependency files are included now.
+
+### Added
+
+- **`make test_kernel MODULE=<name>` runs one module instead of all of them.** Measured
+  on the development machine, the build split took a no-change test run from 2m40s to
+  1m44s — and the remainder is almost entirely QEMU, which no build change can touch. The
+  host is an ARM laptop emulating x86, so the suite runs inside an emulator inside an
+  emulator; the only way further down is to run less.
+
+  The module list became a table so it can be searched as well as walked, and the order
+  is still the order, so a full run is unaffected. `MODULE=ring3` runs the user-mode
+  payload alone. An unknown name prints the available ones and fails, rather than
+  executing nothing and reporting a pass — which is what a typo would otherwise look
+  like. CI passes no `MODULE` and never will: a filtered run proves one module, not the
+  tree.
+
+### Changed
+
+- `make clean` removes `build/` in one step rather than enumerating object paths, so a
+  file added to the build no longer has to be remembered in two places. It also sweeps
+  the objects left at the old in-source locations — a tree built before this release has
+  around 180 of them and the new `rm -rf build` reaches none — plus `qemu.log`, the host
+  SAST binary and the Python bytecode the mkfs test writes. The old paths are derived
+  from the source lists rather than found with a wildcard, so `clean` names what it
+  deletes instead of sweeping for anything that looks like an object.
+
+  `.vscode/` and `compile_commands.json` are deliberately left alone. They are editor
+  state, not build output, and deleting the compilation database would silently break
+  code navigation until someone thought to run `bear -- make` again.
+- The `lib` sub-make runs with `--no-print-directory`. It is still invoked on every
+  build, deliberately: making that conditional on `lib/*.c` would skip it when only a
+  header had changed, and the sub-make is the only thing that knows its own
+  dependencies. With the dependency files now read it does nothing, and says nothing,
+  unless there is something to do.
+- `kernel_log.txt` is ignored. `make run` writes QEMU's serial output there and it has
+  been showing up as untracked ever since.
+
 ## [0.5.0-alpha] - 2026-08-15
 
 A process can be made from a process. 503 assertions, 0 failures, up from 490.

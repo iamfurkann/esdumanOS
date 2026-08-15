@@ -78,6 +78,14 @@ it means the split arrives with its own tests.
   space rather than the fabricated `cr3` the other scheduler tests use: the zombie reaper
   loads that directory into CR3, and a made-up value there is a triple fault rather than
   a failed assertion.
+- `tests/user/ktest_signal.c`, a Ring 3 payload that sends itself `SIG_KILL`, with the
+  parent asserting the status comes back as 137. The self-signalled path runs only in
+  `apply_default_signal_action()`, which is reached only on the way out of
+  `syscall_handler()` — and the kernel-mode modules run against a synthetic task that
+  never returns through it, so nothing there could cover the half of the default action
+  that made restructuring `check_and_deliver_signals()` necessary in the first place.
+  Same arrangement `/bin/ktest_crash` already has for the page-fault path, and embedded
+  in the test image only.
 
 ### Security
 

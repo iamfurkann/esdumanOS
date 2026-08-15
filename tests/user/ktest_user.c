@@ -865,6 +865,33 @@ void main(void) {
               "[PROC] parent still functional after the reaper ran");
 
     /* ------------------------------------------------------------------
+     * A child that signals itself fatally.
+     *
+     * The other half of the SIG_KILL default action, and the half no
+     * kernel-mode module can reach. send_user_signal() reaps a target that is
+     * not the running task on the spot, but it cannot reap the task whose
+     * syscall it is running inside - that one keeps the pending bit and is
+     * terminated by apply_default_signal_action() at the end of
+     * syscall_handler(). The kernel-mode suite runs against a synthetic task
+     * and never returns through syscall_handler(), so only a genuine Ring 3
+     * process walks this path. Hence /bin/ktest_signal, the same arrangement
+     * /bin/ktest_crash has for the fault path.
+     *
+     * 137 is 128 + SIG_KILL, matching the 139 the crash test expects for
+     * SIGSEGV. A status of 0 here would mean the payload ran off the end of
+     * main() because the default action never fired.
+     *
+     * If this regresses the exec never returns and the run hits the QEMU
+     * timeout - loud, and impossible to mistake for a pass.
+     * ------------------------------------------------------------------ */
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/ktest_signal", 0, 0) == 137,
+              "[STRICT] [SIGNAL] a child that signals itself is reaped and reports 137");
+
+    const char *sig_alive = "[SIGNAL] parent survived a child's self-kill\n";
+    KT_ASSERT(syscall(SYSCALL_WRITE, 1, (int)sig_alive, kt_strlen(sig_alive)) == kt_strlen(sig_alive),
+              "[SIGNAL] the parent is still able to cross the boundary afterwards");
+
+    /* ------------------------------------------------------------------
      * 11. LOCKDOWN.
      *
      * Deliberately the very last thing: it destroys the master key, and

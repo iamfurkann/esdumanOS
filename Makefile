@@ -642,6 +642,23 @@ clean:
 	# build/ holds every flavour's objects, so one rm covers prod, test and dev -
 	# including lib/libc.a, which now lives inside each of them.
 	rm -rf build
+	# Objects from before the per-flavour split, when they were written next to
+	# their sources. A tree built at v0.5.0 or earlier still has 180-odd of them
+	# and the rm above does not reach any. Derived from the source lists rather
+	# than found with a wildcard: the old path was exactly <source>.o, so this
+	# names what it deletes instead of sweeping for anything that looks like it.
+	rm -f $(CORE_SRCS:.c=.o) $(CORE_SRCS:.c=.d)
+	rm -f $(TEST_SRCS:.c=.o) $(TEST_SRCS:.c=.d)
+	rm -f $(ARCH_C_SRCS:.c=.o) $(ARCH_C_SRCS:.c=.d)
+	rm -f $(ARCH_ASM_SRCS:.asm=.o)
+	rm -f lib/*.o lib/*.d lib/libc.a
+	# Left by the test targets: QEMU's instruction log, the host SAST binary, and
+	# the bytecode the Python test writes beside its sources.
+	rm -f qemu.log
+	rm -rf tests/host/bin tests/host/python/__pycache__ tools/__pycache__
+	# Not removed on purpose: .vscode/ and compile_commands.json are editor state,
+	# not build output. Deleting the compilation database would silently break
+	# code navigation until someone thought to run `bear -- make` again.
 	rm -f apps/bin/hello.o apps/bin/hello.elf hello.elf apps/init.o apps/init.elf apps/init_encrypted.elf tools/encrypt_tool apps/hello_encrypted.elf
 	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf
 	rm -f tests/user/*.elf

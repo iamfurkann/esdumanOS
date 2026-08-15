@@ -59,7 +59,16 @@ getting to them stops costing two minutes.
 ### Changed
 
 - `make clean` removes `build/` in one step rather than enumerating object paths, so a
-  file added to the build no longer has to be remembered in two places.
+  file added to the build no longer has to be remembered in two places. It also sweeps
+  the objects left at the old in-source locations — a tree built before this release has
+  around 180 of them and the new `rm -rf build` reaches none — plus `qemu.log`, the host
+  SAST binary and the Python bytecode the mkfs test writes. The old paths are derived
+  from the source lists rather than found with a wildcard, so `clean` names what it
+  deletes instead of sweeping for anything that looks like an object.
+
+  `.vscode/` and `compile_commands.json` are deliberately left alone. They are editor
+  state, not build output, and deleting the compilation database would silently break
+  code navigation until someone thought to run `bear -- make` again.
 - The `lib` sub-make runs with `--no-print-directory`. It is still invoked on every
   build, deliberately: making that conditional on `lib/*.c` would skip it when only a
   header had changed, and the sub-make is the only thing that knows its own

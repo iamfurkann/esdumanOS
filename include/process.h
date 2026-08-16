@@ -51,7 +51,19 @@ typedef enum {
     WAIT_IPC = 2,   
     WAIT_TIMER = 3, 
     WAIT_MUTEX = 4,
-    WAIT_CHILD = 5
+    WAIT_CHILD = 5,
+    /*
+     * Blocked in wait(), as distinct from blocked inside exec().
+     *
+     * Both are waiting for a child, and reap_task() has to tell them apart
+     * because it delivers the status differently. exec() gets it written
+     * straight into its saved frame - it returns the status itself, and cannot
+     * re-run without launching the program a second time. wait() has to write
+     * the status into user memory, which the reaper cannot do from another
+     * address space, so its status is parked and the syscall is restarted to
+     * collect it with the caller's own directory live.
+     */
+    WAIT_PID = 6
 } wait_reason_t;
 
 /**
@@ -371,10 +383,11 @@ void inherit_pcb_state(process_t *child, process_t *parent);
  * only way to have a child was exec(), which blocks the caller first.
  *
  * @param parent_pid    Parent asking.
+ * @param child_pid_out Receives the pid the status belonged to.
  * @param exit_code_out Receives the status when one is found.
  * @return 1 when a status was taken, 0 when none is parked for that parent.
  */
-int take_parked_status(int parent_pid, int *exit_code_out);
+int take_parked_status(int parent_pid, int *child_pid_out, int *exit_code_out);
 
 /**
  * @brief Whether a task has any child that could still report a status.

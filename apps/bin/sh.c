@@ -593,16 +593,28 @@ int builtin_cat(char **args) {
         } else break; 
     }
 
-    if (args[file_args_start] == 0) {
-        printk("cat: Please specify a file to read.\n");
-        return 1;
-    }
+    /*
+     * No file named means read standard input, which is what makes this the
+     * consumer end of a pipeline.
+     *
+     * It used to be an error, and that left the shell with pipes and nothing
+     * able to read one: grep and head both open a file by name, and so did this.
+     * `a | b` could be parsed, forked and connected, and there was no b that
+     * would take it.
+     */
+    int use_stdin = (args[file_args_start] == 0);
 
-    for (int i = file_args_start; args[i] != 0; i++) {
-        int fd = sys_open(args[i]); 
-        if (fd < 0) { 
-            printk("cat: "); printk(args[i]); printk(": No such file or directory.\n"); 
-            continue; 
+    for (int i = file_args_start; use_stdin || args[i] != 0; i++) {
+        int fd;
+
+        if (use_stdin) {
+            fd = 0;
+        } else {
+            fd = sys_open(args[i]);
+            if (fd < 0) {
+                printk("cat: "); printk(args[i]); printk(": No such file or directory.\n");
+                continue;
+            }
         }
         
         char buf[256];          
@@ -673,6 +685,10 @@ int builtin_cat(char **args) {
         FLUSH_OUT(); 
         
         #undef FLUSH_OUT 
+
+        /* Never close descriptor 0: it belongs to whoever started this process,
+         * and a builtin closing it would leave the shell without input. */
+        if (use_stdin) break;
 
         sys_close(fd); 
     }

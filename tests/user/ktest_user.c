@@ -946,8 +946,13 @@ void main(void) {
     }
 
     KT_ASSERT(child > 0, "[STRICT] [FORK] fork() returns the child's pid to the parent");
-    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == 42,
-              "[STRICT] [FORK] wait() returns the status the child exited with");
+
+    int wstatus = -1;
+    int reaped = syscall(SYSCALL_WAIT, (int)&wstatus, 0, 0);
+    KT_ASSERT(reaped == child,
+              "[STRICT] [FORK] wait() names which child reported");
+    KT_ASSERT(wstatus == 42,
+              "[STRICT] [FORK] wait() writes the status the child exited with");
 
     /* ------------------------------------------------------------------
      * Separate address spaces.
@@ -986,12 +991,87 @@ void main(void) {
     }
 
     syscall(SYSCALL_SLEEP, 300, 0, 0);
-    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == 7,
+
+    wstatus = -1;
+    reaped = syscall(SYSCALL_WAIT, (int)&wstatus, 0, 0);
+    KT_ASSERT(reaped == child && wstatus == 7,
               "[STRICT] [FORK] a status parked before wait() was called is still delivered");
 
     /* Nothing left to collect: wait() must report that rather than block on it. */
     KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == E_CHILD,
               "[STRICT] [FORK] wait() with no children reports E_CHILD instead of blocking");
+
+    /* A NULL status pointer is allowed: some callers only want to know which
+     * child finished. It must not be treated as an unwritable address. */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) kt_child_exit(0);
+    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 0, 0) == child,
+              "[STRICT] [FORK] wait(NULL) reports the pid without writing a status");
+
+    /* And a status pointer the caller could not legally write to is refused
+     * rather than followed. */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) kt_child_exit(0);
+    KT_ASSERT(syscall(SYSCALL_WAIT, ADDR_KERNEL_HEAP, 0, 0) == E_FAULT,
+              "[STRICT] [UACCESS] wait() rejects a kernel address for the status");
+    syscall(SYSCALL_WAIT, 0, 0, 0);   /* collect the child the check left behind */
+
+    /* ------------------------------------------------------------------
+     * Asking without waiting.
+     *
+     * A shell tracking background jobs has to be able to ask whether one has
+     * finished without committing to a wait - it has a prompt to print. The
+     * three answers have to be distinguishable: a pid means one reported, zero
+     * means children exist but none has, and E_CHILD means there are none at
+     * all. Collapsing the middle two would make a shell either block on a
+     * running job or forget a job it still has.
+     * ------------------------------------------------------------------ */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        /*
+         * The child measures its own sleep. Whether a forked task can block at
+         * all has never been tested - fork() is one release old and nothing has
+         * forked and then slept - so if the parent's non-blocking wait sees a
+         * finished child, this says whether the sleep returned an error or
+         * returned success without waiting.
+         */
+        int t0 = kt_ticks();
+        int slept = syscall(SYSCALL_SLEEP, 400, 0, 0);
+        int t1 = kt_ticks();
+
+        KT_ASSERT(slept == 0, "[FORK] sleep() in a forked child reports success");
+        KT_ASSERT(t1 - t0 >= 40, "[FORK] sleep() in a forked child actually waits");
+
+        kt_child_exit(3);
+    }
+
+    KT_ASSERT(child > 0, "[FORK] the sleeping child was created");
+
+    int nohang = syscall(SYSCALL_WAIT, 0, 1, 0);
+
+    /*
+     * Triangulated on purpose. "not 0" has two very different causes and the
+     * assertion text has to say which: E_CHILD means the kernel does not believe
+     * this task has a child at all, and a positive value means the child had
+     * already finished - which for a child whose first act is a 400 ms sleep
+     * would mean the sleep did not happen.
+     */
+    KT_ASSERT(nohang != E_CHILD,
+              "[FORK] the kernel still counts the sleeping child as pending");
+    KT_ASSERT(nohang <= 0,
+              "[FORK] a non-blocking wait did not collect a child that is still sleeping");
+    KT_ASSERT(nohang == 0,
+              "[STRICT] [FORK] a non-blocking wait reports 0 while the child still runs");
+
+    wstatus = -1;
+    reaped = syscall(SYSCALL_WAIT, (int)&wstatus, 0, 0);
+    KT_ASSERT(reaped == child,
+              "[FORK] blocking after that still collects the child");
+    KT_ASSERT(wstatus == 3,
+              "[FORK] and reports the status it exited with");
+
+    KT_ASSERT(syscall(SYSCALL_WAIT, 0, 1, 0) == E_CHILD,
+              "[STRICT] [FORK] a non-blocking wait with no children reports E_CHILD, not 0");
 
     /* ------------------------------------------------------------------
      * Repeated forks return every frame.

@@ -55,11 +55,25 @@ void klog_int(int level, const char *module, const char *message, int val);
 void klog_hex(int level, const char *module, const char *message, uint32_t hex_val);
 
 /**
+ * @brief Copies a slice of the kernel log into a caller-supplied buffer.
+ *
+ * The counterpart to dump_klog(), which writes to the screen and therefore
+ * cannot be piped or redirected. Reading a slice at a time keeps the position in
+ * the caller's loop, which is what lets each write block and restart on its own.
+ *
+ * @param dst    Kernel buffer receiving the bytes.
+ * @param max    Capacity of dst.
+ * @param offset Byte position in the log to start from.
+ * @return Bytes copied; 0 once offset reaches the end of the log.
+ */
+int klog_read(char *dst, int max, int offset);
+
+/**
  * @brief Handles critical kernel failures.
- * 
- * Logs the provided reason and halts the system execution, typically used 
+ *
+ * Logs the provided reason and halts the system execution, typically used
  * when an unrecoverable error occurs.
- * 
+ *
  * @param reason The cause of the panic.
  */
 void kernel_panic(const char *reason);

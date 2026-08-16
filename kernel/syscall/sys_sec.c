@@ -18,6 +18,12 @@
 #include "kernel.h"
 #include "rtc.h"
 #include "uaccess.h"
+#include "kheap.h"
+
+/* Ceiling on the kernel staging buffer for a dmesg read. Mirrors
+ * READDIR_STAGE_MAX in sys_fs.c and exists for the same reason: the size comes
+ * from user space. */
+#define DMESG_STAGE_MAX 4096
 
 /**
  * @brief Function sys_auth
@@ -227,13 +233,68 @@ void sys_halt(arch_regs_t *regs) {
 
 /**
  * @brief Function sys_dmesg
+ *
+ * Two forms. With a buffer it copies a slice of the log out and returns the
+ * count, leaving the caller to write it wherever its descriptor 1 points; with a
+ * null buffer it dumps to the screen, which is what it always did and what a
+ * caller with no descriptors of its own still wants.
+ *
+ * The buffer form exists because the screen dump could not be piped or
+ * redirected: it goes through terminal_putchar(), which knows nothing about the
+ * calling process, so "dmesg | head" fed an empty pipe and "dmesg > file" left
+ * the file empty. Writing to descriptor 1 from in here instead would not work
+ * either - see klog_read() for why a kernel-side dump cannot block partway
+ * through.
+ *
+ * @param regs ebx is a user buffer or 0, ecx its size, edx the byte offset in
+ *             the log to read from. On return eax holds the bytes copied, 0 at
+ *             the end of the log, or a negative errno.
  */
 void sys_dmesg(arch_regs_t *regs) {
-    if (current_task != 0 && current_task->uid == 0) {
+    if (current_task == 0 || current_task->uid != 0) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to read DMESG.");
+        regs->eax = E_PERM;
+        return;
+    }
+
+    char *user_buf = (char *)regs->ebx;
+    int size = (int)regs->ecx;
+    int offset = (int)regs->edx;
+
+    if (user_buf == 0) {
         dump_klog();
         regs->eax = 0;
-    } else {
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to read DMESG.");
-        regs->eax = E_PERM; 
+        return;
     }
+
+    if (size <= 0 || offset < 0) { regs->eax = E_INVAL; return; }
+    if (!validate_user_writable_pointer(user_buf, (size_t)size)) {
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    /*
+     * Staged in kernel memory and handed over with one copy_to_user(), the same
+     * shape sys_readdir() uses and for the same reason: storing through the user
+     * pointer directly skips the uaccess path, and under SMAP every such store
+     * faults with no fixup installed.
+     *
+     * size comes from user space, so the staging buffer is capped - kmalloc()ing
+     * whatever the caller asks for is a one-line way to exhaust the kernel heap.
+     * A caller with a larger buffer gets a short read and comes back for more.
+     */
+    int cap = (size > DMESG_STAGE_MAX) ? DMESG_STAGE_MAX : size;
+
+    char *kbuf = (char *)kmalloc((uint32_t)cap);
+    if (!kbuf) { regs->eax = E_NOMEM; return; }
+
+    int n = klog_read(kbuf, cap, offset);
+    if (n > 0 && copy_to_user(user_buf, kbuf, (size_t)n) != E_OK) {
+        kfree(kbuf);
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    kfree(kbuf);
+    regs->eax = n;
 }

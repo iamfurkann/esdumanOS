@@ -20,6 +20,34 @@
 #define SIG_KILL  9
 #define SIG_TERM 15
 
+/*
+ * Sent to a process that writes to a pipe no longer being read.
+ *
+ * pipe_write() has refused such a write since v0.5.2, but refusing it only
+ * produced a return value, and nothing in userland checks one: printk() does
+ * not, and neither does any of the /bin tools. A stage whose reader had died
+ * therefore ran to the end of its input with every write silently failing.
+ * Terminating the writer is what makes a pipeline stop when its consumer does.
+ */
+#define SIG_PIPE 13
+
+/*
+ * Disposition meaning "discard this signal", stored in signal_handlers[] where a
+ * handler address would go.
+ *
+ * That array carried two states - 0 for the default action, anything else for a
+ * user handler - and a third was needed: a process has to be able to decline a
+ * signal that would otherwise kill it. The value is the one POSIX uses for
+ * SIG_IGN, and it is not a reachable user address, so it cannot collide with a
+ * real handler.
+ *
+ * Kept in signal_handlers[] rather than a separate mask so that inheritance and
+ * reset come for free: inherit_pcb_state() already copies the array on fork and
+ * create_process() already zeroes it, which is exactly the POSIX rule that an
+ * ignore survives fork and a fresh program image starts with defaults.
+ */
+#define SIG_IGN 1u
+
 /**
  * @brief Type definition for a signal handler callback function.
  * This function is executed when the corresponding signal is triggered.

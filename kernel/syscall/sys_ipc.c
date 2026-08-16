@@ -72,17 +72,20 @@ void sys_alarm(arch_regs_t *regs) {
 
 /**
  * @brief Function sys_signal_reg
+ *
+ * The handler address used to be validated here as well as inside
+ * register_user_signal(), the same test written out twice. Adding SIG_IGN as a
+ * disposition meant relaxing that test, and only the copy in process.c was
+ * relaxed - so a Ring 3 caller asking to ignore a signal was refused with
+ * E_FAULT before register_user_signal() ever saw it, while a kernel-mode caller
+ * of the same function succeeded. The check lives in one place now and this
+ * reports what it decided.
  */
 void sys_signal_reg(arch_regs_t *regs) {
     int sig_num = (int)regs->ebx;
     uint32_t handler_addr = (uint32_t)regs->ecx;
-    if (handler_addr != 0 && !validate_user_pointer((const void *)handler_addr, 1)) {
-        regs->eax = E_FAULT;
-        return; 
-    }
-    
-    register_user_signal(sig_num, handler_addr);
-    regs->eax = 0;
+
+    regs->eax = register_user_signal(sig_num, handler_addr);
 }
 
 /**

@@ -281,10 +281,17 @@ void mutex_release_owned_by(mutex_t *m, process_t *owner);
 
 /**
  * @brief Registers a custom signal handler for the current process.
+ *
+ * Sole owner of the disposition check, so that sys_signal_reg() has nothing of
+ * its own to keep in step - it had a duplicate and they drifted apart.
+ *
  * @param sig_num Signal number to handle.
- * @param handler_addr Memory address of the user-space handler function.
+ * @param handler_addr Address of the user-space handler, or SIG_IGN (1) to
+ *                     discard the signal, or 0 for the default action.
+ * @return E_OK when the disposition was stored, E_INVAL for a signal number out
+ *         of range, E_FAULT for a handler address user space could not execute.
  */
-void register_user_signal(int sig_num, uint32_t handler_addr);
+int register_user_signal(int sig_num, uint32_t handler_addr);
 
 /**
  * @brief Sends a signal to a specific process.

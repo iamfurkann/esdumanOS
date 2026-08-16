@@ -8,6 +8,9 @@
 #include "syscall.h"
 #include "registers.h"
 #include "isr.h"
+#include "klog.h"
+#include "process.h"
+#include "errno.h"
 /**
  * @brief Tests the kernel's system call dispatching logic and argument boundary validation.
  *
@@ -83,4 +86,102 @@ void run_syscall_tests(void) {
     regs.edx = 10;
     syscall_handler(&regs);
     KTEST_ASSERT((int)regs.eax < 0, "Syscall Security: Use-After-Close FD usage rejected");
+
+    // =========================================================================
+    // 6. DMESG hands the log back instead of printing it
+    // =========================================================================
+    /*
+     * The log used to be written to the screen from inside the kernel, which put
+     * it out of reach of everything the shell can do with output: "dmesg | head"
+     * read an empty pipe and "dmesg > boot.log" left the file empty. The buffer
+     * form copies a slice out and lets the caller write it.
+     *
+     * klog_read() is checked first on its own, because the bounds are where this
+     * goes wrong quietly - an offset past the end that returned a negative count
+     * would turn the shell's read-until-zero loop into an infinite one.
+     */
+    char probe[64];
+
+    int first = klog_read(probe, (int)sizeof(probe), 0);
+    KTEST_ASSERT(first > 0, "[KLOG] klog_read returns bytes from the start of the log");
+    KTEST_ASSERT(first <= (int)sizeof(probe),
+                 "[STRICT] [KLOG] klog_read never writes past the buffer it was given");
+
+    KTEST_ASSERT(klog_read(probe, (int)sizeof(probe), 1 << 30) == 0,
+                 "[STRICT] [KLOG] an offset past the end of the log reads 0, not an error");
+    KTEST_ASSERT(klog_read(probe, 0, 0) == 0,
+                 "[KLOG] a zero-length read is refused rather than treated as unbounded");
+    KTEST_ASSERT(klog_read(0, (int)sizeof(probe), 0) == 0,
+                 "[KLOG] a null destination is refused");
+
+    /* Offsets address the same bytes: the tail of one read is the head of the
+     * read that starts inside it. */
+    char head_slice[16];
+    char tail_slice[16];
+    int hn = klog_read(head_slice, 16, 0);
+    int tn = klog_read(tail_slice, 16, 8);
+    if (hn == 16 && tn > 0) {
+        KTEST_ASSERT(head_slice[8] == tail_slice[0],
+                     "[STRICT] [KLOG] an offset read continues where the caller asked, not at the start");
+    }
+
+    /*
+     * And through the syscall. Root only, so the uid is borrowed for the check
+     * and put back - the suite runs as whatever the test task was created with,
+     * and the permission branch is worth proving in both directions.
+     */
+    if (current_task != 0) {
+        uint32_t saved_uid = current_task->uid;
+
+        char *u_klog = (char *)0x500A00;   /* user-space address, as elsewhere */
+        u_klog[0] = '\0';
+
+        regs.cs = 0x08;   /* kernel CS: this frame did not come from Ring 3 */
+
+        current_task->uid = 0;
+        regs.eax = SYSCALL_DMESG;
+        regs.ebx = (uint32_t)u_klog;
+        regs.ecx = 32;
+        regs.edx = 0;
+        syscall_handler(&regs);
+        KTEST_ASSERT((int)regs.eax > 0 && (int)regs.eax <= 32,
+                     "[STRICT] [KLOG] dmesg() copies the log into the caller's buffer");
+        KTEST_ASSERT(u_klog[0] != '\0',
+                     "[STRICT] [KLOG] the bytes actually arrive in user space");
+
+        regs.eax = SYSCALL_DMESG;
+        regs.ebx = 0;   /* the screen dump, which is what it always did */
+        regs.ecx = 0;
+        regs.edx = 0;
+        syscall_handler(&regs);
+        KTEST_ASSERT((int)regs.eax == 0,
+                     "[KLOG] a null buffer still asks for the screen dump");
+
+        regs.eax = SYSCALL_DMESG;
+        regs.ebx = 0xD0000000;   /* kernel heap */
+        regs.ecx = 32;
+        regs.edx = 0;
+        syscall_handler(&regs);
+        KTEST_ASSERT((int)regs.eax == E_FAULT,
+                     "[STRICT] [UACCESS] dmesg() refuses a kernel address for its destination");
+
+        regs.eax = SYSCALL_DMESG;
+        regs.ebx = (uint32_t)u_klog;
+        regs.ecx = 32;
+        regs.edx = (uint32_t)-1;   /* negative offset */
+        syscall_handler(&regs);
+        KTEST_ASSERT((int)regs.eax == E_INVAL,
+                     "[STRICT] [KLOG] dmesg() refuses a negative offset");
+
+        current_task->uid = 1000;
+        regs.eax = SYSCALL_DMESG;
+        regs.ebx = (uint32_t)u_klog;
+        regs.ecx = 32;
+        regs.edx = 0;
+        syscall_handler(&regs);
+        KTEST_ASSERT((int)regs.eax == E_PERM,
+                     "[STRICT] [SEC] dmesg() is still refused to a non-root caller");
+
+        current_task->uid = saved_uid;
+    }
 }

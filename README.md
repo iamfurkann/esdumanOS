@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.5.2-alpha
+**Version:** 0.5.3-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -142,6 +142,19 @@ is finally a way to hold a prompt while another process runs, and therefore a wa
 `kill` by hand. That absence is why `kill` went five releases without anyone noticing it
 did nothing.
 
+v0.5.3 finishes the pipeline by giving both of its ends a way to stop. A writer whose
+reader has gone is now sent `SIGPIPE` and dies; refusing the write, which is all v0.5.2
+did, was only a return value, and nothing in user space reads one — so the stage ran to
+the end of its input with every write failing in silence. At the other end, `grep`, `head`
+and the new `wc` read standard input when no file is named, which is what makes a pipeline
+have somewhere to go: until now `cat` was the only program in the system that would take
+one. Reading standard input from a terminal needed an end of its own, so Ctrl-D became a
+real key — the console could not report end-of-file at all, and on a machine with one
+terminal and no Ctrl-C, a read that cannot end takes the machine with it. Testing all of
+that turned up one more thing: `ls` and `dmesg` printed from inside the kernel, straight
+to the screen, so they had never gone through a pipe or a redirect in their lives.
+Both now hand their output back and let the shell write it.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -150,7 +163,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 15 user-space programs and 28 shell builtins
+- 16 user-space programs and 28 shell builtins
 - 25 kernel self-test modules and CI pipeline
 
 **What to expect:**
@@ -226,7 +239,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
-| **Programs** | 15 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `date`, `stat` |
+| **Programs** | 16 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -524,6 +537,11 @@ sure what the current build produces.
 | F1 / F2 / F3 | Switch between virtual terminals |
 | Up / Down Arrow | Scroll terminal history |
 | AltGr | Access Turkish keyboard layout characters |
+| Ctrl-D | End input for a program reading the keyboard (`cat`, `grep`, `head`, `wc`) |
+
+Ctrl with a letter produces that letter's control code, which is how Ctrl-D becomes the
+end-of-file byte. Ctrl with anything else is passed through unchanged. There is no
+Ctrl-C: interrupting a foreground process needs process groups, which do not exist yet.
 
 ### Shell Commands
 
@@ -563,6 +581,22 @@ through the same path as any other program. `echo` does not implement `-n`.
 
 **Operators:** Pipes (`cmd1 | cmd2`, two stages only), output redirection
 (`cmd > file`), chaining (`cmd1 && cmd2`, `cmd1 || cmd2`).
+
+**Reading standard input.** `cat`, `grep`, `head` and `wc` read standard input when no
+file is named, which is what lets them sit at the far end of a pipe:
+
+```
+echo hello | grep hello
+cat /etc/passwd | wc
+ls /bin | grep wc
+dmesg | head
+```
+
+Run bare, they read the keyboard instead, and **Ctrl-D** ends that input. A program
+writing into a pipe whose reader has finished is sent `SIGPIPE` and terminates, so
+`something | head` stops the producer once `head` has its ten lines rather than letting it
+run to the end of its input. The shell declines `SIGPIPE` for itself — losing it would end
+the session — and restores the default in every process it forks.
 
 Redirection truncates: the target is created if it does not exist and emptied if
 it does. `>` and `|` cannot be combined in one command — the parser takes
@@ -732,13 +766,14 @@ esdumanOS/
 |       |-- free.c                   Display memory info
 |       |-- whoami.c                 Print current user
 |       |-- kill.c                   Send signal to process
-|       |-- grep.c                   Search text patterns
-|       |-- head.c                   Display first lines of file
+|       |-- grep.c                   Search text patterns (file or stdin)
+|       |-- head.c                   Display first lines of file or stdin
+|       |-- wc.c                     Count lines, words and bytes
 |       |-- date.c                   Display date and time
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.5.2-alpha)
+|   |-- kernel.h                     Master header (version 0.5.3-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
@@ -821,6 +856,12 @@ regardless of what each one asked for.
 | 49 | `FSTAT` | Report an open descriptor's metadata |
 | 50 | `LSEEK` | Reposition an open file's read offset |
 
+`READ` returns 0 for end-of-file from all three sources: a pipe whose last writer has
+closed, a file read past its end, and the console once Ctrl-D has been typed. A `WRITE`
+to a pipe with no readers left returns `-EPIPE` **and** raises `SIGPIPE` against the
+caller, whose default action is to terminate it — a writer that means to survive has to
+register `SIG_IGN` for it first and then check the return value.
+
 ### File System
 
 | Number | Name | Description |
@@ -869,9 +910,19 @@ RTC is not wired into the VFS, so any time reported here would be invented.
 | 2 | `IPC_SEND` | Send a message to another process |
 | 6 | `IPC_RECEIVE` | Receive a message from mailbox |
 | 18 | `ALARM` | Set a timer-based alarm |
-| 24 | `SIGNAL_REG` | Register a signal handler |
+| 24 | `SIGNAL_REG` | Register a signal handler, or `SIG_DFL` (0) / `SIG_IGN` (1) |
 | 25 | `KILL` | Send a signal to a process |
 | 27 | `SIGRETURN` | Return from signal handler |
+
+Three signals terminate a process that has not handled them: `SIGKILL` (9), `SIGTERM`
+(15) and `SIGPIPE` (13). The exit status is 128 plus the signal number, so a `wait()`
+reporting 141 means the child was killed writing to a broken pipe. Every other signal is
+recorded and dropped when no handler is registered.
+
+A disposition is one of three things: an address to jump to, 0 for the default action, or
+1 for `SIG_IGN`, which discards the signal. Dispositions are inherited across `fork()`
+and reset to the default by `exec()` — which is why the shell can ignore `SIGPIPE` for
+itself and still has to restore the default in each stage it forks.
 
 ### Security and Cryptography
 
@@ -898,7 +949,7 @@ RTC is not wired into the VFS, so any time reported here would be invented.
 | 19 | `PANIC` | Trigger kernel panic (root only) |
 | 20 | `REBOOT` | Reboot the system (root only) |
 | 21 | `HALT` | Halt the CPU (root only) |
-| 39 | `DMESG` | Read kernel log ring buffer |
+| 39 | `DMESG` | Copy a slice of the kernel log into a user buffer (root only) |
 | 42 | `GET_ARGS` | Retrieve process command-line arguments |
 
 ---
@@ -987,18 +1038,27 @@ The following are known constraints of the current implementation. These are doc
   single global. Making the kernel preemptible means fixing all of that first,
   starting with the interrupt frame layout, which cannot currently describe a
   Ring 0 frame.
-- **The shell does not use `fork()` yet.** The syscall exists as of v0.5.0 and the
-  kernel supports it, but `sh` still runs everything through `exec`, which blocks
-  it until the program finishes. Moving the shell over is the next release.
-- **A pipeline can deadlock**, and will until that happens. The shell runs
-  `cmd1 | cmd2` one stage at a time rather than concurrently, so the first stage
-  writes into a 4 KB pipe with nothing draining it; a first stage producing more
-  than that blocks and never resumes. Unreachable until v0.4.3 made file writes
-  work — before then nothing could generate enough output to fill the buffer.
-- **No job control.** There is no `&`, no `jobs`, and no way to hold a shell
-  prompt while another process runs. This is why `kill` went five releases without
-  anyone noticing it did nothing: there was no way to have a live target and a
-  prompt at the same time.
+- **A pipeline is two stages at most.** The parser takes the first `|` it meets and
+  treats everything after it as the second stage, so `a | b | c` passes `b | c` to
+  the second stage as ordinary arguments rather than reporting an error.
+- **`>` and `|` cannot be combined** in one command. The parser takes whichever it
+  meets first and passes the other through as a literal argument.
+- **Job control stops at `&`, `jobs` and `wait`.** There is no `fg`, no `bg`, no
+  Ctrl-Z and no process groups, so a background job can be waited for or killed but
+  not brought back to the foreground. The shell tracks at most eight jobs.
+- **No Ctrl-C.** Interrupting a running foreground process needs process groups to
+  decide who receives the signal, and there are none. Ctrl-D exists — it ends input
+  for a program reading the keyboard — but it does not stop a program that is not
+  reading.
+- **`SIGPIPE` is the only signal a program receives without asking.** `SIGKILL` and
+  `SIGTERM` still have to be sent with `kill`. There is no `SIGCHLD`, no `SIGALRM`
+  delivered to user space, and no way to block a signal rather than ignoring it —
+  the disposition is one of handler, default or ignore, with no mask.
+- **`meminfo`, `hexdump`, `stack` and `free` print from inside the kernel**, so their
+  output goes to the screen whatever the calling process's descriptor 1 points at. They
+  cannot be piped or redirected: `meminfo > mem.txt` creates an empty file. `ls` and
+  `dmesg` had the same defect and were moved off it in v0.5.3 — these four are root-only
+  diagnostics and each needs a formatter of its own, so they were left.
 - **Copies on fork are eager, not copy-on-write.** A child gets a private copy of
   every page its parent had mapped, made at the moment of the call. Correct, and
   more expensive than it needs to be — COW requires reference counting on physical
@@ -1042,7 +1102,9 @@ Near-term priorities for the project, roughly in order:
 | P1 | Bounded string operations throughout user space |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
-| P1 | Move the shell onto `fork`, for concurrent pipelines and job control |
+| P1 | Shell parsing: more than two pipeline stages, and `>` combined with `|` |
+| P1 | A real clock — the status bar time is frozen at boot and `date` prints fixed text |
+| P2 | Copy-on-write for `fork`, which needs reference counting on physical frames |
 | P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments |
 | P3 | ANSI escape code support in terminal |
 | P3 | Expanded /dev device drivers |
@@ -1058,8 +1120,9 @@ The following were on this list and are done: multi-block SHA-256 with correct
 padding; supervisor-only kernel page permissions with `CR0.WP` enabled; address
 space teardown on exit with frame reclamation; ELF segment address validation
 (plus a fuzzer); BSS zeroing in the bootloader; block cache integration into the
-VFS read/write path; salted password hashing, now PBKDF2-HMAC-SHA256; and this
-syscall reference.
+VFS read/write path; salted password hashing, now PBKDF2-HMAC-SHA256; this syscall
+reference; and moving the shell onto `fork`, which brought concurrent pipelines and job
+control in v0.5.2 and `SIGPIPE` in v0.5.3.
 
 ---
 

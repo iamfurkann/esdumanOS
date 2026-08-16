@@ -4,6 +4,16 @@
 #include "types.h"
 
 /**
+ * @brief The byte Ctrl-D places in the keyboard buffer: ASCII EOT.
+ *
+ * Shared with sys_read(), which turns it into a read of zero bytes - the same
+ * end-of-file a pipe reports once its last writer closes. It has to be a byte
+ * rather than a flag because it travels through the keyboard ring buffer, and it
+ * cannot be 0: get_keyboard_char() already returns 0 for "buffer empty".
+ */
+#define KBD_EOT 0x04
+
+/**
  * @brief Handles keyboard hardware interrupts (IRQ1).
  * 
  * This routine is invoked directly by the interrupt descriptor table (IDT) 

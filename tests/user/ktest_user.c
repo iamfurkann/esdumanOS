@@ -125,6 +125,15 @@ static int kt_strlen(const char *s) {
  * Addresses used as hostile syscall arguments. All of these must be rejected
  * when they arrive from Ring 3.
  */
+/*
+ * Signal numbers and dispositions, spelled out here for the same reason
+ * ktest_signal.c spells out SIG_KILL: this is a freestanding Ring 3 payload and
+ * the kernel's signal.h reaches into kernel types. They have to agree with it.
+ */
+#define SIG_PIPE   13
+#define SIG_DFL_U   0   /* default action */
+#define SIG_IGN_U   1   /* discard the signal */
+
 #define ADDR_NULL        0x00000000u  /* null page                              */
 #define ADDR_BELOW_USER  0x00000100u  /* below the 4 MB user-space floor        */
 #define ADDR_JUST_BELOW  0x003FFFFFu  /* last byte before the user-space floor  */
@@ -1096,6 +1105,111 @@ void main(void) {
               "[MEM] the free-memory figure is readable around the fork rounds");
     KT_ASSERT(fork_free_after + 256 >= fork_free_before,
               "[STRICT] [MEM] repeated forks did not leak their address spaces");
+
+    /* ------------------------------------------------------------------
+     * 11b. SIG_PIPE.
+     *
+     * Only reachable from here. A writer has to actually die for this to mean
+     * anything, and the kernel modules cannot let that happen - they run as the
+     * task driving the suite, so a fatal signal would end the run. A forked child
+     * can be spent.
+     *
+     * The read end is closed before the fork in every case below, so the child
+     * inherits a pipe that already has no readers. Closing it on both sides after
+     * the fork would work too, but only as long as the parent got to its close
+     * first - and Ring 3 frames are rescheduled, so a timer tick in that window
+     * would leave one reader still open and the write would quietly succeed.
+     * There is no ordering to lose this way.
+     *
+     * The pipe survives losing its readers: sys_close() only destroys it once
+     * both counts reach zero, and the write end is still held here.
+     * ------------------------------------------------------------------ */
+    const char *doomed = "x";
+    int sp_fds[2];
+
+    if (syscall(SYSCALL_PIPE, (int)sp_fds, 0, 0) == 0) {
+        syscall(SYSCALL_CLOSE, sp_fds[0], 0, 0);
+
+        child = syscall(SYSCALL_FORK, 0, 0, 0);
+        if (child == 0) {
+            syscall(SYSCALL_WRITE, sp_fds[1], (int)doomed, 1);
+
+            /* Not reached. The write raises SIG_PIPE and the default action ends
+             * this process on the way back out of the syscall; getting here means
+             * the signal did not fire, and the status below says which. */
+            kt_child_exit(0);
+        }
+
+        wstatus = -1;
+        reaped = syscall(SYSCALL_WAIT, (int)&wstatus, 0, 0);
+        KT_ASSERT(reaped == child, "[SIGPIPE] the writing child was collected");
+        KT_ASSERT(wstatus == 128 + SIG_PIPE,
+                  "[STRICT] [SIGPIPE] a write to a pipe with no readers kills the writer (141)");
+
+        syscall(SYSCALL_CLOSE, sp_fds[1], 0, 0);
+    }
+
+    /* A writer that declines the signal is told EPIPE and carries on. This is the
+     * disposition a shell keeps for itself. */
+    if (syscall(SYSCALL_PIPE, (int)sp_fds, 0, 0) == 0) {
+        syscall(SYSCALL_CLOSE, sp_fds[0], 0, 0);
+
+        child = syscall(SYSCALL_FORK, 0, 0, 0);
+        if (child == 0) {
+            syscall(SYSCALL_SIGNAL_REG, SIG_PIPE, SIG_IGN_U, 0);
+
+            int w = syscall(SYSCALL_WRITE, sp_fds[1], (int)doomed, 1);
+            KT_ASSERT(w == E_PIPE,
+                      "[STRICT] [SIGPIPE] an ignoring writer is told EPIPE rather than killed");
+
+            kt_child_exit(11);
+        }
+
+        wstatus = -1;
+        syscall(SYSCALL_WAIT, (int)&wstatus, 0, 0);
+        KT_ASSERT(wstatus == 11,
+                  "[STRICT] [SIGPIPE] a writer that ignores SIG_PIPE survives the write");
+
+        syscall(SYSCALL_CLOSE, sp_fds[1], 0, 0);
+    }
+
+    /*
+     * The ignore is inherited across fork(), and putting the default back makes
+     * the write fatal again.
+     *
+     * This is the exact trap the shell has to work around, tested directly: a
+     * shell that ignores SIG_PIPE for itself hands that ignore to every stage it
+     * forks, and a pipeline stage that ignores SIG_PIPE is the runaway this
+     * release exists to stop. sh(1) resets the disposition in each forked child
+     * for this reason, so the reset has to work.
+     */
+    if (syscall(SYSCALL_PIPE, (int)sp_fds, 0, 0) == 0) {
+        syscall(SYSCALL_CLOSE, sp_fds[0], 0, 0);
+        syscall(SYSCALL_SIGNAL_REG, SIG_PIPE, SIG_IGN_U, 0);
+
+        child = syscall(SYSCALL_FORK, 0, 0, 0);
+        if (child == 0) {
+            int inherited = syscall(SYSCALL_WRITE, sp_fds[1], (int)doomed, 1);
+            KT_ASSERT(inherited == E_PIPE,
+                      "[STRICT] [SIGPIPE] a forked child inherits its parent's SIG_IGN");
+
+            syscall(SYSCALL_SIGNAL_REG, SIG_PIPE, SIG_DFL_U, 0);
+            syscall(SYSCALL_WRITE, sp_fds[1], (int)doomed, 1);
+
+            kt_child_exit(0);   /* not reached, as above */
+        }
+
+        wstatus = -1;
+        syscall(SYSCALL_WAIT, (int)&wstatus, 0, 0);
+        KT_ASSERT(wstatus == 128 + SIG_PIPE,
+                  "[STRICT] [SIGPIPE] restoring the default action makes the same write fatal");
+
+        syscall(SYSCALL_CLOSE, sp_fds[1], 0, 0);
+
+        /* Back to the default here too, so nothing later in this run inherits an
+         * ignore it did not ask for. */
+        syscall(SYSCALL_SIGNAL_REG, SIG_PIPE, SIG_DFL_U, 0);
+    }
 
     /* ------------------------------------------------------------------
      * 12. LOCKDOWN.

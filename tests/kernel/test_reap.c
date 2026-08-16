@@ -26,6 +26,21 @@
 #include "pmm.h"
 #include "process.h"
 #include "signal.h"
+#include "syscall.h"
+#include "errno.h"
+
+/*
+ * Ring 0 trip through int 0x80, so a syscall wrapper can be tested rather than
+ * the function behind it. register_user_signal() and sys_signal_reg() each held
+ * a copy of the same address check; relaxing one for SIG_IGN and not the other
+ * left every Ring 3 caller refused while a direct call succeeded, and a test
+ * that only called the function could not see it.
+ */
+static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
+    int ret;
+    asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
+    return ret;
+}
 
 /** Rounds used to warm the kernel heap before the frame count is baselined. */
 #define REAP_WARMUP_ROUNDS  3
@@ -238,6 +253,114 @@ void run_reap_tests(void) {
         send_user_signal(term_pid, SIG_TERM);
         KTEST_ASSERT(term_victim->state == TASK_DEAD && term_victim->exit_code == 128 + SIG_TERM,
                      "[STRICT] [SIGNAL] an unhandled SIG_TERM terminates the target");
+    }
+
+    /* ------------------------------------------------------------------
+     * SIG_PIPE joins the two of them.
+     *
+     * A writer whose reader has gone has nothing left to do. Refusing the write
+     * was not enough on its own: the refusal is only a return value, and nothing
+     * in userland reads one, so the writer ran to the end of its input with every
+     * write failing quietly. The same default action stops it.
+     * ------------------------------------------------------------------ */
+    int pipe_pid = 0;
+    process_t *pipe_victim = make_victim(&pipe_pid);
+    if (pipe_victim != 0) {
+        send_user_signal(pipe_pid, SIG_PIPE);
+        KTEST_ASSERT(pipe_victim->state == TASK_DEAD,
+                     "[STRICT] [SIGNAL] an unhandled SIG_PIPE terminates the target");
+        KTEST_ASSERT(pipe_victim->exit_code == 128 + SIG_PIPE,
+                     "[STRICT] [SIGNAL] a pipe-signalled task exits with 141");
+    }
+
+    /* ------------------------------------------------------------------
+     * SIG_IGN declines a signal that would otherwise be fatal.
+     *
+     * The disposition a shell needs for itself: it has no business dying because
+     * something it wrote to stopped reading. It lives in signal_handlers[] as a
+     * sentinel rather than a real address, so "non-zero" no longer means "there
+     * is somewhere to jump" - which is what the eip assertion further down is
+     * guarding.
+     * ------------------------------------------------------------------ */
+    int ign_pid = 0;
+    process_t *ign_victim = make_victim(&ign_pid);
+    if (ign_victim != 0) {
+        ign_victim->signal_handlers[SIG_PIPE] = SIG_IGN;
+        send_user_signal(ign_pid, SIG_PIPE);
+
+        KTEST_ASSERT(ign_victim->state != TASK_DEAD,
+                     "[STRICT] [SIGNAL] a SIG_PIPE the target ignores does not terminate it");
+
+        ign_victim->signal_handlers[SIG_PIPE] = 0;
+        ign_victim->pending_signals = 0;
+        ign_victim->exit_code = 0;
+        reap_task(ign_victim);
+    }
+
+    /* register_user_signal() acts on the running task, so this half is tested
+     * against ourselves. The address check has to let the sentinel through: 1 is
+     * not a mappable user page, and without the exemption there would be no way
+     * to decline a signal at all. */
+    if (current_task != 0) {
+        uint32_t saved_handler = current_task->signal_handlers[SIG_PIPE];
+        uint32_t saved_pending = current_task->pending_signals;
+
+        KTEST_ASSERT(register_user_signal(SIG_PIPE, SIG_IGN) == E_OK,
+                     "[STRICT] [SIGNAL] SIG_IGN is accepted where a handler address would be rejected");
+        KTEST_ASSERT(current_task->signal_handlers[SIG_PIPE] == SIG_IGN,
+                     "[STRICT] [SIGNAL] the ignore disposition is stored");
+
+        /* A real address that is not user memory is still refused - the
+         * exemption must be for the sentinel alone. */
+        KTEST_ASSERT(register_user_signal(SIG_PIPE, 0xC0001234) == E_FAULT,
+                     "[STRICT] [SIGNAL] a kernel address is still refused as a handler");
+        KTEST_ASSERT(current_task->signal_handlers[SIG_PIPE] == SIG_IGN,
+                     "[SIGNAL] a refused registration leaves the previous disposition alone");
+
+        /*
+         * And the same three answers through the syscall.
+         *
+         * Not redundant with the calls above, which is the whole point: this
+         * wrapper carried a second copy of the address check and went on
+         * refusing SIG_IGN with E_FAULT after the copy in process.c had been
+         * relaxed for it. Every Ring 3 caller - the shell included - was turned
+         * away while these direct calls passed, so the tests said the feature
+         * worked and no user of it could reach it.
+         */
+        current_task->signal_handlers[SIG_PIPE] = 0;
+
+        KTEST_ASSERT(ktest_syscall(SYSCALL_SIGNAL_REG, SIG_PIPE, SIG_IGN, 0) == E_OK,
+                     "[STRICT] [SIGNAL] signal() accepts SIG_IGN through the syscall, not just the function");
+        KTEST_ASSERT(current_task->signal_handlers[SIG_PIPE] == SIG_IGN,
+                     "[STRICT] [SIGNAL] the syscall stored the ignore disposition");
+
+        KTEST_ASSERT(ktest_syscall(SYSCALL_SIGNAL_REG, SIG_PIPE, 0xC0001234, 0) == E_FAULT,
+                     "[STRICT] [SIGNAL] the syscall still refuses a kernel address");
+        KTEST_ASSERT(ktest_syscall(SYSCALL_SIGNAL_REG, MAX_USER_SIGNALS, 0, 0) == E_INVAL,
+                     "[STRICT] [SIGNAL] the syscall refuses a signal number out of range");
+
+        /*
+         * Delivery discards an ignored signal instead of jumping to it. Without
+         * the explicit branch in check_and_deliver_signals(), the sentinel would
+         * be written straight into eip and the process would resume at address 1
+         * - the one real risk of storing a disposition where an address goes.
+         */
+        arch_regs_t probe_regs;
+        ft_bzero(&probe_regs, sizeof(probe_regs));
+        probe_regs.eip = 0x08048000;
+
+        current_task->pending_signals = (1u << SIG_PIPE);
+        check_and_deliver_signals(&probe_regs);
+
+        KTEST_ASSERT(probe_regs.eip == 0x08048000,
+                     "[STRICT] [SIGNAL] delivering an ignored signal does not touch eip");
+        KTEST_ASSERT((current_task->pending_signals & (1u << SIG_PIPE)) == 0,
+                     "[STRICT] [SIGNAL] an ignored signal is cleared rather than left pending");
+        KTEST_ASSERT(current_task->in_signal_handler == 0,
+                     "[SIGNAL] an ignored signal does not enter a handler");
+
+        current_task->signal_handlers[SIG_PIPE] = saved_handler;
+        current_task->pending_signals = saved_pending;
     }
 
     /* ------------------------------------------------------------------

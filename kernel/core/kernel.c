@@ -564,6 +564,7 @@ static int init_filesystem_and_vfs(void) {
                 fs_create_file_raw("kill", kill_elf, kill_elf_len, bin_id);
                 fs_create_file_raw("grep", grep_elf, grep_elf_len, bin_id);
                 fs_create_file_raw("head", head_elf, head_elf_len, bin_id);
+                fs_create_file_raw("wc", wc_elf, wc_elf_len, bin_id);
                 fs_create_file_raw("date", date_elf, date_elf_len, bin_id);
                 fs_create_file_raw("stat", stat_elf, stat_elf_len, bin_id);
                 fs_create_file_raw("hello", hello_elf, hello_elf_len, bin_id);

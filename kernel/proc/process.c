@@ -1251,29 +1251,46 @@ void mutex_unlock(mutex_t *m) {
  * @param sig_num The signal number.
  * @param handler_addr Address of the signal handler function.
  */
-void register_user_signal(int sig_num, uint32_t handler_addr) {
-    if (current_task == 0 || sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return;
-    
-    if (handler_addr != 0 && !validate_user_pointer((const void *)handler_addr, 1)) {
+int register_user_signal(int sig_num, uint32_t handler_addr) {
+    if (current_task == 0 || sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return E_INVAL;
+
+    /*
+     * SIG_IGN is exempt from the address check. It is a disposition rather than
+     * an address, and 1 is not a mappable user page - without the exemption the
+     * only way to decline a signal would be rejected as a bad handler.
+     *
+     * This is the only copy of the test. sys_signal_reg() had a second one and
+     * kept refusing SIG_IGN after this one was relaxed, which is how the shell
+     * came to be unable to decline SIGPIPE while the kernel-mode tests of the
+     * same function passed.
+     */
+    if (handler_addr != 0 && handler_addr != SIG_IGN
+        && !validate_user_pointer((const void *)handler_addr, 1)) {
         klog_int(LOG_LEVEL_WARN, "SIGNAL", "Invalid signal handler address rejected! PID", current_task->pid);
-        return;
+        return E_FAULT;
     }
-    
+
     current_task->signal_handlers[sig_num] = handler_addr;
+    return E_OK;
 }
 
 /**
  * @brief Whether a signal terminates a process that has not handled it.
  *
- * Only the two signals that mean "stop running" have a default action. Every
- * other signal keeps the behaviour it has always had: the pending bit is set,
- * and if nothing is registered to receive it, nothing happens.
+ * Only the signals that mean "stop running" have a default action. Every other
+ * signal keeps the behaviour it has always had: the pending bit is set, and if
+ * nothing is registered to receive it, nothing happens.
+ *
+ * SIG_PIPE joins the list for the same reason the other two are on it - the
+ * whole point is to stop a process that would otherwise keep going. A pipeline
+ * stage whose reader has gone has nothing left to do, and until this it kept
+ * reading its input to the end while every write failed.
  *
  * @param sig_num The signal number.
- * @return 1 for SIG_KILL and SIG_TERM, 0 otherwise.
+ * @return 1 for SIG_KILL, SIG_TERM and SIG_PIPE, 0 otherwise.
  */
 static int signal_terminates_by_default(int sig_num) {
-    return sig_num == SIG_KILL || sig_num == SIG_TERM;
+    return sig_num == SIG_KILL || sig_num == SIG_TERM || sig_num == SIG_PIPE;
 }
 
 /**
@@ -1336,6 +1353,12 @@ void send_user_signal(int target_pid, int sig_num) {
  * that has just been picked to run - and terminating a task from there would
  * re-enter schedule() through exit_current_process().
  *
+ * SIG_IGN is checked explicitly rather than falling through to the delivery
+ * branch below. It lives in signal_handlers[] alongside real addresses, so
+ * "handler is non-zero" is no longer the same question as "there is somewhere to
+ * jump" - without the check the sentinel would be written straight into
+ * regs->eip and the process would resume at address 1.
+ *
  * @param regs Pointer to the current CPU registers.
  */
 void check_and_deliver_signals(arch_regs_t *regs) {
@@ -1355,6 +1378,12 @@ void check_and_deliver_signals(arch_regs_t *regs) {
                 }
 
                 curr->pending_signals &= ~(1 << i);
+
+                /* Discarded, not delivered: the bit is cleared above and the
+                 * process resumes where it was, none the wiser. */
+                if (handler == SIG_IGN) {
+                    continue;
+                }
 
                 if (handler != 0) {
                     if (!validate_user_pointer((const void *)handler, 1)) {
@@ -1402,7 +1431,7 @@ void apply_default_signal_action(arch_regs_t *regs) {
      * than walking into an exit that reap_task() will refuse anyway.
      */
     if (curr == idle_task) {
-        curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM));
+        curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM) | (1u << SIG_PIPE));
         return;
     }
 

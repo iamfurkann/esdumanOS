@@ -59,6 +59,7 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/kill_elf_data.c \
 			src/resources/grep_elf_data.c \
 			src/resources/head_elf_data.c \
+			src/resources/wc_elf_data.c \
 			src/resources/date_elf_data.c \
 			src/resources/stat_elf_data.c \
 			fs/bcache.c \
@@ -368,6 +369,9 @@ apps/bin/grep.elf: apps/bin/grep.c
 apps/bin/head.elf: apps/bin/head.c
 	$(CC) $(USER_CFLAGS) apps/bin/head.c -o apps/bin/head.elf
 
+apps/bin/wc.elf: apps/bin/wc.c
+	$(CC) $(USER_CFLAGS) apps/bin/wc.c -o apps/bin/wc.elf
+
 apps/bin/date.elf: apps/bin/date.c
 	$(CC) $(USER_CFLAGS) apps/bin/date.c -o apps/bin/date.elf
 
@@ -497,6 +501,12 @@ src/resources/head_elf_data.c: apps/bin/head.elf tools/encrypt_tool
 	@./tools/encrypt_tool apps/bin/head.elf apps/bin/head_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i apps/bin/head_encrypted.elf | \
 	sed 's/apps_bin_head_encrypted_elf/head_elf/g' > src/resources/head_elf_data.c
+
+src/resources/wc_elf_data.c: apps/bin/wc.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/wc.elf apps/bin/wc_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/wc_encrypted.elf | \
+	sed 's/apps_bin_wc_encrypted_elf/wc_elf/g' > src/resources/wc_elf_data.c
 
 src/resources/date_elf_data.c: apps/bin/date.elf tools/encrypt_tool
 	@mkdir -p src/resources

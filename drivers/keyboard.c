@@ -83,6 +83,11 @@ static int shift_pressed = 0;
 static int caps_lock = 0;
 static int altgr_pressed = 0;
 static int e0_mode = 0;
+/* Ctrl was the one modifier this driver never tracked, which is why the console
+ * had no end-of-file: there was no way to type one. Both Ctrl keys report
+ * scancode 0x1D, the left one bare and the right one behind an 0xE0 prefix, and
+ * neither is told apart from the other here. */
+static int ctrl_pressed = 0;
 
 /**
  * @brief Handles the keyboard interrupt request (IRQ1).
@@ -109,10 +114,12 @@ void keyboard_interrupt_handler(void) {
     if (scancode & 0x80) {
         uint8_t released_key = scancode & 0x7F;
         if (released_key == 0x2A || released_key == 0x36) shift_pressed = 0;
+        if (released_key == 0x1D) ctrl_pressed = 0;
         return;
     }
 
     if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
+    if (scancode == 0x1D) { ctrl_pressed = 1; return; }
     if (scancode == 0x3A) { caps_lock = !caps_lock; return; }
     
     // F-keys and Scrollback
@@ -134,6 +141,24 @@ void keyboard_interrupt_handler(void) {
     if (caps_lock) {
         if (c >= 'a' && c <= 'z') c -= 32;
         else if (c >= 'A' && c <= 'Z') c += 32;
+    }
+
+    /*
+     * Ctrl folds a letter to its control code, which is the ASCII rule: clearing
+     * the top three bits of 'D' or 'd' both give 0x04, so caps and shift above
+     * cannot change the result. Ctrl-D is the one this release needs - it is the
+     * end-of-file sys_read() answers with zero bytes - but the transform is
+     * general because the alternative is a special case per key, and Ctrl-C will
+     * want the same path once there are process groups to send it to.
+     *
+     * Restricted to letters deliberately. A real terminal swallows Ctrl with
+     * digits and punctuation too, but folding those would turn ordinary keys
+     * into control bytes nothing reads, and a Ctrl that got stuck - a release
+     * event lost - would take the whole keyboard down rather than just the
+     * letters. Passing them through unchanged is the smaller change.
+     */
+    if (ctrl_pressed && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        c &= 0x1F;
     }
 
     if (c != 0) {

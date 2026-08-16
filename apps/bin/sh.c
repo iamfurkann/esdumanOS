@@ -355,10 +355,20 @@ static void jobs_reap(void) {
         printk("\n");
     }
 }
+/*
+ * Spelled out here rather than included from the kernel's signal.h, which is the
+ * same thing the Ring 3 test payloads do: these programs are freestanding
+ * translation units and that header reaches into kernel types. The numbers are
+ * POSIX's, and signal.h has to agree.
+ */
+#define SIG_PIPE 13
+#define SIG_DFL   0   /* default action: terminate, for the signals that have one */
+#define SIG_IGN   1   /* discard the signal */
+
 /**
  * @brief Registers a signal handler.
  * @param sig_num Signal number.
- * @param handler Pointer to the handler function.
+ * @param handler Pointer to the handler function, or SIG_DFL / SIG_IGN.
  */
 void sys_register_signal(int sig_num, void *handler) { syscall(SYSCALL_SIGNAL_REG, sig_num, (int)handler, 0); }
 /**
@@ -386,11 +396,14 @@ int sys_setuid(int uid, const char *password) { return syscall(SYSCALL_SETUID, u
  * @return System call status.
  */
 int sys_mkdir(const char *name) { return syscall(26, (int)name, 0, 0); }
-/**
- * @brief Lists directory contents.
- * @param parent_id ID of the directory to list.
+/*
+ * SYSCALL_LS_DIR (28) used to back the "ls" builtin and no longer does. It
+ * prints the listing from the kernel with terminal_putchar(), so its output
+ * never reached this process's descriptor 1 - "ls | grep" saw an empty pipe and
+ * "ls > file" produced an empty file. builtin_ls() below reads the same entries
+ * through SYSCALL_READDIR and prints them itself. The syscall stays for any
+ * caller that genuinely wants a screen dump.
  */
-void sys_ls_dir(int parent_id) { syscall(28, parent_id, 0, 0); }
 /**
  * @brief Gets the directory ID.
  * @param name Directory name.
@@ -425,9 +438,19 @@ int dup2(int oldfd, int newfd) { return syscall(SYSCALL_DUP2, oldfd, newfd, 0); 
  */
 int sys_close(int fd) { return syscall(SYSCALL_CLOSE, fd, 0, 0); }
 /**
- * @brief Prints the kernel ring buffer.
+ * @brief Reads a slice of the kernel ring buffer into a buffer.
+ *
+ * The kernel used to print the log itself, which meant it went to the screen and
+ * nowhere else. Reading it here and writing it below sends it through descriptor
+ * 1, so it can be piped and redirected like anything else - and keeps the
+ * position in this loop rather than in a kernel dump that cannot block partway.
+ *
+ * @param buf Destination buffer.
+ * @param size Capacity of buf.
+ * @param offset Byte position in the log to read from.
+ * @return Bytes read, 0 at the end of the log, or a negative errno.
  */
-void sys_dmesg(void) { syscall(SYSCALL_DMESG, 0, 0, 0); }
+int sys_dmesg_read(char *buf, int size, int offset) { return syscall(SYSCALL_DMESG, (int)buf, size, offset); }
 /**
  * @brief Opens a file.
  * @param name File name.
@@ -561,6 +584,7 @@ void show_help(void) {
     printk("    clear             Clear the screen\n");
     printk("\n  Operators: | (pipe, two stages), > (redirect), && (AND), || (OR)\n");
     printk("  Note: > and | cannot be combined in one command.\n");
+    printk("  Ctrl-D ends input for a program reading the keyboard (cat, grep, head, wc).\n");
 }
 
 /**
@@ -697,8 +721,79 @@ int builtin_cat(char **args) {
 
 
 /**
+ * @brief Built-in ls: lists a directory through this process's standard output.
+ *
+ * Two things were wrong with what this replaces, and they had different causes.
+ *
+ * The listing came from SYSCALL_LS_DIR, which prints it inside the kernel with
+ * terminal_putchar() - so it went to the screen whatever this process's
+ * descriptor 1 pointed at. "ls | grep bin" read an empty pipe and "ls > names"
+ * created an empty file. SYSCALL_READDIR hands the same entries back instead,
+ * and printing them here means they travel the ordinary way.
+ *
+ * The argument was also simply never read: the old call passed the id of "."
+ * whatever was typed after it, so "ls /bin" listed the working directory and
+ * quietly looked like /bin had nothing in it.
+ *
+ * The format is unchanged apart from colour, which the kernel applied per entry
+ * and this cannot - there is no syscall for it, and colour codes written into a
+ * pipe or a file would be wrong anyway. The [DIR] and [FILE] markers carry the
+ * same distinction in text.
+ *
+ * @param args Array of command-line arguments; args[1] is an optional directory.
+ * @return Exit status of the command.
+ */
+int builtin_ls(char **args) {
+    int dir_id;
+
+    if (args[1]) {
+        dir_id = sys_get_dir_id(args[1]);
+        if (dir_id < 0) {
+            printk("ls: "); printk(args[1]); printk(": No such directory\n");
+            return 1;
+        }
+    } else {
+        dir_id = sys_get_dir_id(".");
+        if (dir_id < 0) { printk("ls: cannot resolve the working directory\n"); return 1; }
+    }
+
+    /* One call, one buffer. A directory holding more entries than fit is
+     * truncated by the kernel at an entry boundary rather than split across
+     * calls; readdir has no cursor to resume from. 256 entries is the table
+     * limit and this holds well over a hundred typical names. */
+    char dir_buf[1024];
+    int bytes = sys_readdir(dir_id, dir_buf, sizeof(dir_buf));
+    if (bytes < 0) { printk("ls: cannot read directory\n"); return 1; }
+
+    printk("Contents:\n----------------------------------------\n");
+
+    int off = 0;
+    int found = 0;
+    while (off < bytes) {
+        char *name = &dir_buf[off];
+        int nlen = 0;
+        /* "name\x01" for a directory, "name\x02" for a file, then a null. */
+        while (name[nlen] != 1 && name[nlen] != 2 && name[nlen] != '\0') nlen++;
+
+        int is_dir = (name[nlen] == 1);
+        name[nlen] = '\0';
+
+        printk(is_dir ? "[DIR]  " : "[FILE] ");
+        printk(name);
+        printk("\n");
+
+        found = 1;
+        off += nlen + 2;
+    }
+
+    if (!found) printk("(Empty)\n");
+    printk("----------------------------------------\n");
+    return 0;
+}
+
+/**
  * @brief Executes a built-in or external command.
- * 
+ *
  * @param args Array of command-line arguments.
  * @param redirect_file File to redirect output to (if any).
  */
@@ -728,7 +823,7 @@ void execute_command(char **args) {
         else { printk("Error. Example: export LANG EN\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "help") == 0) { show_help(); last_exit_status = 0; }
-    else if (ft_strcmp(args[0], "ls") == 0) { sys_ls_dir(sys_get_dir_id(".")); last_exit_status = 0; }
+    else if (ft_strcmp(args[0], "ls") == 0) { last_exit_status = builtin_ls(args); }
     else if (ft_strcmp(args[0], "mkdir") == 0) {
         if (args[1]) last_exit_status = (sys_mkdir(args[1]) == E_OK) ? 0 : 1;
         else { printk("Usage: mkdir <directory>\n"); last_exit_status = 1; }
@@ -912,8 +1007,32 @@ void execute_command(char **args) {
         }
     }
     else if (ft_strcmp(args[0], "dmesg") == 0) {
-        sys_dmesg();
-        last_exit_status = 0;
+        /*
+         * Read a slice, write a slice. The kernel used to print the whole log
+         * itself, straight to the screen, so "dmesg | head" fed an empty pipe and
+         * "dmesg > boot.log" wrote nothing.
+         *
+         * The loop belongs here rather than in the kernel because the write can
+         * block: an 8 KB log does not fit a 4 KB pipe, and a blocked syscall
+         * resumes by re-running from the start. A kernel-side dump would emit
+         * everything twice; this keeps the offset in a variable no restart
+         * touches, and each write blocks and restarts on its own.
+         */
+        char klog_chunk[256];
+        int klog_off = 0;
+        int got;
+
+        while ((got = sys_dmesg_read(klog_chunk, sizeof(klog_chunk), klog_off)) > 0) {
+            syscall(SYSCALL_WRITE, 1, (int)klog_chunk, got);
+            klog_off += got;
+        }
+
+        if (got < 0) {
+            printk("dmesg: permission denied\n");
+            last_exit_status = 1;
+        } else {
+            last_exit_status = 0;
+        }
     }
     else if (ft_strcmp(args[0], "wait") == 0) {
         /*
@@ -1357,6 +1476,22 @@ void main(void) {
     set_env("OS", "esdumanOS");
     sys_register_signal(5, my_custom_handler);
 
+    /*
+     * The shell declines SIG_PIPE for itself.
+     *
+     * It has no business dying because something it wrote to stopped reading;
+     * losing the shell would take the session with it, and there is no way to
+     * get another one. This is what every real shell does.
+     *
+     * The catch is that a disposition survives fork(), so every stage the shell
+     * forks starts out ignoring it too - and a stage that ignores SIG_PIPE is
+     * exactly the runaway this release exists to stop. Each fork below puts it
+     * back before running anything. External commands are not affected either
+     * way: they are started through exec(), which gives the new image a clean
+     * set of handlers.
+     */
+    sys_register_signal(SIG_PIPE, (void *)SIG_IGN);
+
     while (1) {
         /*
          * Collect finished background jobs here rather than the moment they
@@ -1517,6 +1652,13 @@ void main(void) {
                              */
                             int left = sys_fork();
                             if (left == 0) {
+                                /* Undo the shell's own SIG_IGN, inherited a line
+                                 * ago through fork(). The writing end of a
+                                 * pipeline is the one process that has to die
+                                 * when its reader does, and if this stage is a
+                                 * builtin it runs right here in the shell's
+                                 * image with the shell's dispositions. */
+                                sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
                                 dup2(pfd[1], 1);
                                 sys_close(pfd[0]);
                                 sys_close(pfd[1]);
@@ -1526,6 +1668,7 @@ void main(void) {
 
                             int right = (left < 0) ? -1 : sys_fork();
                             if (right == 0) {
+                                sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
                                 dup2(pfd[0], 0);
                                 sys_close(pfd[0]);
                                 sys_close(pfd[1]);
@@ -1573,6 +1716,9 @@ void main(void) {
                          */
                         int pid = sys_fork();
                         if (pid == 0) {
+                            /* Same reason as the pipeline stages: only the shell
+                             * itself gets to ignore SIG_PIPE. */
+                            sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
                             if (redirect_file) run_with_redirect(args, redirect_file);
                             else execute_command(args);
                             sys_exit_status(last_exit_status);

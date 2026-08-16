@@ -1,6 +1,6 @@
 /**
  * @file head.c
- * @brief Prints the first 10 lines of a file
+ * @brief Prints the first 10 lines of a file or of standard input
  */
 
 /**
@@ -35,6 +35,25 @@ void print_newline() {
 }
 
 /**
+ * @brief Copies the first ten lines of a descriptor to standard output.
+ *
+ * Byte at a time, which is what lets it stop on the tenth newline without having
+ * read past it. That matters more on a pipe than on a file: bytes consumed here
+ * are gone, and a later stage would never see them.
+ *
+ * @param fd Descriptor to read; 0 is standard input.
+ */
+static void head_fd(int fd) {
+    char c;
+    int lines = 0;
+
+    while (lines < 10 && syscall(3, fd, (int)&c, 1) > 0) {
+        syscall(4, 1, (int)&c, 1);
+        if (c == '\n') lines++;
+    }
+}
+
+/**
  * @brief Main entry point for the application
  */
 void main(void) {
@@ -44,27 +63,29 @@ void main(void) {
 
     // The shell will pass the canonical absolute path as the argument string.
     // E.g. for "touch a.txt", the shell passes "/current/path/a.txt"
-    
-    
+
+
     int status = 0;
 
     if (args_buf[0] == '\0') {
-        print("Usage: head <file>"); print_newline();
-        status = 1;
+        /*
+         * No file named means read standard input. This used to be a usage
+         * error, which left the tool that most obviously belongs at the end of a
+         * pipeline unable to sit there.
+         *
+         * Descriptor 0 is not closed afterwards: it belongs to whoever started
+         * this process, and closing it would take their standard input away too.
+         */
+        head_fd(0);
     } else {
         int fd = syscall(40, (int)args_buf, 0, 0);
         if (fd < 0) { print("head: File not found"); print_newline(); status = 1; }
         else {
-            char c;
-            int lines = 0;
-            while (lines < 10 && syscall(3, fd, (int)&c, 1) > 0) {
-                syscall(4, 1, (int)&c, 1);
-                if (c == '\n') lines++;
-            }
+            head_fd(fd);
             syscall(38, fd, 0, 0);
         }
     }
-    
+
 
     syscall(1, status, 0, 0); // EXIT
     while(1);

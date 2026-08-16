@@ -17,6 +17,7 @@
 #include "errno.h"
 #include "klog.h"
 #include "keyboard.h"
+#include "signal.h"
 #include "kheap.h"
 #include "libft.h"
 #include "uaccess.h"
@@ -97,6 +98,23 @@ void sys_read(arch_regs_t *regs) {
             if (!syscall_block_and_restart(regs, WAIT_KBD)) {
                 regs->eax = E_AGAIN;
             }
+            return;
+        }
+        /*
+         * Ctrl-D ends the read the way a closed pipe does: zero bytes.
+         *
+         * The console had no way to say "no more input" at all - this branch
+         * either handed back a byte or blocked - so a program reading standard
+         * input from a terminal could never stop. That was survivable while
+         * nothing read standard input; it stops being survivable now that grep,
+         * head and wc do, because there is one terminal, no Ctrl-C and no job
+         * control, so a read that cannot end takes the machine with it.
+         *
+         * EOF has to be a distinct byte rather than the empty-buffer 0 above:
+         * get_keyboard_char() already spends 0 on "nothing typed yet".
+         */
+        if (c == KBD_EOT) {
+            regs->eax = 0;
             return;
         }
         regs->eax = copy_to_user(buf, &c, 1) == E_OK ? 1 : E_FAULT;
@@ -184,9 +202,32 @@ void sys_write(arch_regs_t *regs) {
                 regs->eax = E_AGAIN;
             }
             return;
-        } else {
-            regs->eax = ret;
         }
+        /*
+         * The reader has gone: raise SIG_PIPE against the writer.
+         *
+         * pipe_write() has refused this write since v0.5.2, but a refusal is
+         * only a return value and nothing in userland reads one - printk()
+         * discards it, and so does every /bin tool. The writer carried on to the
+         * end of its input with each write failing in silence. The signal is
+         * what actually stops it.
+         *
+         * send_user_signal() sees the target is current_task and leaves the
+         * pending bit for apply_default_signal_action() to act on at the end of
+         * syscall_handler(); it cannot reap a task whose syscall it is running
+         * inside. E_PIPE is still returned for the benefit of a writer that has
+         * chosen to ignore the signal, which is the only way past this point.
+         *
+         * Ring 0 callers are exempt. The kernel test modules drive this syscall
+         * directly through int 0x80 with current_task pointing at the task
+         * running the suite; signalling that task would terminate the run
+         * itself, and an interrupted run looks like a passing one. Same test the
+         * other process-semantics guards use - see syscall_block_and_restart().
+         */
+        if (ret == E_PIPE && (regs->cs & 0x03) == 3 && current_task != 0) {
+            send_user_signal(current_task->pid, SIG_PIPE);
+        }
+        regs->eax = ret;
     }
     else if (desc->type == FD_TYPE_DEVICE) {
         int d_idx = (int)desc->ptr;

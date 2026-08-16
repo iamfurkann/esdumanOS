@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3-alpha] - 2026-08-16
+
+Both ends of a pipeline learn how to stop. The writer gets a death, the reader gets an
+end, there are finally programs willing to sit at the far end of a pipe — and `ls` and
+`dmesg` stop writing past it to the screen.
+
+### Added
+
+- **`SIGPIPE` (13).** A process that writes to a pipe with no readers left is signalled,
+  and the default action terminates it with status 141. `pipe_write()` has refused that
+  write since v0.5.2, but a refusal is only a return value and nothing in user space reads
+  one — `printk()` discards it and so does every `/bin` tool — so the stage ran to the end
+  of its input with every write failing in silence. This is what actually stops it.
+
+  Raised only for writers that arrived from Ring 3. The kernel test modules drive `write`
+  through `int 0x80` as the task running the suite, and signalling that task would end the
+  run — which would look like a passing one, since an interrupted run still prints
+  everything it got through.
+- **`SIG_IGN`.** A process can now decline a signal, which is a third state
+  `signal_handlers[]` did not have: it held an address or 0 for the default. The
+  disposition is stored as the sentinel 1, the value POSIX uses, so inheritance and reset
+  come for free — `fork()` already copies the array and a new program image already starts
+  with it cleared.
+
+  The shell declines `SIGPIPE` for itself: losing it would end the session, and there is
+  no way to get another one. Because a disposition survives `fork()`, every stage the
+  shell forks would start out declining it too — which is the exact runaway this release
+  exists to stop — so each forked child restores the default before running anything.
+
+  `SIGNAL_REG` now reports what it decided: `E_OK`, `E_FAULT` for a handler address user
+  space cannot execute, or `E_INVAL` for a signal number out of range. It used to answer 0
+  in every case, including the ones it had refused. The check itself was written out twice
+  — once in the syscall and once in `register_user_signal()` — and only one copy was
+  relaxed for `SIG_IGN`, so Ring 3 callers were turned away with `E_FAULT` while
+  kernel-mode callers of the same function succeeded. There is one copy now.
+- **Ctrl-D ends console input.** `sys_read()` on the console either handed back a byte or
+  blocked; there was no path that returned 0, so a program reading standard input from a
+  terminal could never finish. That was survivable while nothing read standard input. It
+  stops being survivable now, because there is one terminal, no Ctrl-C and no job control,
+  so a read that cannot end takes the machine with it.
+
+  Ctrl was the one modifier the keyboard driver never tracked. It now folds a letter to
+  its control code, which is the ASCII rule, so Ctrl-D produces the end-of-file byte and
+  Ctrl-C has a path waiting for it once there are process groups to send it to. Ctrl with
+  anything other than a letter is passed through unchanged.
+- **`/bin/wc`** counts lines, words and bytes, and reads standard input when no file is
+  named. Its output is three numbers however much it consumed, which makes `something | wc`
+  the cheapest way to see that a stage reached the end of its input rather than stopping
+  early.
+
+### Fixed
+
+- **`ls` and `dmesg` output goes through the process's standard output.** Both produced
+  their listing inside the kernel with `terminal_putchar()`, which knows nothing about the
+  calling process — so the text went to the screen whatever descriptor 1 pointed at.
+  `ls | grep bin` read an empty pipe, `dmesg | head` fed an empty pipe, and `ls > names`
+  created an empty file. Redirection has been wired up since v0.4.3 and this was never
+  noticed, because until v0.5.2 a pipeline could not run its stages concurrently and until
+  this release nothing consumed one.
+
+  `ls` is now built on `READDIR` (44), which already handed entries back in a buffer and
+  which tab completion already used; the shell prints them itself. `DMESG` (39) grew a
+  buffer form — `dmesg(buf, size, offset)` copies a slice and returns the count — and the
+  shell loops over it. Passing a null buffer still dumps to the screen, which is what a
+  caller with no descriptors of its own wants.
+
+  The loop is in the shell rather than the kernel on purpose. An 8 KB log does not fit a
+  4 KB pipe, so the write blocks, and a blocked syscall resumes by re-running from its
+  `int 0x80` — a kernel-side dump that blocked halfway would start over and emit
+  everything twice. With the offset held in the caller, each write blocks and restarts
+  harmlessly.
+
+  `meminfo`, `hexdump`, `stack` and `/bin/free` still print from the kernel and still
+  cannot be piped or redirected. They are root-only diagnostics and each needs its own
+  formatter; recorded under Known Limitations rather than fixed here.
+- **`ls <directory>` reads its argument.** It passed the id of `.` whatever was typed
+  after it, so `ls /bin` listed the working directory — and looked convincingly like
+  `/bin` was empty.
+
+  The listing loses its colour in the move: the kernel set it per entry and the shell has
+  no syscall for it. The `[DIR]` and `[FILE]` markers carry the same distinction in text,
+  and colour codes written into a pipe or a file would have been wrong anyway.
+- **`grep` and `head` read standard input when no file is named.** Both opened a file by
+  name and nothing else, so a pipeline could be parsed, forked and connected with `cat` as
+  the only program in the system willing to consume one. `echo x | grep x` did not work.
+- **`grep` no longer stops at the first 511 bytes of a file.** It issued a single read of
+  511 bytes and searched what came back, so a match on line 40 of a 2 KB file was simply
+  not found — silently, with an exit status of 0. It now assembles lines as bytes arrive,
+  which is the same loop the standard-input path needs, so the two became one. A single
+  line longer than 256 bytes is truncated rather than split; splitting would report one
+  line as two and could match across a boundary that is not in the input.
+
+### Deliberately not done
+
+- **Ctrl-D at the shell prompt does not exit the shell.** The byte is dropped by the input
+  loop, which accepts only printable characters, and the read returns 0 once before
+  blocking again — no busy loop, no effect. Making it exit is a behaviour change rather
+  than part of this one.
+- **`grep` still does not distinguish "no lines matched" from "lines matched"** in its
+  exit status. Recorded since v0.4.x and still true; changing it would alter what `&&` and
+  `||` do with a `grep`.
+
+### Documentation
+
+The README's Known Limitations and Roadmap sections were reconciled — for v0.5.2 as well
+as this release. The v0.5.2 documentation commit said it retired the pipeline deadlock and
+the absence of job control, but touched only this file, so the README went a release
+claiming the shell did not use `fork()` yet, that a pipeline could deadlock, and that
+there was no `&` or `jobs`. All three had been false since v0.5.2.
+
 ## [0.5.2-alpha] - 2026-08-15
 
 The shell runs on `fork`. The pipeline deadlock is gone, and `kill` can be tried by hand

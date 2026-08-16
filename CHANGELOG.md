@@ -21,6 +21,24 @@ for the first time.
   The shell closes both pipe ends before waiting, which is load-bearing rather than
   tidiness: the reader sees end-of-file only when every write end is shut, and the shell
   holds one.
+- **A pipe with no readers accepted data.** `pipe_write()` checked for a departed reader
+  only inside the buffer-full branch, so as long as there was room the write succeeded and
+  reported the byte count — bytes handed to a pipe nobody would ever read, and a caller
+  told they had been written. The condition surfaced only once 4 KB had accumulated.
+
+  Unreachable until this release: with the stages run one after the other, the reader was
+  always started after the writer had already finished. Concurrency made it the ordinary
+  case. The check now runs first, whatever room is left.
+
+  The warning is logged once per pipe rather than once per rejected write. A writer that
+  does not check its write results — `printk()` does not — keeps going until its input is
+  exhausted, and a line per attempt buried everything else in the log.
+- **`cat` with no file argument reads standard input.** It was an error, which left the
+  shell with pipes and nothing able to read one: `grep` and `head` both open a file by
+  name, and so did this. `a | b` could be parsed, forked and connected, and there was no
+  `b` that would take it. Descriptor 0 is never closed on that path — it belongs to
+  whoever started the process, and a builtin closing it would leave the shell without
+  input.
 
 ### Added
 

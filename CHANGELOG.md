@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-alpha] - 2026-08-15
+
+The shell runs on `fork`. The pipeline deadlock is gone, and `kill` can be tried by hand
+for the first time.
+
+### Fixed
+
+- **`cmd1 | cmd2` no longer deadlocks.** The shell executed the first stage to completion
+  with stdout pointing at the pipe, and only then started the second to drain it. Nothing
+  was reading while the first stage wrote, so a first stage producing more than the 4 KB
+  the pipe holds blocked with no reader and never resumed — taking the shell with it.
+  Both stages are forked now and run at once. This is what `fork()` was added for.
+
+  The shell closes both pipe ends before waiting, which is load-bearing rather than
+  tidiness: the reader sees end-of-file only when every write end is shut, and the shell
+  holds one.
+
+### Added
+
+- **Background jobs.** A trailing `&` runs the command in a child and returns the prompt
+  immediately. Until now there was no way to hold a prompt while another process ran —
+  which is why `kill` went five releases without anyone noticing it did nothing: there
+  was never a live target and a prompt at the same time.
+- **`jobs`** lists what this shell started and has not yet collected, and **`wait`**
+  blocks until all of them have finished. Finished jobs are reported above the next
+  prompt rather than the moment they report, so a job ending mid-line does not print over
+  what is being typed.
+
+### Changed
+
+- **`wait()` takes the POSIX shape: it returns the pid and writes the status through a
+  pointer.** It shipped in v0.5.0 returning the status directly, which is not enough for
+  the first thing that needed it — a shell forking two pipeline stages gets two statuses
+  back and has to know which is which, because the pipeline's own status is the last
+  stage's. The first real consumer is where an API of this kind gets to be wrong, so it
+  was changed while there was exactly one.
+
+  A non-zero third argument asks it not to block. The three answers are distinct: a pid
+  means a child reported, zero means children exist but none has, and `E_CHILD` means
+  there are none at all. Collapsing the middle two would leave a shell either blocking on
+  a running job or forgetting one it still has.
+
+  Delivery changed with it. `exec()` still has its status written straight into its saved
+  frame — it returns the status itself and cannot re-run without launching the program a
+  second time. `wait()` has to write into the caller's memory, which `reap_task()` cannot
+  reach from another address space, so its status is parked and the syscall is restarted
+  to collect it with the right directory live. The two are told apart by a new wait
+  reason.
+
 ## [0.5.1-alpha] - 2026-08-15
 
 No kernel code changes. 503 assertions, unaltered — the point of this release is that

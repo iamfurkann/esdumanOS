@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.5.1--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.5.2--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.5.1-alpha
+**Version:** 0.5.2-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -133,6 +133,14 @@ release image built without `make clean` first would quietly inherit the reduced
 iteration count. Each flavour now has its own tree under `build/`, which removes the
 hazard by construction and makes incremental builds work again: a one-file change takes
 seconds instead of two minutes.
+
+v0.5.2 puts the shell on `fork`. Both stages of `cmd1 | cmd2` now run at once, so a first
+stage producing more than the 4 KB the pipe holds no longer blocks with no reader and
+takes the shell down with it. A trailing `&` runs a command in the background, `jobs`
+lists what is still running and `wait` blocks for all of it — which together mean there
+is finally a way to hold a prompt while another process runs, and therefore a way to try
+`kill` by hand. That absence is why `kill` went five releases without anyone noticing it
+did nothing.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -473,7 +481,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.5.1-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.5.2-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -496,7 +504,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.5.1-alpha.iso \
+    -cdrom esdumanOS-v0.5.2-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -730,7 +738,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.5.1-alpha)
+|   |-- kernel.h                     Master header (version 0.5.2-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API

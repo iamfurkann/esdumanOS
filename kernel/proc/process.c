@@ -541,10 +541,11 @@ static void park_exit_status(int parent_pid, int child_pid, int exit_code) {
  * @brief Takes one parked status belonging to a parent, oldest first.
  *
  * @param parent_pid    Parent asking.
+ * @param child_pid_out Receives the pid of the child it belonged to.
  * @param exit_code_out Receives the status when one is found.
  * @return 1 when a status was taken, 0 when the parent has none parked.
  */
-int take_parked_status(int parent_pid, int *exit_code_out) {
+int take_parked_status(int parent_pid, int *child_pid_out, int *exit_code_out) {
     int slot = -1;
     uint32_t oldest = 0xFFFFFFFF;
 
@@ -556,6 +557,7 @@ int take_parked_status(int parent_pid, int *exit_code_out) {
 
     if (slot == -1) return 0;
 
+    if (child_pid_out) *child_pid_out = exit_slots[slot].child_pid;
     if (exit_code_out) *exit_code_out = exit_slots[slot].exit_code;
     exit_slots[slot].used = 0;
     return 1;
@@ -699,7 +701,26 @@ void reap_task(process_t *victim) {
 
     process_t *woken_parent = 0;
     for (process_t *p = task_list_head; p != 0; p = p->next) {
-        if (p->pid == parent_pid && p->state == TASK_WAITING && p->wait_reason == WAIT_CHILD) {
+        if (p->pid != parent_pid || p->state != TASK_WAITING) continue;
+
+        /*
+         * A parent blocked in wait() gets its status parked and is simply woken.
+         *
+         * It cannot be handed the value the way exec() is: wait() reports the
+         * status by writing into the caller's own memory, and this code runs
+         * with somebody else's directory in CR3. The syscall is restarted
+         * instead - see WAIT_PID - and collects from the table below with the
+         * right address space live.
+         */
+        if (p->wait_reason == WAIT_PID) {
+            park_exit_status(parent_pid, victim->pid, victim->exit_code);
+            p->state = TASK_RUNNING;
+            p->wait_reason = WAIT_NONE;
+            woken_parent = p;
+            break;
+        }
+
+        if (p->wait_reason == WAIT_CHILD) {
             p->state = TASK_RUNNING;
             p->wait_reason = WAIT_NONE;
 
@@ -723,6 +744,7 @@ void reap_task(process_t *victim) {
             break;
         }
     }
+
 
     /*
      * Nobody was waiting, so hold the status until somebody asks.

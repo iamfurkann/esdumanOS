@@ -162,8 +162,17 @@ void sys_fork(arch_regs_t *regs) {
  * order work. Checking after would block a parent whose child had already exited,
  * and nothing would ever wake it.
  *
- * @param regs Live syscall frame. On return eax holds the child's status, or
- *             E_CHILD when the caller has no children left to wait for.
+ * Shaped like POSIX rather than returning the status directly, which is how it
+ * shipped in v0.5.0. A shell forking two stages of a pipeline gets two statuses
+ * back and needs to know which is which - the pipeline's own status is the last
+ * stage's - and a status alone cannot say. The first real consumer is where an
+ * API of this kind gets to be wrong, so it was changed while there was one.
+ *
+ * @param regs Live syscall frame. ebx is an int* in user memory receiving the
+ *             status, or NULL when the caller only wants the pid; a non-zero ecx
+ *             asks not to block. On return eax holds the pid of the child that
+ *             reported, 0 when nothing is ready and the caller asked not to wait,
+ *             or E_CHILD when it has no children left at all.
  */
 void sys_wait(arch_regs_t *regs) {
     if (current_task == 0) {
@@ -171,9 +180,31 @@ void sys_wait(arch_regs_t *regs) {
         return;
     }
 
+    /* NULL is allowed and means the caller only wants to know which child. */
+    int *user_status = (int *)regs->ebx;
+    /* Non-zero ecx is WNOHANG: report that nothing is ready rather than block. A
+     * shell tracking background jobs has to be able to ask without committing to
+     * a wait - it has a prompt to print. */
+    int no_hang = (int)regs->ecx;
+    if (user_status && !validate_user_writable_pointer(user_status, sizeof(int))) {
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    int child_pid = 0;
     int status = 0;
-    if (take_parked_status(current_task->pid, &status)) {
-        regs->eax = (uint32_t)status;
+
+    if (take_parked_status(current_task->pid, &child_pid, &status)) {
+        if (user_status && copy_to_user(user_status, &status, sizeof(int)) != E_OK) {
+            /* The address was writable a few instructions ago, so this is close
+             * to unreachable - but the status has already left the table, and
+             * losing it silently would leave the caller waiting on a child that
+             * can never report again. */
+            klog(LOG_LEVEL_ERROR, "SYSCALL", "wait: status could not be written to user memory.");
+            regs->eax = E_FAULT;
+            return;
+        }
+        regs->eax = (uint32_t)child_pid;
         return;
     }
 
@@ -187,13 +218,27 @@ void sys_wait(arch_regs_t *regs) {
         return;
     }
 
+    /* Children exist, none has reported. Zero distinguishes that from E_CHILD,
+     * which says there is nothing left to wait for at all. */
+    if (no_hang) {
+        regs->eax = 0;
+        return;
+    }
+
     /*
-     * Block. reap_task() writes the status into this task's saved frame and marks
-     * it runnable again, the same delivery sys_exec() relies on - so nothing is
-     * published into eax here, because whatever were written would be overwritten
-     * by exactly that.
+     * Block, and re-run this syscall when a child reports.
+     *
+     * Restarting rather than being handed the answer, which is what exec() does,
+     * because the answer has to be written into the caller's own memory.
+     * reap_task() runs with whichever directory happens to be in CR3 and cannot
+     * reach it; it parks the status and wakes this task, and the loop above
+     * collects it on the second pass with the right address space live.
      */
-    sleep_current_task(regs, WAIT_CHILD);
+    if (!syscall_block_and_restart(regs, WAIT_PID)) {
+        /* Not a syscall frame from Ring 3, so it cannot be rewound. Nothing here
+         * can block safely; say so rather than sleeping forever. */
+        regs->eax = E_AGAIN;
+    }
 }
 
 /**

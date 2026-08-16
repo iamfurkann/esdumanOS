@@ -20,6 +20,15 @@ typedef struct {
     uint32_t tail;
     int read_refs;   // Number of read-end references
     int write_refs;  // Number of write-end references
+    /*
+     * Whether the broken-pipe condition has already been logged for this pipe.
+     *
+     * A writer whose reader has gone finds out one write at a time, and a
+     * program that does not check its write results - printk() does not - keeps
+     * going until its input runs out. One log line per attempt buries everything
+     * else in the buffer; this reports the pipe, not each rejected write.
+     */
+    uint8_t broken_reported;
 } pipe_t;
 
 /**

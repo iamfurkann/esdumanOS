@@ -269,6 +269,93 @@ void sys_set_priority(int pid, int priority) { syscall(SYSCALL_SET_PRIORITY, pid
  */
 void sys_exit(void) { syscall(SYSCALL_EXIT, 0, 0, 0); while(1); }
 /**
+ * @brief Exits with a status the parent can collect.
+ * @param code Exit status, 0-255.
+ */
+void sys_exit_status(int code) { syscall(SYSCALL_EXIT, code, 0, 0); while(1); }
+/**
+ * @brief Duplicates this process.
+ * @return 0 in the child, the child's pid in the parent, negative on failure.
+ */
+int sys_fork(void) { return syscall(SYSCALL_FORK, 0, 0, 0); }
+/**
+ * @brief Waits for any child to finish.
+ * @param status Receives the child's exit status; may be NULL.
+ * @return The pid that reported, or E_CHILD when there are none left.
+ */
+int sys_wait(int *status) { return syscall(SYSCALL_WAIT, (int)status, 0, 0); }
+/**
+ * @brief Asks whether a child has finished, without blocking if none has.
+ * @param status Receives the child's exit status; may be NULL.
+ * @return The pid that reported, 0 when none is ready, E_CHILD when there are none.
+ */
+int sys_wait_nohang(int *status) { return syscall(SYSCALL_WAIT, (int)status, 1, 0); }
+
+/*
+ * Background jobs started with '&'.
+ *
+ * The shell has to remember them for two reasons. One is `jobs`, which has
+ * nothing to list otherwise. The other is that a finished child's exit status
+ * sits in a fixed table in the kernel until somebody collects it, and a shell
+ * that never collects would fill it and start losing the statuses of other
+ * people's children.
+ */
+#define MAX_JOBS 8
+static int job_pids[MAX_JOBS];
+static int job_count = 0;
+
+/**
+ * @brief Records a background job, if there is room to.
+ * @param pid Process id of the job.
+ */
+static void job_add(int pid) {
+    if (job_count < MAX_JOBS) {
+        job_pids[job_count++] = pid;
+    } else {
+        /* Said out loud rather than dropped. The job still runs and is still
+         * reaped by the sweep below - it just cannot be listed. */
+        printk("sh: too many background jobs to track\n");
+    }
+}
+
+/**
+ * @brief Removes a job from the table once it has been collected.
+ * @param pid Process id that reported.
+ */
+static void job_remove(int pid) {
+    for (int i = 0; i < job_count; i++) {
+        if (job_pids[i] == pid) {
+            for (int j = i; j < job_count - 1; j++) job_pids[j] = job_pids[j + 1];
+            job_count--;
+            return;
+        }
+    }
+}
+
+/**
+ * @brief Collects any background job that has finished, without waiting.
+ *
+ * Called before each prompt. Reporting the status here rather than the moment it
+ * arrives is deliberate: a job finishing in the middle of a line being typed
+ * would otherwise print over it.
+ */
+static void jobs_reap(void) {
+    for (;;) {
+        int status = 0;
+        int pid = sys_wait_nohang(&status);
+        if (pid <= 0) return;   /* 0: nothing ready. negative: no children. */
+
+        job_remove(pid);
+
+        char num[16];
+        printk("[done] pid ");
+        ft_itoa(pid, num);    printk(num);
+        printk(" status ");
+        ft_itoa(status, num); printk(num);
+        printk("\n");
+    }
+}
+/**
  * @brief Registers a signal handler.
  * @param sig_num Signal number.
  * @param handler Pointer to the handler function.
@@ -464,6 +551,8 @@ void show_help(void) {
     printk("    export [K] [V]    Set environment variable\n");
     printk("    meminfo           Display RAM information\n");
     printk("    dmesg             Show kernel log buffer\n");
+    printk("    jobs              List background jobs started with &\n");
+    printk("    wait              Block until every background job has finished\n");
     printk("    hexdump [addr]    Show memory dump at address\n");
     printk("    help              Show this help menu\n");
     printk("\n  Settings:\n");
@@ -504,16 +593,28 @@ int builtin_cat(char **args) {
         } else break; 
     }
 
-    if (args[file_args_start] == 0) {
-        printk("cat: Please specify a file to read.\n");
-        return 1;
-    }
+    /*
+     * No file named means read standard input, which is what makes this the
+     * consumer end of a pipeline.
+     *
+     * It used to be an error, and that left the shell with pipes and nothing
+     * able to read one: grep and head both open a file by name, and so did this.
+     * `a | b` could be parsed, forked and connected, and there was no b that
+     * would take it.
+     */
+    int use_stdin = (args[file_args_start] == 0);
 
-    for (int i = file_args_start; args[i] != 0; i++) {
-        int fd = sys_open(args[i]); 
-        if (fd < 0) { 
-            printk("cat: "); printk(args[i]); printk(": No such file or directory.\n"); 
-            continue; 
+    for (int i = file_args_start; use_stdin || args[i] != 0; i++) {
+        int fd;
+
+        if (use_stdin) {
+            fd = 0;
+        } else {
+            fd = sys_open(args[i]);
+            if (fd < 0) {
+                printk("cat: "); printk(args[i]); printk(": No such file or directory.\n");
+                continue;
+            }
         }
         
         char buf[256];          
@@ -584,6 +685,10 @@ int builtin_cat(char **args) {
         FLUSH_OUT(); 
         
         #undef FLUSH_OUT 
+
+        /* Never close descriptor 0: it belongs to whoever started this process,
+         * and a builtin closing it would leave the shell without input. */
+        if (use_stdin) break;
 
         sys_close(fd); 
     }
@@ -810,6 +915,50 @@ void execute_command(char **args) {
         sys_dmesg();
         last_exit_status = 0;
     }
+    else if (ft_strcmp(args[0], "wait") == 0) {
+        /*
+         * Block until every background job this shell started has reported.
+         *
+         * The loop ends on its own: sys_wait() returns E_CHILD once there is
+         * nothing left to wait for, which is a negative value and not a pid. A
+         * shell that tested for "no more jobs" by counting its own table instead
+         * would deadlock the first time a job it had lost track of was still
+         * running - the kernel's answer is the one that matters.
+         */
+        int status = 0;
+        int pid;
+        char num[16];
+
+        while ((pid = sys_wait(&status)) > 0) {
+            job_remove(pid);
+            printk("[done] pid ");
+            ft_itoa(pid, num);    printk(num);
+            printk(" status ");
+            ft_itoa(status, num); printk(num);
+            printk("\n");
+        }
+        last_exit_status = 0;
+    }
+    else if (ft_strcmp(args[0], "jobs") == 0) {
+        /*
+         * Only what this shell started with '&' and has not yet collected. It is
+         * not a process list: the kernel has no call that enumerates tasks, and
+         * a shell has no business reading one if it did.
+         */
+        if (job_count == 0) {
+            printk("sh: no background jobs\n");
+        } else {
+            char num[16];
+            for (int i = 0; i < job_count; i++) {
+                printk("[");
+                ft_itoa(i + 1, num); printk(num);
+                printk("] pid ");
+                ft_itoa(job_pids[i], num); printk(num);
+                printk("\n");
+            }
+        }
+        last_exit_status = 0;
+    }
     else if (ft_strcmp(args[0], "sleep") == 0) {
         /*
          * Seconds here, milliseconds at the syscall. The kernel takes the finer
@@ -956,6 +1105,7 @@ void run_with_redirect(char **args, char *redirect_file) {
 /** Built-in command names for tab completion */
 static const char *builtin_commands[] = {
     "cat", "cat_raw", "cd", "clear", "dmesg", "echo", "env", "exec",
+    "jobs", "wait",
     "exit", "export", "halt", "help", "hexdump", "kill", "layout",
     "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
     "rm", "sleep", "su", "write",
@@ -1208,6 +1358,14 @@ void main(void) {
     sys_register_signal(5, my_custom_handler);
 
     while (1) {
+        /*
+         * Collect finished background jobs here rather than the moment they
+         * report. A job ending in the middle of a line being typed would
+         * otherwise print over it, and the status has nowhere to go until there
+         * is a prompt to print it above.
+         */
+        jobs_reap();
+
         printk("\n");
         printk(current_username);
         printk("@esdumanOS ");
@@ -1253,6 +1411,7 @@ void main(void) {
                 int arg_count = 0; int in_word = 0; char *redirect_file = 0;
                 char *pipe_args[MAX_ARGS]; for (int i = 0; i < MAX_ARGS; i++) { pipe_args[i] = 0; }
                 int has_pipe = 0; int pipe_arg_count = 0;
+                int background = 0;
                 int too_many_args = 0;
 
                 for (int i = 0; current_cmd[i] != '\0'; i++) {
@@ -1270,6 +1429,18 @@ void main(void) {
                     last_exit_status = 1;
                     arg_count = 0;
                     args[0] = 0;
+                }
+
+                /*
+                 * A trailing '&' means "do not wait for this". Only recognised as
+                 * a token of its own and only at the end, which is the whole of
+                 * the syntax this shell supports - "a & b" as two commands is a
+                 * different feature and is not one of them.
+                 */
+                if (arg_count > 0 && ft_strcmp(args[arg_count - 1], "&") == 0) {
+                    args[arg_count - 1] = 0;
+                    arg_count--;
+                    background = 1;
                 }
 
                 for (int i = 0; i < arg_count; i++) {
@@ -1327,15 +1498,96 @@ void main(void) {
                     if (has_pipe) {
                         int pfd[2];
                         if (pipe(pfd) >= 0) {
-                            dup2(1, 10); dup2(0, 11);
-                            /* Redirection combined with a pipe is not supported:
-                             * the parser takes whichever it meets first, so the
-                             * other is passed through as a literal argument. */
-                            dup2(pfd[1], 1); execute_command(args); dup2(10, 1);
-                            sys_close(pfd[1]);
-                            dup2(pfd[0], 0); execute_command(pipe_args); dup2(11, 0);
+                            /*
+                             * Both stages run at once, each in its own process.
+                             *
+                             * They used to run one after the other in this shell:
+                             * the first stage was executed to completion with
+                             * stdout pointing at the pipe, and only then was the
+                             * second started to drain it. Nothing was reading
+                             * while the first stage wrote, so a first stage that
+                             * produced more than the 4 KB the pipe holds blocked
+                             * with no reader and never resumed - the shell along
+                             * with it. That is what fork() was added for.
+                             *
+                             * Redirection combined with a pipe is still not
+                             * supported: the parser takes whichever it meets
+                             * first, so the other is passed through as a literal
+                             * argument.
+                             */
+                            int left = sys_fork();
+                            if (left == 0) {
+                                dup2(pfd[1], 1);
+                                sys_close(pfd[0]);
+                                sys_close(pfd[1]);
+                                execute_command(args);
+                                sys_exit_status(last_exit_status);
+                            }
+
+                            int right = (left < 0) ? -1 : sys_fork();
+                            if (right == 0) {
+                                dup2(pfd[0], 0);
+                                sys_close(pfd[0]);
+                                sys_close(pfd[1]);
+                                execute_command(pipe_args);
+                                sys_exit_status(last_exit_status);
+                            }
+
+                            /*
+                             * The shell closes both ends before waiting, and this
+                             * is load-bearing rather than tidiness: the reader
+                             * sees end-of-file only when every write end is shut,
+                             * and the shell holds one. Leaving it open hangs the
+                             * second stage on a pipe nobody will ever write to.
+                             */
                             sys_close(pfd[0]);
+                            sys_close(pfd[1]);
+
+                            if (left < 0 || right < 0) {
+                                printk("sh: cannot fork for pipeline\n");
+                                last_exit_status = 1;
+                            }
+
+                            /*
+                             * Collect both, and report the last stage's status as
+                             * the pipeline's - which is why wait() has to say
+                             * which child it is talking about. They finish in
+                             * whatever order they finish.
+                             */
+                            int reaped = 0;
+                            while (reaped < 2) {
+                                int st = 0;
+                                int who = sys_wait(&st);
+                                if (who < 0) break;
+                                if (who == right) last_exit_status = st;
+                                reaped++;
+                            }
                         } else printk("Error: Failed to create pipe!\n");
+                    } else if (background) {
+                        /*
+                         * Run it in a child and carry on. The status is collected
+                         * later by jobs_reap(), so $? is not set here: the command
+                         * has not finished, and reporting a status for something
+                         * still running would be a lie the '&&' chain would then
+                         * act on.
+                         */
+                        int pid = sys_fork();
+                        if (pid == 0) {
+                            if (redirect_file) run_with_redirect(args, redirect_file);
+                            else execute_command(args);
+                            sys_exit_status(last_exit_status);
+                        } else if (pid < 0) {
+                            printk("sh: cannot fork\n");
+                            last_exit_status = 1;
+                        } else {
+                            job_add(pid);
+
+                            char num[16];
+                            printk("[bg] pid ");
+                            ft_itoa(pid, num); printk(num);
+                            printk("\n");
+                            last_exit_status = 0;
+                        }
                     } else {
                         if (redirect_file) run_with_redirect(args, redirect_file);
                         else execute_command(args);

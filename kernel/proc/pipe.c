@@ -29,6 +29,9 @@ pipe_t* create_pipe(void) {
             p->tail = 0;
             p->read_refs = 1;
             p->write_refs = 1;
+            /* Reset with the rest: the pool is reused, and a pipe inheriting a
+             * previous occupant's flag would never report its own break. */
+            p->broken_reported = 0;
             return p;
         }
     }
@@ -114,13 +117,30 @@ wakeup_tasks(WAIT_IPC);
  */
 int pipe_write(pipe_t *p, const uint8_t *buf, int size) {
     if (!p || !buf || size <= 0) return E_INVAL;
-    
-    if (p->tail - p->head >= PIPE_SIZE) {
-        if (p->read_refs <= 0) {
-            klog(LOG_LEVEL_WARN, "PIPE", "Broken pipe! Write attempted on pipe with no readers.");
-            return E_PIPE; // EPIPE
+
+    /*
+     * No readers means broken, whatever room is left in the buffer.
+     *
+     * This check used to sit inside the buffer-full branch, so a pipe whose
+     * reader had gone still accepted data as long as there was space for it -
+     * bytes written into something nobody would ever read, reported to the
+     * caller as a successful write. The condition was only noticed once the
+     * buffer filled, which is why it took a full 4 KB of output to surface.
+     *
+     * Unreachable until the shell ran pipeline stages concurrently: with the
+     * stages run one after the other, the reader was always started after the
+     * writer had already finished.
+     */
+    if (p->read_refs <= 0) {
+        if (!p->broken_reported) {
+            klog(LOG_LEVEL_WARN, "PIPE", "Broken pipe: writing to a pipe with no readers.");
+            p->broken_reported = 1;
         }
-        return E_AGAIN; // EAGAIN: Bloke ol, uykuya dal!
+        return E_PIPE;
+    }
+
+    if (p->tail - p->head >= PIPE_SIZE) {
+        return E_AGAIN; // Full, but a reader is still there: block and retry.
     }
     
     int bytes_written = 0;

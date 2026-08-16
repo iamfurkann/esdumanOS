@@ -174,6 +174,27 @@ int main() {
     run_static_test("apps/bin/head.c", "syscall(38,", "head.c -> Uses SYSCALL_CLOSE (38)", &fail_count);
     run_static_test("apps/bin/head.c", "syscall(1,", "head.c -> Uses SYSCALL_EXIT (1)", &fail_count);
 
+    // wc.c tests
+    run_static_test("apps/bin/wc.c", "syscall(42,", "wc.c -> Uses SYSCALL_GET_ARGS (42)", &fail_count);
+    run_static_test("apps/bin/wc.c", "syscall(40,", "wc.c -> Uses SYSCALL_OPEN (40)", &fail_count);
+    run_static_test("apps/bin/wc.c", "syscall(3,", "wc.c -> Uses SYSCALL_READ (3)", &fail_count);
+    run_static_test("apps/bin/wc.c", "syscall(4,", "wc.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/wc.c", "syscall(38,", "wc.c -> Uses SYSCALL_CLOSE (38)", &fail_count);
+    run_static_test("apps/bin/wc.c", "syscall(1,", "wc.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    /*
+     * Standard input, statically.
+     *
+     * Every tool here opened a file by name and nothing else, so a pipeline could
+     * be parsed, forked and connected with no program willing to sit at the far
+     * end of it. These three check that the descriptor-0 path still exists at all
+     * - a reader of this source can see the file path being handled and miss that
+     * the bare-argument case is gone.
+     */
+    run_static_test("apps/bin/grep.c", "grep_fd(0,", "grep.c -> Reads standard input when no file is named", &fail_count);
+    run_static_test("apps/bin/head.c", "head_fd(0)", "head.c -> Reads standard input when no file is named", &fail_count);
+    run_static_test("apps/bin/wc.c", "wc_fd(0)", "wc.c -> Reads standard input when no file is named", &fail_count);
+
     // date.c tests
     run_static_test("apps/bin/date.c", "syscall(4,", "date.c -> Uses SYSCALL_WRITE (4)", &fail_count);
     run_static_test("apps/bin/date.c", "syscall(1,", "date.c -> Uses SYSCALL_EXIT (1)", &fail_count);

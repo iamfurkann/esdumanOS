@@ -277,6 +277,50 @@ int validate_fd(int fd) {
 }
 
 /**
+ * @brief Function sys_time
+ *
+ * Fills an esd_time_t with the current wall-clock time. Until now the clock was
+ * readable from Ring 0 only - it drew the status bar and nothing else - so
+ * date(1) printed a fixed string it carried in its own binary, the same one on
+ * every boot.
+ *
+ * The fields are handed over broken down rather than as a count of seconds since
+ * an epoch. The RTC reports them that way, nothing in this system agrees on an
+ * epoch to count from, and both consumers in sight - date(1) and the timestamps
+ * /var/log will want - need them broken down anyway.
+ *
+ * @param regs ebx is an esd_time_t* in user memory; a non-zero ecx asks for UTC
+ *             rather than local time. On return eax is E_OK, or a negative errno.
+ */
+void sys_time(arch_regs_t *regs) {
+    esd_time_t *user_out = (esd_time_t *)regs->ebx;
+    int want_utc = (int)regs->ecx;
+
+    if (!validate_user_writable_pointer(user_out, sizeof(esd_time_t))) {
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    /*
+     * Staged on the kernel stack and copied over in one go. esd_time_t is laid
+     * out with no padding holes precisely so this cannot hand user space a byte
+     * of whatever the stack was holding - see the comment on the struct.
+     */
+    esd_time_t now;
+
+    /*
+     * The choice is made here rather than left to the caller. Shifting a time
+     * between zones means the calendar carry, and that lives in the kernel with
+     * the leap-year rule beside it; a user program doing its own subtraction
+     * would be a second copy of the arithmetic this release exists to get right.
+     */
+    if (want_utc) rtc_read_utc(&now);
+    else rtc_read_local(&now);
+
+    regs->eax = (copy_to_user(user_out, &now, sizeof(now)) == E_OK) ? E_OK : E_FAULT;
+}
+
+/**
  * @brief Function hash_djb2_salted
  */
 uint32_t hash_djb2_salted(const char *str) {

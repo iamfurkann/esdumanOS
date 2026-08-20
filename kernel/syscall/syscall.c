@@ -64,6 +64,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_YIELD:        sys_yield(regs); break;
         case SYSCALL_GETUID:       sys_getuid(regs); break;
         case SYSCALL_GETPID:       sys_getpid(regs); break;
+        case SYSCALL_TIME:         sys_time(regs); break;
         case SYSCALL_SLEEP:        sys_sleep(regs); break;
         case SYSCALL_GET_ARGS:     sys_get_args(regs); break;
         case SYSCALL_STACK_DUMP:   sys_stack_dump(regs); break;

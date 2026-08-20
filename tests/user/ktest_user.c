@@ -1224,16 +1224,17 @@ void main(void) {
      * every read after it is refused.
      * ------------------------------------------------------------------ */
     static const char *etc_paths[] = {
-        "/etc/os-release", "/etc/hostname", "/etc/motd", "/etc/profile"
+        "/etc/os-release", "/etc/hostname", "/etc/motd", "/etc/profile", "/etc/timezone"
     };
     static const char *etc_msgs[] = {
         "[STRICT] [ETC] /etc/os-release is readable and not empty",
         "[STRICT] [ETC] /etc/hostname is readable and not empty",
         "[STRICT] [ETC] /etc/motd is readable and not empty",
-        "[STRICT] [ETC] /etc/profile is readable and not empty"
+        "[STRICT] [ETC] /etc/profile is readable and not empty",
+        "[STRICT] [ETC] /etc/timezone is readable and not empty"
     };
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         int efd = syscall(SYSCALL_OPEN, (int)etc_paths[i], 0, 0);
         int egot = -1;
 

@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.5.4--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.6.0--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.5.4-alpha
+**Version:** 0.6.0-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -166,6 +166,20 @@ same name. The other half of the release is that `/etc` finally holds something:
 hostname the prompt prints, the version the kernel was built with, a message of the day,
 and a `profile` the shell reads before its first prompt.
 
+v0.6.0 makes the clock something a program can read, and something a user can configure.
+The offset was compiled in, so a machine in the wrong place had to rebuild the kernel;
+`/etc/timezone` holds it now — a signed hour count rather than a zone name, because there
+is no timezone database here and there will not be one on a 2 MB disk. `date -u` prints
+UTC, with the shift done in the kernel so the calendar carry lives in one place. The clock
+was reachable from Ring 0 only —
+it drew the status bar and nothing else — so `date` printed a string compiled into its own
+binary, the same one on every boot. `TIME` (55) hands the broken-down fields to user space,
+and `date` uses them. Two defects went with it: the timezone offset was applied with a day
+carry that never looked at how long the month was, so 21:00 UTC on 31 August produced
+`32/08`; and the RTC's update-in-progress flag was checked once before seven registers
+were read one after another, which lets a reading straddle an update and, at midnight,
+produce a date that never existed.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -175,7 +189,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 16 user-space programs and 28 shell builtins
-- 25 kernel self-test modules and CI pipeline
+- 26 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -634,7 +648,8 @@ expanded, and each `~` gets storage of its own.
 **Startup files.** The shell reads three files under `/etc` before its first prompt, and
 carries on without any of them. `/etc/hostname` supplies the name in the prompt,
 `/etc/motd` is printed, and `/etc/profile` is applied — only `export KEY VALUE` lines,
-because it is a settings file rather than a script.
+because it is a settings file rather than a script. `/etc/timezone` is read by the kernel
+rather than the shell, and holds a signed hour offset rather than a zone name.
 
 ---
 
@@ -702,6 +717,7 @@ filtered run proves one module, not the tree.
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
 | `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()` |
+| `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall |
 
 The Ring 3 payload (`tests/user/ktest_user.c`) runs after these and reports its
 results back through a dedicated syscall. It is the only part of the suite that
@@ -840,7 +856,22 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | 52 | `SLEEP` | Block the caller for a number of **milliseconds** |
 | 53 | `FORK` | Duplicate the caller; returns 0 in the child and its pid in the parent |
 | 54 | `WAIT` | Collect a finished child's exit status; blocks if none has finished yet |
+| 55 | `TIME` | Fill an `esd_time_t` with the current wall-clock time |
 | 99 | `YIELD` | Voluntarily yield the CPU |
+
+`TIME` fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space the
+same way `esd_stat_t` is. The fields are broken down — year, month, day, hour, minute,
+second — rather than a count of seconds since an epoch: the RTC reports them that way and
+nothing in this system agrees on an epoch to count from. A non-zero second argument asks
+for UTC instead of local time, which is what `date -u` passes; the shift between them is
+done in the kernel so the calendar carry exists in one place.
+
+`tz_offset_hours` says how far ahead of UTC the other fields are. It comes from
+`/etc/timezone`, which holds a signed hour count rather than a zone name — there is no
+timezone database here, and `Europe/Istanbul` would be a name nothing could look up. The
+RTC itself is assumed to hold UTC, which is what QEMU presents by default; a machine whose
+CMOS holds local time wants an offset of 0. There is no way to *set* the clock, and no
+daylight saving.
 
 `EXEC` returns a negative errno when the program could not be started, and otherwise
 the child's exit status once it has finished — statuses are masked to 0-255, so the
@@ -1130,7 +1161,7 @@ Near-term priorities for the project, roughly in order:
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
-| P1 | A real clock — the status bar time is frozen at boot and `date` prints fixed text |
+| P2 | Setting the clock — the RTC is read and never written |
 | P2 | Copy-on-write for `fork`, which needs reference counting on physical frames |
 | P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments |
 | P3 | ANSI escape code support in terminal |

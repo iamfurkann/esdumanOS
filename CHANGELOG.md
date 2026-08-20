@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-alpha] - 2026-08-16
+
+The clock becomes something a program can read, and stops being wrong on the last day of
+a month.
+
+### Added
+
+- **`TIME` (55) reports the current wall-clock time.** The RTC was readable from Ring 0
+  only — it drew the status bar and nothing else — so `date` printed a string compiled
+  into its own binary, the same one on every boot in every year.
+
+  The syscall fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space
+  the way `esd_stat_t` is, and laid out with no padding holes so `copy_to_user()` cannot
+  hand over a byte of kernel stack. The fields are broken down rather than a count of
+  seconds since an epoch: the RTC reports them that way, nothing here agrees on an epoch
+  to count from, and both consumers in sight — `date` and the timestamps `/var/log` will
+  want — need them broken down anyway.
+- **`date` prints the actual date**, and **`date -u`** prints it in UTC. The shift between
+  the two is done by the kernel rather than in `date`: moving a time between zones means
+  the calendar carry, and a second copy of that arithmetic in user space is exactly what
+  this release exists to get right once.
+- **`/etc/timezone` sets the offset at boot.** It was compiled in, so a machine in the
+  wrong place had to rebuild the kernel to see the right time. The file holds a signed
+  hour count and says so in its own header — an offset and not a zone name, because
+  `Europe/Istanbul` is only meaningful with a timezone database to look it up in, and
+  tzdata is measured in megabytes against a 2 MB disk.
+
+  A missing or unparseable file leaves the compiled-in default in place rather than
+  failing the boot, and an offset outside −12..+14 is refused: that range is what real
+  zones occupy, and anything else is a misparse that would move the date by days. The
+  default still matters for exactly one second — the first status bar is drawn before the
+  filesystem is up.
+
+### Fixed
+
+- **The date was wrong on the last day of every month.** The timezone offset was applied
+  as `hour += 3` with a day carry that never looked at how long the month was, so 21:00
+  UTC on 31 August produced **32/08**, and 31 December produced 32/12 rather than 1
+  January. The carry uses real month lengths now, with the full Gregorian leap rule —
+  including the century cases, where 2100 is not a leap year and 2000 is.
+
+  The offset moved into a named constant, and the arithmetic handles negative offsets as
+  well as positive ones. Nothing uses a negative one today, which is exactly why it is
+  written: leaving half of it out is a trap for whoever changes the constant.
+- **The RTC could be read mid-update.** The update-in-progress flag was checked once and
+  then seven registers were read one after another, and the chip is free to begin an
+  update in the middle of that. At a second boundary the values straddle it; at a midnight
+  boundary they produce a date that never existed. The registers are read twice and
+  compared now — two readings that agree cannot straddle an update, because an update
+  always changes at least the seconds.
+- **The status bar changed its own label one second after boot.** `kernel_main()` drew it
+  with the version string and the per-second refresh drew it with the literal
+  `"esdumanOS"`, so the left half changed as soon as the clock first ticked. Both read one
+  definition now, and it is the name: the version belongs in `/etc/os-release`, where a
+  program can read it, rather than in a corner of the screen.
+- **The year is printed in full.** The formatter emitted `"20"` followed by the RTC's two
+  digits, so the century was a literal in the middle of a string.
+
+### Known issues
+
+The clock still has no way to be **set** — the RTC is read and never written, so a wrong
+hardware clock stays wrong. The offset is configuration now, but there is no daylight
+saving: this machine's zone has been permanent UTC+3 since 2016, so a fixed offset is
+correct here rather than a shortcut, and a zone that still changes twice a year would
+need a database this system has no room for.
+
+The RTC is assumed to hold UTC, which is what QEMU presents by default. A machine whose
+CMOS holds local time would need `/etc/timezone` set to 0 rather than its real offset.
+
+`stat` still reports no timestamps, because the on-disk format carries none — that is
+unchanged and documented where it always was.
+
 ## [0.5.4-alpha] - 2026-08-16
 
 The parser stops guessing, and `/etc` stops being an empty directory.

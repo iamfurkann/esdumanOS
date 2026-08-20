@@ -83,6 +83,26 @@ void spinlock_release(spinlock_t *lock) {
 
 
 /**
+ * @brief Announces a subsystem coming up: green on screen, a record in the log.
+ *
+ * The two renderings are deliberately different. The green "[OK] ..." list is
+ * boot UI - it is what tells someone watching that the machine is getting
+ * further - and dmesg wants the same events as records with a level and a
+ * module. Logging them through klog() would print them a second time in a
+ * second shape, so the record goes in through klog_record().
+ *
+ * @param what The subsystem, as it should read in both places.
+ */
+static void boot_ok(const char *what) {
+    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    printk("[OK] ");
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    printk("%s\n", what);
+
+    klog_record(LOG_LEVEL_INFO, "BOOT", what);
+}
+
+/**
  * @brief Applies the offset in /etc/timezone, if there is one.
  *
  * The offset was a build-time constant, so correcting it meant rebuilding the
@@ -329,9 +349,7 @@ static int init_memory_subsystem(void) {
     if (pmm_get_total_memory() == 0) {
         return -1;
     }
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    printk("Physical Memory Manager (PMM) Initialized\n");
+    boot_ok("Physical Memory Manager (PMM) Initialized");
 
     init_paging();
     serial_print("[MAIN-DBG] Returned from init_paging()!\n");
@@ -351,9 +369,7 @@ static int init_memory_subsystem(void) {
     init_double_fault_handler();
 
     serial_print("[MAIN-DBG] Checked CR0. Now printing OK...\n");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    printk("Virtual Memory (Paging) Activated\n");
+    boot_ok("Virtual Memory (Paging) Activated");
     
     serial_print("[MAIN-DBG] Printk finished. Now init_kheap...\n");
     
@@ -536,14 +552,12 @@ static int init_filesystem_and_vfs(void) {
 
     asm volatile("sti");
 
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    printk("Kernel Heap & Signal Handlers Registered\n");
+    boot_ok("Kernel Heap & Signal Handlers Registered");
 
     init_fs();
 
     if (get_vfs_id("bin", 0) == -1) {
-        printk("[VFS] Setting up Linux Root Directory Hierarchy (FHS)...\n");
+        klog(LOG_LEVEL_INFO, "VFS", "Setting up the root directory hierarchy.");
         fs_mkdir("bin", 0); fs_mkdir("dev", 0); fs_mkdir("etc", 0);
         fs_mkdir("home", 0); fs_mkdir("root", 0); fs_mkdir("tmp", 0); fs_mkdir("var", 0);
 
@@ -578,14 +592,14 @@ static int init_filesystem_and_vfs(void) {
                     fs_create_file("shadow", (uint8_t*)shadow_content, shadow_offset, etc_id);
                     char *setup_flag = "format=v1";
                     fs_create_file("setup_complete", (uint8_t*)setup_flag, ft_strlen(setup_flag), etc_id);
-                    printk("[TEST] Auto-created accounts (password: test)\n");
+                    klog(LOG_LEVEL_INFO, "TEST", "Accounts auto-created with the fixed test password.");
                 } else {
                     // First boot: run interactive password setup
                     first_boot_setup(etc_id);
                 }
             } else {
                 // Verify shadow format version
-                printk("[VFS] /etc/setup_complete found. Existing user accounts loaded.\n");
+                klog(LOG_LEVEL_INFO, "VFS", "setup_complete found; existing accounts loaded.");
             }
         }
 
@@ -602,7 +616,7 @@ static int init_filesystem_and_vfs(void) {
 
     int tmp_id = get_vfs_id("tmp", 0);
     if (tmp_id != -1) {
-        printk("[VFS] Cleaning /tmp temporary directory (Reboot Flush)...\n");
+        klog(LOG_LEVEL_INFO, "VFS", "Cleaning /tmp on boot.");
         for (int i = 0; i < 256; i++) { 
             if (dir_table[i].is_used == 1 && dir_table[i].parent_id == tmp_id) {
                 fs_delete(dir_table[i].filename, tmp_id);
@@ -612,7 +626,7 @@ static int init_filesystem_and_vfs(void) {
 
     vfs_file_t temp_elf;
     if (fs_open("init.elf", 0,&temp_elf) != E_OK) {
-        printk("[VFS] 'init.elf' not found in system, encrypted data in RAM is being written to disk...\n");
+        klog(LOG_LEVEL_INFO, "VFS", "init.elf absent; writing the embedded images to disk.");
         if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
             terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             printk("[VFS ERROR] System is in IMMUTABLE mode! 'init.elf' cannot be written to disk.\n");
@@ -709,14 +723,12 @@ static int init_filesystem_and_vfs(void) {
                     "+3\n";
                 fs_create_file("timezone", (const uint8_t *)timezone, ft_strlen(timezone), sys_etc_id);
             }
-            printk("[VFS] Encrypted '/bin' tools successfully written to disk!\n");
+            klog(LOG_LEVEL_INFO, "VFS", "/bin tools and /etc files written to disk.");
         }
     }
     load_timezone();
 
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    printk("ATA PIO Disk Driver Loaded & VFS Mounted\n");
+    boot_ok("ATA PIO Disk Driver Loaded & VFS Mounted");
 
     return 0;
 }
@@ -729,9 +741,8 @@ static int init_userspace(void) {
 
     init_multitasking();
     
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    printk("Preemptive Multitasking & Scheduler Active\n\n");
+    boot_ok("Preemptive Multitasking & Scheduler Active");
+    printk("\n");
 
     uint32_t k_stack_top = (((uint32_t)kernel_stack_ring0 + sizeof(kernel_stack_ring0)) & 0xFFFFFFF0) - 4;
     set_kernel_stack(k_stack_top);

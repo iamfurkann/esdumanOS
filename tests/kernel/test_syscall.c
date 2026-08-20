@@ -11,6 +11,35 @@
 #include "klog.h"
 #include "process.h"
 #include "errno.h"
+#include "fs.h"
+/**
+ * @brief Whether the log currently holds a piece of text.
+ *
+ * Reads in overlapping windows, because a marker that straddles a window
+ * boundary would otherwise be missed and the test would claim the log had
+ * dropped something it still held.
+ */
+static int klog_contains(const char *needle) {
+    char win[128];
+    int nlen = 0;
+    while (needle[nlen]) nlen++;
+    if (nlen <= 0 || nlen > (int)sizeof(win)) return 0;
+
+    int off = 0, got;
+    while ((got = klog_read(win, (int)sizeof(win), off)) > 0) {
+        for (int i = 0; i + nlen <= got; i++) {
+            int match = 1;
+            for (int j = 0; j < nlen; j++) {
+                if (win[i + j] != needle[j]) { match = 0; break; }
+            }
+            if (match) return 1;
+        }
+        if (got < nlen) break;
+        off += got - (nlen - 1);
+    }
+    return 0;
+}
+
 /**
  * @brief Tests the kernel's system call dispatching logic and argument boundary validation.
  *
@@ -183,5 +212,91 @@ void run_syscall_tests(void) {
                      "[STRICT] [SEC] dmesg() is still refused to a non-root caller");
 
         current_task->uid = saved_uid;
+    }
+
+    // =========================================================================
+    // 7. The log is a ring, and a record is one line
+    // =========================================================================
+    /*
+     * It was a fill-once buffer that stopped accepting at 8191 and dropped
+     * everything after, while calling itself a ring in both this source and the
+     * README. A log that discards the newest records is the opposite of a log,
+     * and nothing noticed because nothing had ever filled it on purpose.
+     */
+    klog(LOG_LEVEL_INFO, "KTEST", "ringmarker-oldest");
+    KTEST_ASSERT(klog_contains("ringmarker-oldest"),
+                 "[KLOG] a record just written is in the log");
+
+    /* Push a whole buffer through, which must evict the marker above. */
+    for (uint32_t i = 0; i < KLOG_BUF_SIZE + 256; i++) klog_write_char('.');
+
+    klog(LOG_LEVEL_INFO, "KTEST", "ringmarker-newest");
+
+    KTEST_ASSERT(klog_contains("ringmarker-newest"),
+                 "[STRICT] [KLOG] the ring keeps the newest record after wrapping");
+    KTEST_ASSERT(!klog_contains("ringmarker-oldest"),
+                 "[STRICT] [KLOG] and the oldest has been overwritten, not preserved");
+
+    /* Whatever is held is capped by the ring, however much was written. */
+    int total = 0, chunk2;
+    char scan[128];
+    while ((chunk2 = klog_read(scan, (int)sizeof(scan), total)) > 0) total += chunk2;
+    KTEST_ASSERT(total > 0 && total <= (int)KLOG_BUF_SIZE,
+                 "[STRICT] [KLOG] a full read never exceeds the size of the ring");
+
+    /*
+     * The value belongs on the same line as its message. klog_int() called
+     * klog(), which had already ended the line, so every value in the log sat
+     * orphaned on a line of its own beneath the text it belonged to.
+     */
+    klog_int(LOG_LEVEL_INFO, "KTEST", "valuemarker", 4243);
+    KTEST_ASSERT(klog_contains("valuemarker 4243"),
+                 "[STRICT] [KLOG] klog_int puts the value on the message's line");
+    KTEST_ASSERT(!klog_contains("valuemarker\n"),
+                 "[STRICT] [KLOG] and does not end the line before it");
+
+    klog_hex(LOG_LEVEL_INFO, "KTEST", "hexmarker", 0x2A);
+    KTEST_ASSERT(klog_contains("hexmarker 0x2A"),
+                 "[STRICT] [KLOG] klog_hex does the same");
+
+    /*
+     * klog_record() reaches the log and not the screen. Only half of that can be
+     * asserted from here - there is nothing to read the screen back from - so
+     * this checks the half that can be, and the boot milestones are what exercise
+     * the other half in practice.
+     */
+    klog_record(LOG_LEVEL_INFO, "KTEST", "recordmarker");
+    KTEST_ASSERT(klog_contains("recordmarker"),
+                 "[KLOG] klog_record reaches the log");
+
+    // =========================================================================
+    // 8. The log survives the machine
+    // =========================================================================
+    /*
+     * /var/log has existed since the FHS hierarchy was created and has been empty
+     * ever since. Written whole rather than appended to, because a file here is
+     * one AES-CBC blob authenticated over its entire plaintext.
+     */
+    KTEST_ASSERT(klog_persist() == E_OK,
+                 "[STRICT] [KLOG] the log is written out to /var/log/kern.log");
+
+    int var_idx = fs_get_entry_idx("var", 0);
+    int log_idx = (var_idx >= 0) ? fs_get_entry_idx("log", (uint8_t)var_idx) : -1;
+    KTEST_ASSERT(log_idx >= 0, "[KLOG] /var/log exists to write into");
+
+    if (log_idx >= 0) {
+        vfs_file_t kern_log;
+        int opened = fs_open("kern.log", (uint8_t)log_idx, &kern_log);
+        KTEST_ASSERT(opened == E_OK, "[STRICT] [KLOG] and the file it wrote can be opened");
+
+        if (opened == E_OK) {
+            uint32_t written = 0;
+            KTEST_ASSERT(fs_size(&kern_log, &written) == E_OK && written > 0,
+                         "[STRICT] [KLOG] with the log actually in it, not an empty file");
+        }
+
+        /* Twice in a row must replace rather than fail on an existing file. */
+        KTEST_ASSERT(klog_persist() == E_OK,
+                     "[STRICT] [KLOG] persisting again replaces the file rather than failing");
     }
 }

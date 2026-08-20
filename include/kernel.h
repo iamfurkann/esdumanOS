@@ -9,7 +9,7 @@
  */
 #define OS_VERSION_MAJOR    0
 #define OS_VERSION_MINOR    6
-#define OS_VERSION_PATCH    0
+#define OS_VERSION_PATCH    1
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
@@ -110,16 +110,11 @@ extern unsigned char init_elf[];
  */
 extern unsigned int init_elf_len;
 
-/**
- * @brief Writes a single character to the kernel log
- * @param c Character to write
+/*
+ * klog_write_char() and dump_klog() were declared here, in a header that pulls
+ * in twenty-two others. klog.h owns them - it is the header for the log, and
+ * this one was reaching past it.
  */
-void klog_write_char(char c);
-
-/**
- * @brief Dumps the kernel log to the console or serial output
- */
-void dump_klog(void);
 
 // --- Added by Refactor Script ---
 extern void init_timer(uint32_t freq);

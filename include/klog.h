@@ -55,18 +55,73 @@ void klog_int(int level, const char *module, const char *message, int val);
 void klog_hex(int level, const char *module, const char *message, uint32_t hex_val);
 
 /**
+ * @brief Bytes the log ring holds before it begins overwriting.
+ *
+ * Part of the contract now that it wraps: a reader cannot see more than this,
+ * however much has been written.
+ */
+#define KLOG_BUF_SIZE 8192
+
+/**
+ * @brief Appends one character to the log ring.
+ *
+ * The low-level writer everything else is built on. printk() used to call this
+ * for every character it printed, which is how the boot banner came to compete
+ * with real records for the space; klog() feeds it a composed line at a time now.
+ *
+ * @param c Character to record.
+ */
+void klog_write_char(char c);
+
+/**
+ * @brief Writes the whole log to the screen.
+ *
+ * The counterpart to klog_read(): this one goes to the terminal directly and so
+ * cannot be piped or redirected, which is why DMESG grew a buffer form.
+ */
+void dump_klog(void);
+
+/**
+ * @brief Records a line in the log without printing it.
+ *
+ * For an event that already has a rendering on screen - the boot milestones
+ * print a green "[OK] subsystem up" line of their own, and logging them through
+ * klog() would print them a second time in a different shape.
+ *
+ * @param level Severity.
+ * @param module Subsystem name.
+ * @param message The text.
+ */
+void klog_record(int level, const char *module, const char *message);
+
+/**
  * @brief Copies a slice of the kernel log into a caller-supplied buffer.
  *
  * The counterpart to dump_klog(), which writes to the screen and therefore
  * cannot be piped or redirected. Reading a slice at a time keeps the position in
  * the caller's loop, which is what lets each write block and restart on its own.
  *
+ * The window slides once the ring has wrapped: offset 0 is the oldest byte still
+ * held, not the oldest ever written. A reader looping until this returns 0
+ * terminates either way, because what is available is capped by the buffer.
+ *
  * @param dst    Kernel buffer receiving the bytes.
  * @param max    Capacity of dst.
- * @param offset Byte position in the log to start from.
- * @return Bytes copied; 0 once offset reaches the end of the log.
+ * @param offset Byte position within what is currently held.
+ * @return Bytes copied; 0 once offset reaches the end.
  */
 int klog_read(char *dst, int max, int offset);
+
+/**
+ * @brief Writes the log out to /var/log/kern.log, replacing it.
+ *
+ * Called at checkpoints - sync, halt, reboot - rather than per record, because
+ * the on-disk format cannot append: a file is one AES-CBC blob authenticated
+ * over its whole plaintext, so adding a line means rewriting all of it.
+ *
+ * @return E_OK, or a negative errno. A caller should not treat failure as fatal.
+ */
+int klog_persist(void);
 
 /**
  * @brief Handles critical kernel failures.

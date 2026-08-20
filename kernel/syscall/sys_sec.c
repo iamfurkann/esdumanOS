@@ -196,6 +196,9 @@ void sys_panic(arch_regs_t *regs) {
  * prevent.
  */
 void sys_sync(arch_regs_t *regs) {
+    /* Before the flush, so the sectors this writes go out with everything else.
+     * The log lived in RAM and went with the machine until now. */
+    klog_persist();
     bcache_flush();
     regs->eax = E_OK;
 }
@@ -209,8 +212,9 @@ void sys_reboot(arch_regs_t *regs) {
         regs->eax = E_PERM; 
         return; 
     }
-    bcache_flush(); 
-    
+    klog_persist();
+    bcache_flush();
+
     outb(0x64, 0xFE);
     regs->eax = 0;
 }
@@ -224,8 +228,9 @@ void sys_halt(arch_regs_t *regs) {
         regs->eax = E_PERM; 
         return; 
     }
-    bcache_flush(); 
-    
+    klog_persist();
+    bcache_flush();
+
     printk("System halted safely.\n"); 
     asm volatile("cli; hlt");
     regs->eax = 0;

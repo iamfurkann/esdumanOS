@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1-alpha] - 2026-08-16
+
+The log becomes a log: a record of events that wraps, rather than a transcript of the
+screen that fills up and stops. And it survives the machine.
+
+### Fixed
+
+- **The log was not a ring buffer**, despite this source and the README both calling it
+  one. It filled once to 8 KB and then silently dropped every record after — so `dmesg`
+  showed the oldest part of the boot and nothing that had happened since. A log that
+  discards the newest records is the opposite of a log. Nothing had noticed because
+  nothing had ever filled it on purpose.
+- **`printk()` fed every character it printed into that buffer**, so the boot banner, the
+  ASCII art and the first-boot password prompts competed for the space with actual
+  records — and were what filled it. A log is a record of events, not a transcript of the
+  screen. `printk()` no longer feeds it; `klog()` composes a line and records that.
+
+  The boot milestones still print their green `[OK]` list, which is boot UI, *and* appear
+  in `dmesg` as records with a level and a module. That needs an entry point that records
+  without printing, which is exactly what the split between the two implies.
+- **`klog_int()` and `klog_hex()` put their value on the line after the message.** Both
+  called `klog()`, which had already ended the line, so every value in the log sat
+  orphaned beneath the text it belonged to. The value is a tail on the same line now.
+- **A log message containing a `%` was read as a format string.** `klog()` passed the
+  message to `printk()` as the format, which is a way to print whatever happened to be
+  next on the stack.
+
+### Added
+
+- **`/var/log/kern.log`.** The directory has existed since the FHS hierarchy was created
+  and has been empty ever since; the log lived in RAM and went with the machine. It is
+  written at `sync`, `halt` and `reboot` — before the block cache is flushed, so the
+  sectors go out with everything else.
+
+  Written whole rather than appended to, because the format cannot append: a file is one
+  AES-CBC blob authenticated over its entire plaintext, so adding a line means rewriting
+  all of it. That is also why it is written at checkpoints rather than per record. The
+  ring is snapshotted into a contiguous buffer first — it is not contiguous once it has
+  wrapped, and the snapshot keeps the records this write itself produces from chasing
+  their own tail into the file.
+
+  Failure is reported and not fatal. A machine that will not halt because it could not
+  save its log would be a worse bargain than a lost log — but it is *reported*: the errno
+  used to be returned to three callers that all dropped it, so a checkpoint that could not
+  write left the file simply absent with nothing to say why.
+- **`sync` is a shell command.** `SYSCALL_SYNC` has existed since v0.4.x and nothing in
+  user space had ever called it — it sat in the syscall table and in the README's
+  reference, reachable from nowhere. That did not matter while it only flushed the block
+  cache. It does now that it is also when the log is written, because the other two
+  moments that write it are `halt` and `reboot`, and neither leaves a session to look at
+  the result in.
+
+### Changed
+
+- `klog_write_char()` and `dump_klog()` are declared in `klog.h` rather than `kernel.h`,
+  which pulls in twenty-two other headers. `KLOG_BUF_SIZE` joins them: the ring's size is
+  part of its contract now that a reader cannot see past it.
+
+### Known issues
+
+`meminfo`, `hexdump`, `stack` and `/bin/free` still print from inside the kernel and
+cannot be piped or redirected. They are root-only diagnostics and each needs a formatter
+of its own.
+
 ## [0.6.0-alpha] - 2026-08-16
 
 The clock becomes something a program can read, and stops being wrong on the last day of

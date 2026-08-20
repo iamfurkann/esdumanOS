@@ -524,7 +524,20 @@ void sys_meminfo(arch_regs_t *regs) {
         regs->eax = E_PERM; 
         return; 
     }
-    printk("RAM: Total %d MB | Free %d MB\n", pmm_get_total_memory() / (1024 * 1024), pmm_get_free_memory() / (1024 * 1024));
+    /*
+     * "Free" stopped being a complete answer when fork() started sharing pages
+     * instead of duplicating them: almost nothing is spent at the fork itself,
+     * and how much of the memory in use is held by more than one address space
+     * is not visible from any other figure here.
+     *
+     * Reported in kilobytes because megabytes would round most of it away - a
+     * shell and a forked child share a few dozen pages, not a few dozen
+     * megabytes.
+     */
+    printk("RAM: Total %d MB | Free %d MB | Shared %d KB\n",
+           pmm_get_total_memory() / (1024 * 1024),
+           pmm_get_free_memory() / (1024 * 1024),
+           (pmm_get_shared_frames() * PAGE_SIZE) / 1024);
     regs->eax = 0;
 }
 

@@ -253,9 +253,18 @@ int printk(const char *format, ...) {
 
     if (!kernel_panic_mode) mutex_lock(&vga_mutex, 0);
 
+    /*
+     * The screen and the serial port, and no longer the log.
+     *
+     * Every character printed used to be fed to klog_write_char() as well, so
+     * the 8 KB log held the boot banner, the ASCII art and the first-boot
+     * password prompts alongside the records that mattered - and, because the
+     * buffer did not wrap, filled with them and then dropped everything after.
+     * A log is a record of events rather than a transcript of the screen; klog()
+     * records its own lines now.
+     */
     for (int i = 0; i < len; i++) {
-        klog_write_char(print_buffer[i]); // Dmesg Logging (can be enabled if needed)
-        terminal_putchar(print_buffer[i]); 
+        terminal_putchar(print_buffer[i]);
         serial_write_char(print_buffer[i]);
     }
 

@@ -168,6 +168,8 @@ void run_fork_tests(void);
 void run_crypto_tests(void);
 void run_entropy_tests(void);
 void run_bcache_tests(void);
+/** @brief Wall-clock time: calendar arithmetic and the TIME syscall. */
+void run_time_tests(void);
 void run_elf_tests(void);
 
 #endif // KTEST_H

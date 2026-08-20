@@ -107,6 +107,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_crypto.c \
 			tests/kernel/test_entropy.c \
 			tests/kernel/test_bcache.c \
+			tests/kernel/test_time.c \
 			src/resources/ktest_user_elf_data.c \
 			src/resources/ktest_crash_elf_data.c \
 			src/resources/ktest_signal_elf_data.c

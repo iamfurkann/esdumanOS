@@ -127,6 +127,8 @@
 #define SYSCALL_FORK            53
 /** @brief Wait for a child to finish; returns its exit status */
 #define SYSCALL_WAIT            54
+/** @brief Fill an esd_time_t with the current time; non-zero ecx asks for UTC */
+#define SYSCALL_TIME            55
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

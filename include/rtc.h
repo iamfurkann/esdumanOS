@@ -2,6 +2,7 @@
 # define RTC_H
 
 #include "types.h"
+#include "esdtime.h"
 
 /**
  * @brief PIT interrupt frequency, in hertz.
@@ -31,6 +32,53 @@ void print_time(void);
  * @param buf The character buffer where the time string will be stored.
  */
 void get_time_string(char *buf);
+
+/**
+ * @brief Reads the current UTC time from the RTC.
+ *
+ * The one place the chip is touched. Race-free: the registers are read twice and
+ * compared, because the update flag can only be checked before the reads and the
+ * RTC is free to begin an update in the middle of them.
+ *
+ * @param out Receives the time unadjusted, with tz_offset_hours zero.
+ */
+void rtc_read_utc(esd_time_t *out);
+
+/**
+ * @brief Reads the current time and shifts it to local.
+ *
+ * @param out Receives the time, adjusted by the configured offset.
+ */
+void rtc_read_local(esd_time_t *out);
+
+/**
+ * @brief Sets the offset local time is reported at.
+ *
+ * Read from /etc/timezone at boot. It was a build-time constant, so the only way
+ * to correct it was to rebuild the kernel.
+ *
+ * @param hours Hours ahead of UTC; refused unless -12..14.
+ * @return E_OK when accepted, E_INVAL otherwise.
+ */
+int rtc_set_tz_offset(int hours);
+
+/**
+ * @brief The offset local time is currently reported at.
+ */
+int rtc_get_tz_offset(void);
+
+/**
+ * @brief Shifts a time by a whole number of hours, carrying the calendar.
+ *
+ * Exposed because this is where the defect was, not in the hardware read: the
+ * offset was applied with a day carry that never looked at the length of the
+ * month, so 21:00 UTC on 31 August produced 32/08. A test can drive this with
+ * any date; it cannot make the RTC report one.
+ *
+ * @param t Time to shift, in place. Its tz_offset_hours is updated.
+ * @param offset_hours Hours to add; may be negative.
+ */
+void rtc_apply_timezone(esd_time_t *t, int offset_hours);
 
 /**
  * @brief Retrieves the current seconds from the RTC.

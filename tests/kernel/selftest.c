@@ -71,6 +71,7 @@ static const ktest_module_t kernel_modules[] = {
     { "crypto",      run_crypto_tests },
     { "entropy",     run_entropy_tests },
     { "bcache",      run_bcache_tests },
+    { "time",        run_time_tests },
     { 0, 0 }
 };
 

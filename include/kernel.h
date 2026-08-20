@@ -8,8 +8,8 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    0
-#define OS_VERSION_MINOR    5
-#define OS_VERSION_PATCH    4
+#define OS_VERSION_MINOR    6
+#define OS_VERSION_PATCH    0
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
@@ -39,6 +39,17 @@
  * what /etc/os-release is written from, so the file and the banner cannot drift.
  */
 #define OS_VERSION_PLAIN STRINGIFY(OS_VERSION_MAJOR) "." STRINGIFY(OS_VERSION_MINOR) "." STRINGIFY(OS_VERSION_PATCH) OS_VERSION_PRE
+
+/**
+ * @brief The label on the left of the status bar.
+ *
+ * One definition because there are two callers - the boot-time draw and the
+ * per-second refresh - and they used to disagree: the first passed the version
+ * string and the second a literal "esdumanOS", so the label changed as soon as
+ * the clock first ticked and stayed changed. The name is what belongs there; the
+ * version is in /etc/os-release, where a program can read it.
+ */
+#define OS_STATUS_LABEL "esdumanOS"
 
 #include "types.h"
 #include "tty.h"

@@ -42,6 +42,8 @@ void sys_getuid(arch_regs_t *regs);
 void sys_getpid(arch_regs_t *regs);
 /** @brief Syscall handler for blocking the caller for a number of milliseconds */
 void sys_sleep(arch_regs_t *regs);
+/** @brief Syscall handler for reading the current wall-clock time */
+void sys_time(arch_regs_t *regs);
 /** @brief Syscall handler for getting command line arguments */
 void sys_get_args(arch_regs_t *regs);
 /** @brief Syscall handler for dumping the task's stack */

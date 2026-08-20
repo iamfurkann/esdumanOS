@@ -83,6 +83,74 @@ void spinlock_release(spinlock_t *lock) {
 
 
 /**
+ * @brief Applies the offset in /etc/timezone, if there is one.
+ *
+ * The offset was a build-time constant, so correcting it meant rebuilding the
+ * kernel. It still has a compiled-in default - the first status bar is drawn
+ * long before the filesystem is up, and something has to be right for that one
+ * second - but from here on the file decides.
+ *
+ * A missing or unparseable file leaves the default in place rather than failing
+ * the boot. A clock three hours out is a nuisance; a kernel that will not start
+ * because a text file has a typo in it is worse.
+ *
+ * The format is a signed hour count, not a zone name. See the file's own header
+ * for why.
+ */
+static void load_timezone(void) {
+    vfs_file_t f;
+
+    /* fs_get_entry_idx() rather than get_vfs_id(), which is defined further down
+     * this file and has no declaration to be called through from up here. */
+    int etc_id = fs_get_entry_idx("etc", 0);
+    if (etc_id < 0) return;
+    if (fs_open("timezone", (uint8_t)etc_id, &f) != E_OK) return;
+
+    uint8_t raw[64];
+    int got = fs_read(&f, raw, sizeof(raw) - 1);
+    if (got <= 0) return;
+    raw[got] = '\0';
+
+    /* First line that is not blank and does not begin with '#'. */
+    int i = 0;
+    while (i < got) {
+        while (i < got && (raw[i] == ' ' || raw[i] == '\t')) i++;
+
+        if (raw[i] == '#') {
+            while (i < got && raw[i] != '\n') i++;
+            i++;
+            continue;
+        }
+        if (raw[i] == '\n' || raw[i] == '\r') { i++; continue; }
+        break;
+    }
+    if (i >= got) return;
+
+    int sign = 1;
+    if (raw[i] == '+') i++;
+    else if (raw[i] == '-') { sign = -1; i++; }
+
+    if (i >= got || raw[i] < '0' || raw[i] > '9') {
+        klog(LOG_LEVEL_WARN, "TIME", "/etc/timezone holds no number; keeping the built-in offset.");
+        return;
+    }
+
+    int value = 0;
+    while (i < got && raw[i] >= '0' && raw[i] <= '9') {
+        value = value * 10 + (raw[i] - '0');
+        if (value > 99) break;   /* out of range whatever follows */
+        i++;
+    }
+
+    if (rtc_set_tz_offset(sign * value) != E_OK) {
+        klog_int(LOG_LEVEL_WARN, "TIME", "/etc/timezone is out of range; keeping the built-in offset. Read", sign * value);
+        return;
+    }
+
+    klog_int(LOG_LEVEL_INFO, "TIME", "Timezone offset loaded from /etc/timezone", sign * value);
+}
+
+/**
  * @brief get_vfs_id
  * @param name
  * @param parent_id
@@ -236,7 +304,7 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
     // --- OPERATING SYSTEM INITIALIZATION ---
     char time_buffer[20];
     get_time_string(time_buffer);
-    draw_status_bar(OS_VERSION_STR, time_buffer);
+    draw_status_bar(OS_STATUS_LABEL, time_buffer);
 
     terminal_setcolor(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     printk("                 __                                       _____   ____       \n");
@@ -622,10 +690,30 @@ static int init_filesystem_and_vfs(void) {
                     "export SHELL /bin/sh\n"
                     "export TERM vga\n";
                 fs_create_file("profile", (const uint8_t *)profile, ft_strlen(profile), sys_etc_id);
+
+                /*
+                 * An offset, not a zone name, and the file says so.
+                 *
+                 * /etc/timezone on Linux holds something like "Europe/Istanbul",
+                 * which is only meaningful with a timezone database to look it
+                 * up in. There is none here and there will not be one - tzdata
+                 * is measured in megabytes and the whole disk is two. Writing a
+                 * name we could not honour would be worse than writing the
+                 * number we actually apply.
+                 */
+                const char *timezone =
+                    "# Hours this machine is ahead of UTC, applied to the RTC.\n"
+                    "# An offset and not a zone name: there is no timezone database\n"
+                    "# here, so 'Europe/Istanbul' would be a name nothing could read.\n"
+                    "# Range -12 to +14. '#' begins a comment.\n"
+                    "+3\n";
+                fs_create_file("timezone", (const uint8_t *)timezone, ft_strlen(timezone), sys_etc_id);
             }
             printk("[VFS] Encrypted '/bin' tools successfully written to disk!\n");
         }
     }
+    load_timezone();
+
     terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); printk("[OK] ");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     printk("ATA PIO Disk Driver Loaded & VFS Mounted\n");

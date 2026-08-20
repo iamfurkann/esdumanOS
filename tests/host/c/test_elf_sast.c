@@ -198,6 +198,13 @@ int main() {
     // date.c tests
     run_static_test("apps/bin/date.c", "syscall(4,", "date.c -> Uses SYSCALL_WRITE (4)", &fail_count);
     run_static_test("apps/bin/date.c", "syscall(1,", "date.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+    /*
+     * The clock, not a string it carries. date(1) printed the same fixed line on
+     * every boot until the TIME syscall existed, and a regression to that would
+     * still print something plausible - this is the check that would notice.
+     */
+    run_static_test("apps/bin/date.c", "syscall(55,", "date.c -> Uses SYSCALL_TIME (55) rather than a fixed string", &fail_count);
+    run_static_test("apps/bin/date.c", "syscall(42,", "date.c -> Uses SYSCALL_GET_ARGS (42) to read -u", &fail_count);
 
     // sh.c tests
     run_static_test("apps/bin/sh.c", "syscall(5,", "sh.c -> Uses SYSCALL_EXEC (5) for external apps", &fail_count);

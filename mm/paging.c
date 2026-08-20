@@ -246,40 +246,53 @@ static uint32_t count_user_pages(void) {
 }
 
 /**
- * @brief Copies every present user page of the running address space into a clone.
+ * @brief Gives a cloned address space the caller's user pages, shared until written.
  *
  * clone_page_directory() produces a directory that shares the kernel half and has
- * nothing at all below it. This is the other half of fork(): the child needs the
- * parent's user pages, and it needs its own copies of them.
+ * nothing at all below it. This is the other half of fork(): the child needs to
+ * see the parent's user pages, and neither of them may see the other's writes.
  *
- * **Full copies, not copy-on-write.** cleanup_process_memory() releases every user
- * frame it finds unconditionally, so a frame shared between two address spaces
- * would be freed twice - the second free handing a live page back to the
- * allocator. COW needs reference counting on the frame, which is a change to the
- * teardown path and a piece of work in its own right.
+ * **Shared, not copied.** Every page used to be duplicated outright, which fork()
+ * paid for in full - and the overwhelmingly common thing to do next is exec(),
+ * which throws the whole duplicate away. What made copying necessary was the
+ * teardown path: cleanup_process_memory() released every user frame it found
+ * unconditionally, so a frame in two address spaces would be freed twice, the
+ * second free handing a live page back to the allocator. Reference counting in
+ * the physical allocator removed that obstacle, and both sides can now hold the
+ * same frame and let go of it independently.
  *
- * Two passes, because no single directory can see both sides of the copy:
+ * What replaces the copy is a promise to make one later. A frame that was
+ * writable is installed read-only on both sides with PAGE_COW set, and the first
+ * write from either of them faults into cow_handle_fault(), which hands the
+ * writer a private page. A frame that was already read-only is shared as it is:
+ * writing to a program's text is an access violation in the child for exactly the
+ * reason it is in the parent, and marking it copy-on-write would quietly turn
+ * that into a copy.
  *
- * 1. With the parent's directory still live, every source page is readable at its
- *    own virtual address. A fresh frame is allocated for each one and mapped into
- *    TEMP_MAP_VADDR - which lives in the shared kernel half, so it resolves in any
- *    address space - and the page is copied through that window. Where each copy
- *    belongs is recorded rather than installed.
- * 2. The clone is loaded into CR3 and the recorded pages are installed with
- *    map_page(), which builds the intermediate page tables, sets the U/S bits and
- *    rejects conflicts exactly as it does anywhere else. Hand-rolling that here
- *    would be a second implementation of it.
+ * Both directions matter. The parent gives up its write access too - if it kept a
+ * writable entry it would edit a page the child is still reading, which is the
+ * same bug as sharing outright, just harder to see.
  *
- * Running with a foreign directory in CR3 is safe for the same reason the window
- * is: kernel text, the kernel heap the stack is on, the page frame bitmap, the
- * klog buffer and the VGA mapping are all in the half that every directory shares.
+ * Two passes, because no single directory can see both sides:
+ *
+ * 1. With the parent's directory still live, its tables are walked, each frame
+ *    gains a reference and the entry is tightened. Where each one belongs is
+ *    recorded rather than installed.
+ * 2. The clone is loaded into CR3 and the records are installed with map_page(),
+ *    which builds the intermediate page tables, sets the U/S bits and rejects
+ *    conflicts exactly as it does anywhere else. Hand-rolling that here would be
+ *    a second implementation of it.
+ *
+ * Running with a foreign directory in CR3 is safe because kernel text, the kernel
+ * heap the stack is on, the page frame bitmap and reference table, the klog buffer
+ * and the VGA mapping are all in the half that every directory shares.
  *
  * @param dst_pd Physical address of the directory to populate, from
  *               clone_page_directory().
- * @return E_OK, or E_NOMEM if a frame, a page table or the record array could not
- *         be allocated. On failure any frame not yet installed is released here;
- *         the ones already installed belong to @p dst_pd, and the caller's
- *         cleanup_process_memory() reclaims them with the rest of it.
+ * @return E_OK, or E_NOMEM if the record array or a page table could not be
+ *         allocated. On failure the references taken for entries that were not
+ *         installed are dropped here; the installed ones belong to @p dst_pd, and
+ *         the caller's cleanup_process_memory() reclaims them with the rest of it.
  */
 int copy_user_space(uint32_t dst_pd) {
     if (dst_pd == 0) return E_INVAL;
@@ -297,8 +310,8 @@ int copy_user_space(uint32_t dst_pd) {
     uint32_t n = 0;
     int result = E_OK;
 
-    /* Pass 1: duplicate the contents, parent's directory still in CR3. */
-    for (uint32_t pde = 0; pde < 768 && result == E_OK; pde++) {
+    /* Pass 1: share them, parent's directory still in CR3. */
+    for (uint32_t pde = 0; pde < 768; pde++) {
         if ((pd[pde] & 1) == 0) continue;
 
         uint32_t *pt = (uint32_t *)(RECURSIVE_PT_VADDR + (pde * PAGE_SIZE));
@@ -311,57 +324,43 @@ int copy_user_space(uint32_t dst_pd) {
             if (n >= page_count) break;
 
             uint32_t vaddr = (pde << 22) | (pte << 12);
-            uint32_t frame = pmm_alloc_frame();
-            if (frame == 0xFFFFFFFF) {
-                klog(LOG_LEVEL_ERROR, "VMM", "fork: out of frames copying user space.");
-                result = E_NOMEM;
-                break;
-            }
+            uint32_t frame = pt[pte] & 0xFFFFF000;
+            uint32_t flags = pt[pte] & 0xFFF;
 
-            if (map_page(TEMP_MAP_VADDR, frame, PAGE_KERNEL_ONLY) != E_OK) {
-                pmm_free_frame(frame);
-                result = E_NOMEM;
-                break;
-            }
+            /* The child is about to hold this frame as well. Taken before the
+             * entry is touched, so there is no window in which the page is
+             * reachable from two directories with one owner recorded. */
+            pmm_ref_frame(frame);
 
             /*
-             * copy_from_user() rather than a plain copy, because the source is
-             * user memory and this is Ring 0 reading it.
+             * Only a writable page becomes copy-on-write, and when it does, both
+             * sides lose write access: the parent's entry is tightened here, and
+             * the child's copy of the flags carries the same change.
              *
-             * With SMAP enabled the processor forbids that outright: a supervisor
-             * read of a user-accessible page raises a page fault with the present
-             * bit set, which the handler reports as a kernel fault and turns into
-             * a panic. It cost a CI failure to find, because SMAP is only enabled
-             * in one of the three test configurations - the other two ran this
-             * happily.
-             *
-             * The window is what is needed here; the range check and fault fixup
-             * that come with it are a bonus. A PTE that reads as present but does
-             * not resolve becomes E_NOMEM and a failed fork rather than a panic in
-             * the middle of one.
+             * A read-only page is shared exactly as it stands. Marking it would
+             * be worse than pointless - PAGE_COW means "read-only because it is
+             * shared", and putting it on a page that is read-only on purpose
+             * would turn a genuine access violation into a silent private copy.
              */
-            if (copy_from_user((void *)TEMP_MAP_VADDR, (const void *)vaddr, PAGE_SIZE) != E_OK) {
-                unmap_page(TEMP_MAP_VADDR);
-                pmm_free_frame(frame);
-                klog(LOG_LEVEL_ERROR, "VMM", "fork: a mapped user page could not be read.");
-                result = E_FAULT;
-                break;
+            if (flags & 0x02) {
+                flags = (flags & ~0x02u) | PAGE_COW;
+                pt[pte] = frame | flags;
+                asm volatile("invlpg (%0)" ::"r"(vaddr) : "memory");
             }
-
-            unmap_page(TEMP_MAP_VADDR);
 
             pages[n].vaddr = vaddr;
             pages[n].frame = frame;
-            /* Carry the source permissions over verbatim. A page the parent could
-             * not write must not become writable in the child. */
-            pages[n].flags = pt[pte] & 0xFFF;
+            pages[n].flags = flags;
             n++;
         }
+        if (n >= page_count) break;
     }
 
-    /* Pass 2: install them, clone's directory in CR3. */
+    /* Pass 2: install them, clone's directory in CR3. Nothing in pass 1 can fail
+     * any more - there is no allocation left in it - so result still reads E_OK
+     * here and only this loop can change it. */
     uint32_t installed = 0;
-    if (result == E_OK && n > 0) {
+    if (n > 0) {
         uint32_t parent_pd;
         uint32_t eflags;
 
@@ -384,6 +383,16 @@ int copy_user_space(uint32_t dst_pd) {
         }
     }
 
+    /*
+     * Give back the references taken for entries that never made it into the
+     * clone. pmm_free_frame() drops one owner rather than releasing the page, so
+     * this is exactly the undo of the pmm_ref_frame() above - the parent still
+     * holds its own reference and keeps the frame.
+     *
+     * The entries the parent had tightened stay marked copy-on-write. That costs
+     * nothing: with the child gone the count is back to one, and the first write
+     * takes the branch in cow_handle_fault() that simply clears the bit.
+     */
     for (uint32_t i = installed; i < n; i++) {
         pmm_free_frame(pages[i].frame);
     }
@@ -391,7 +400,112 @@ int copy_user_space(uint32_t dst_pd) {
     kfree(pages);
 
     if (result == E_OK) {
-        klog_int(LOG_LEVEL_DEBUG, "VMM", "fork: user pages copied", (int)n);
+        klog_int(LOG_LEVEL_DEBUG, "VMM", "fork: user pages shared", (int)n);
     }
     return result;
+}
+
+/**
+ * @brief Resolves a write fault on a shared page by handing over a private copy.
+ *
+ * Runs in the faulting task's own address space - a page fault does not change
+ * CR3 - so the recursive mapping below reaches exactly the tables that produced
+ * the fault.
+ *
+ * @param faulting_addr Contents of CR2.
+ * @return 1 if the fault was resolved and the instruction should be retried,
+ *         0 if the page is not copy-on-write and this is somebody else's fault
+ *         to handle, -1 if the page is shared and could not be split.
+ */
+int cow_handle_fault(uint32_t faulting_addr) {
+    /* User space only. Nothing in the kernel half is ever marked shared, and the
+     * bounds are the same ones the ELF loader and the pointer validators use. */
+    if (faulting_addr < 0x400000 || faulting_addr >= 0xC0000000) return 0;
+
+    uint32_t pd_index = faulting_addr >> 22;
+    uint32_t pt_index = (faulting_addr >> 12) & 0x3FF;
+    uint32_t *pd_virt = (uint32_t *)RECURSIVE_PD_VADDR;
+
+    if ((pd_virt[pd_index] & 1) == 0) return 0;
+
+    uint32_t *pt_virt = (uint32_t *)(RECURSIVE_PT_VADDR + (pd_index * PAGE_SIZE));
+    uint32_t entry = pt_virt[pt_index];
+
+    if ((entry & 1) == 0) return 0;
+    if ((entry & PAGE_COW) == 0) return 0;
+
+    uint32_t page  = faulting_addr & 0xFFFFF000;
+    uint32_t frame = entry & 0xFFFFF000;
+
+    /* Writable again and no longer shared, whichever branch below runs. */
+    uint32_t flags = (entry & 0xFFFu & ~(uint32_t)PAGE_COW) | 0x02u;
+
+    /*
+     * Sole owner: nothing to copy away from, so the page simply becomes private
+     * again. This is the ordinary case rather than the exception - a fork()
+     * followed by exec(), a child whose parent has already exited, and every
+     * write after the first one all land here.
+     */
+    if (pmm_frame_refcount(frame) <= 1) {
+        pt_virt[pt_index] = frame | flags;
+        asm volatile("invlpg (%0)" ::"r"(page) : "memory");
+        return 1;
+    }
+
+    uint32_t fresh = pmm_alloc_frame();
+    if (fresh == 0xFFFFFFFF) {
+        klog_hex(LOG_LEVEL_ERROR, "VMM", "Out of memory splitting a shared page at", page);
+        return -1;
+    }
+
+    /*
+     * The copy goes through the kernel-only window rather than reading the user
+     * page directly, because with SMAP enabled a supervisor read of a
+     * user-accessible page faults outright - a page fault with the present bit
+     * set, which this same handler would report as a kernel fault and turn into
+     * a panic. copy_user_space() paid for that lesson with a CI failure, since
+     * SMAP is enabled in only one of the three test configurations.
+     *
+     * The bracket around it is the other half of the problem. This can be
+     * reached from *inside* another copy: a syscall writing into a user buffer
+     * that is still shared faults in kernel mode, and the copy below would
+     * otherwise clear the fixup label that interrupted copy is relying on. Its
+     * next fault would then find nowhere to go and panic.
+     *
+     * SMAP's AC flag needs no such care - it was pushed with EFLAGS when the
+     * fault was taken and the iret restores it.
+     */
+    uaccess_state_t saved;
+    uaccess_save_state(&saved);
+
+    int copied;
+    if (map_page(TEMP_MAP_VADDR, fresh, PAGE_KERNEL_ONLY) != E_OK) {
+        copied = E_NOMEM;
+    } else {
+        copied = copy_from_user((void *)TEMP_MAP_VADDR, (const void *)page, PAGE_SIZE);
+        unmap_page(TEMP_MAP_VADDR);
+    }
+
+    uaccess_restore_state(&saved);
+
+    if (copied != E_OK) {
+        pmm_free_frame(fresh);
+        klog_hex(LOG_LEVEL_ERROR, "VMM", "A shared page could not be read while splitting it at", page);
+        return -1;
+    }
+
+    /*
+     * Written straight into the entry rather than through map_page(), which
+     * refuses to replace a present entry pointing somewhere else - correctly, for
+     * every other caller. The directory entry was walked above, so there is no
+     * page table to build, and the alternative would be to unmap first and leave
+     * the address briefly unmapped for no gain.
+     */
+    pt_virt[pt_index] = fresh | flags;
+    asm volatile("invlpg (%0)" ::"r"(page) : "memory");
+
+    /* One owner fewer for the page left behind. */
+    pmm_free_frame(frame);
+
+    return 1;
 }

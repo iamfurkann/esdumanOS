@@ -43,6 +43,40 @@ void uaccess_note_fault(void) {
     uaccess_fault_occurred = 1;
 }
 
+/**
+ * @brief Saves and clears the fixup state of the copy currently in progress.
+ *
+ * See the header for why this exists: a copy-on-write fault taken *inside* a
+ * copy is resolved by running another copy, and the inner one's single exit
+ * clears both globals on its way out. Without this bracket the interrupted copy
+ * resumes with no fixup registered, and its next fault - the second page of a
+ * two-page buffer, say - reaches page_fault_handler() with nowhere to go and
+ * panics.
+ *
+ * @param out Receives the saved state.
+ */
+void uaccess_save_state(uaccess_state_t *out) {
+    if (!out) return;
+
+    out->fault_handler = current_fault_handler;
+    out->fault_occurred = uaccess_fault_occurred;
+
+    current_fault_handler = 0;
+    uaccess_fault_occurred = 0;
+}
+
+/**
+ * @brief Restores fixup state saved by uaccess_save_state().
+ *
+ * @param in State to reinstate.
+ */
+void uaccess_restore_state(const uaccess_state_t *in) {
+    if (!in) return;
+
+    uaccess_fault_occurred = in->fault_occurred;
+    current_fault_handler = in->fault_handler;
+}
+
 static int smap_enabled = 0;
 
 void uaccess_set_smap_enabled(int enabled) {

@@ -1212,6 +1212,59 @@ void main(void) {
     }
 
     /* ------------------------------------------------------------------
+     * 11c. The system files under /etc.
+     *
+     * /etc held the password database and nothing else, so every fact a tool
+     * needed about the system was compiled into it instead - the shell had the
+     * hostname in a string literal and the version was readable from Ring 0
+     * only. Checked from here rather than from a kernel module because the point
+     * is that an ordinary process can open and read them.
+     *
+     * Before lockdown, deliberately: the section below destroys the key and
+     * every read after it is refused.
+     * ------------------------------------------------------------------ */
+    static const char *etc_paths[] = {
+        "/etc/os-release", "/etc/hostname", "/etc/motd", "/etc/profile"
+    };
+    static const char *etc_msgs[] = {
+        "[STRICT] [ETC] /etc/os-release is readable and not empty",
+        "[STRICT] [ETC] /etc/hostname is readable and not empty",
+        "[STRICT] [ETC] /etc/motd is readable and not empty",
+        "[STRICT] [ETC] /etc/profile is readable and not empty"
+    };
+
+    for (int i = 0; i < 4; i++) {
+        int efd = syscall(SYSCALL_OPEN, (int)etc_paths[i], 0, 0);
+        int egot = -1;
+
+        if (efd >= 0) {
+            egot = syscall(SYSCALL_READ, efd, (int)scratch, (int)sizeof(scratch));
+            syscall(SYSCALL_CLOSE, efd, 0, 0);
+        }
+
+        KT_ASSERT(efd >= 0 && egot > 0, etc_msgs[i]);
+    }
+
+    /*
+     * os-release carries the version the kernel was built with rather than a
+     * string somebody has to remember to update, so the file and the banner
+     * cannot drift. "VERSION=" appearing in it is what proves it was generated.
+     */
+    int osr_fd = syscall(SYSCALL_OPEN, (int)"/etc/os-release", 0, 0);
+    if (osr_fd >= 0) {
+        int n = syscall(SYSCALL_READ, osr_fd, (int)scratch, (int)sizeof(scratch));
+        syscall(SYSCALL_CLOSE, osr_fd, 0, 0);
+
+        int found_version = 0;
+        for (int i = 0; i + 8 <= n; i++) {
+            if (scratch[i] == 'V' && scratch[i+1] == 'E' && scratch[i+2] == 'R' &&
+                scratch[i+3] == 'S' && scratch[i+4] == 'I' && scratch[i+5] == 'O' &&
+                scratch[i+6] == 'N' && scratch[i+7] == '=') { found_version = 1; break; }
+        }
+        KT_ASSERT(found_version, "[STRICT] [ETC] /etc/os-release carries a VERSION line");
+    }
+
+    /* ------------------------------------------------------------------
      * 12. LOCKDOWN.
      *
      * Deliberately the very last thing: it destroys the master key, and

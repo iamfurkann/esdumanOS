@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.6.1-alpha
+**Version:** 0.7.0-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -189,6 +189,22 @@ records. It wraps now, and holds records rather than a transcript of the screen.
 `/var/log` also stops being an empty directory — the log is written to `kern.log` at
 `sync`, `halt` and `reboot`.
 
+v0.7.0 stops `fork()` from copying. A child used to receive a private duplicate of every
+page its parent had mapped, made at the moment of the call — a 32-page user stack before
+anything else — and the overwhelmingly common next call is `exec()`, which discards all of
+it. The child now gets the parent's frames themselves, both sides give up write access,
+and the first write from either of them splits the page it touched. What made the copy
+necessary was the teardown path, which released every user frame it found unconditionally;
+the physical allocator counts owners now, so two address spaces can hold a page and let go
+of it independently. Three memory defects went with it, all of them latent: the kernel heap
+advanced its end pointer over a mapping that had failed, so the next block header was
+written into an unmapped hole; the ELF loader lost a frame on every failed `exec()`; and
+`kfree()` merged blocks that were neighbours in its list without checking they were
+neighbours in memory. Two paths would have broken silently under sharing and were found by
+reading rather than by testing — the writable-pointer validator rejects a page whose
+read/write bit is clear, which after a fork is every writable page on both sides, and the
+page fault handler examined the in-progress-copy fixup before it examined the page.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -198,7 +214,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 16 user-space programs and 28 shell builtins
-- 26 kernel self-test modules and CI pipeline
+- 27 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -224,9 +240,9 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **Physical Memory (PMM)** | Bitmap allocator, multiboot memory map detection, 128 MB addressable, next-fit optimization |
-| **Virtual Memory (Paging)** | Recursive page directory mapping, per-process address spaces, 4 KB page granularity |
-| **Kernel Heap** | First-fit allocator with block splitting, forward coalescing, magic-number corruption detection, double-free protection |
+| **Physical Memory (PMM)** | Bitmap allocator with per-frame reference counting, multiboot memory map detection, 128 MB addressable, next-fit optimization |
+| **Virtual Memory (Paging)** | Recursive page directory mapping, per-process address spaces, 4 KB page granularity, copy-on-write on `fork` |
+| **Kernel Heap** | First-fit allocator with block splitting, bidirectional coalescing with adjacency checks, magic-number corruption detection, double-free protection |
 
 ### Process Management
 
@@ -673,7 +689,7 @@ make test
 # Run parser fuzzing with 54 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 25 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 27 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -832,7 +848,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      23 kernel-mode test modules + framework
+|   |-- kernel/                      27 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (54 corpus files)
 |
@@ -888,10 +904,13 @@ two cannot be confused. It blocks the caller on `WAIT_CHILD` for the child's lif
 which is how it returns a status at all, and it predates `WAIT` rather than being
 replaced by it.
 
-`FORK` copies the caller's user pages eagerly, not copy-on-write, and carries over its
-descriptors, working directory, uid, signal handlers, priority and FPU state. It returns
-`E_AGAIN` when `MAX_TASKS` live tasks already exist and `E_NOMEM` when the address space
-could not be duplicated.
+`FORK` shares the caller's user pages copy-on-write rather than duplicating them: the
+child maps the parent's own frames, both sides give up write access to anything that was
+writable, and the first write from either splits that page. A page that was already
+read-only is shared as it stands, so writing to a program's text is still an access
+violation rather than a copy. Descriptors, working directory, uid, signal handlers,
+priority and FPU state are carried over. It returns `E_AGAIN` when `MAX_TASKS` live tasks
+already exist and `E_NOMEM` when the address space could not be built.
 
 `WAIT` returns a child's status, or `E_CHILD` when the caller has none left to wait for —
 an error rather than a block, so a parent that called it one time too many does not sleep
@@ -1126,10 +1145,14 @@ The following are known constraints of the current implementation. These are doc
   cannot be piped or redirected: `meminfo > mem.txt` creates an empty file. `ls` and
   `dmesg` had the same defect and were moved off it in v0.5.3 — these four are root-only
   diagnostics and each needs a formatter of its own, so they were left.
-- **Copies on fork are eager, not copy-on-write.** A child gets a private copy of
-  every page its parent had mapped, made at the moment of the call. Correct, and
-  more expensive than it needs to be — COW requires reference counting on physical
-  frames, which the teardown path does not have.
+- **FPU state is switched eagerly, and stays that way.** Every context switch saves
+  and restores the full 512-byte register file rather than parking it behind CR0.TS
+  and restoring it on first use. Lazy switching was on the roadmap as an
+  optimisation and has been dropped on purpose: it is the mechanism behind LazyFP
+  (CVE-2018-3665), which leaks FPU and SSE register contents across processes
+  speculatively, and every major operating system moved back to eager switching in
+  2018. One `fxsave` per switch across at most 16 tasks is the cheaper side of that
+  trade by a wide margin.
 - **No mmap() or brk().** User-space programs cannot dynamically allocate memory beyond their initial ELF segments and stack.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.
@@ -1171,8 +1194,7 @@ Near-term priorities for the project, roughly in order:
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
 | P2 | Setting the clock — the RTC is read and never written |
-| P2 | Copy-on-write for `fork`, which needs reference counting on physical frames |
-| P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments |
+| P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments, on the reference counting copy-on-write introduced |
 | P3 | ANSI escape code support in terminal |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |

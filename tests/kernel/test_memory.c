@@ -7,6 +7,7 @@
 #include "ktest.h"
 #include "types.h"
 #include "kheap.h"
+#include "pmm.h"
 /**
  * @brief Executes a comprehensive testing suite for the kernel memory allocator (KHeap).
  *
@@ -78,4 +79,67 @@ void run_memory_tests(void) {
     // Confirm that the newly allocated block satisfies the size requirement.
     KTEST_ASSERT(kmalloc_size(r_ptr_new) >= 1024, "Realloc: New size verified");
     kfree(r_ptr_new);
+
+    /*
+     * A growth that fails has to leave nothing behind.
+     *
+     * heap_grow() takes frames one at a time and maps each one, and until this
+     * release the result of the mapping was dropped: a failure advanced the heap
+     * end over an address with nothing behind it, and the block header was then
+     * written into the hole - a kernel page fault, surfacing at whatever
+     * allocated next rather than here.
+     *
+     * The mapping step cannot be made to fail on demand from out here; there is
+     * no injection point, and inventing one would be a larger change than the
+     * fix. What is measurable is the rest of the contract, and it is what a
+     * broken rollback breaks: a rejected allocation must cost no physical memory,
+     * and the heap must still work afterwards. A rollback that frees nothing
+     * fails the first, and one that leaves the heap end past the mapped region
+     * fails the second.
+     */
+    uint32_t frames_before = pmm_get_free_memory();
+    for (int i = 0; i < 4; i++) {
+        KTEST_ASSERT(kmalloc(1024 * 1024 * 1024 * 3U) == 0,
+                     "Failed Growth: a request beyond physical memory is rejected");
+    }
+    KTEST_ASSERT(pmm_get_free_memory() == frames_before,
+                 "[STRICT] Failed Growth: rejected allocations consume no physical memory");
+
+    void *after_fail = kmalloc(512);
+    KTEST_ASSERT(after_fail != 0, "[STRICT] Failed Growth: the heap still allocates afterwards");
+    if (after_fail) {
+        char *probe = (char *)after_fail;
+        for (int i = 0; i < 512; i++) probe[i] = 'C';
+        KTEST_ASSERT(probe[0] == 'C' && probe[511] == 'C',
+                     "[STRICT] Failed Growth: and the memory it returns is really mapped");
+        kfree(after_fail);
+    }
+
+    /*
+     * Grow and shrink repeatedly.
+     *
+     * The shrink path in kfree() is where the heap's one discontinuity comes
+     * from: a tail block whose remainder is too small to hold a header is dropped
+     * from the list, leaving a few dozen bytes between its predecessor and
+     * whatever is appended next. Both merge sites now check that two neighbours
+     * in the list are neighbours in memory before joining them; this drives the
+     * path that produces such a pair, and checks that the frames come back either
+     * way.
+     */
+    uint32_t cycle_before = pmm_get_free_memory();
+    int cycles_ok = 1;
+    for (int i = 0; i < 16; i++) {
+        void *big = kmalloc(8192);
+        if (!big) { cycles_ok = 0; break; }
+
+        char *fill = (char *)big;
+        for (int j = 0; j < 8192; j += 512) fill[j] = (char)i;
+        for (int j = 0; j < 8192; j += 512) {
+            if (fill[j] != (char)i) cycles_ok = 0;
+        }
+        kfree(big);
+    }
+    KTEST_ASSERT(cycles_ok == 1, "Grow/Shrink: every cycle allocated and read back intact");
+    KTEST_ASSERT(pmm_get_free_memory() == cycle_before,
+                 "[STRICT] Grow/Shrink: repeated growth and shrinking leaks no frames");
 }

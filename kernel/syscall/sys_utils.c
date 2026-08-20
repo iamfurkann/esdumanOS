@@ -14,6 +14,7 @@
 #include "errno.h"
 #include "kernel.h"
 #include "uaccess.h"
+#include "paging.h"
 /**
  * @brief Function print_hexdump
  */
@@ -216,7 +217,23 @@ static int validate_user_pointer_access(const void *ptr, size_t size, int requir
         if ((pt_virt[pt_index] & 0x05) != 0x05) {
             return 0;
         }
-        if (requires_write && !(pt_virt[pt_index] & 0x02)) {
+        /*
+         * A page that is read-only *because it is shared* counts as writable
+         * here. The write that follows faults, cow_handle_fault() hands the
+         * caller a private copy, and the instruction retries - the pointer was
+         * always valid and the copy always goes through.
+         *
+         * Rejecting it instead would break every syscall that writes into a user
+         * buffer for as long as a page stayed shared, which after a fork is every
+         * writable page either process owns: wait(), getcwd() and
+         * receive_message() would refuse valid pointers with E_FAULT, and the
+         * shell would break on the first command it ran. No kernel-side test
+         * could have caught that - they reach the copy helpers directly, never
+         * through this validator.
+         */
+        if (requires_write &&
+            !(pt_virt[pt_index] & 0x02) &&
+            !(pt_virt[pt_index] & PAGE_COW)) {
             return 0;
         }
     }

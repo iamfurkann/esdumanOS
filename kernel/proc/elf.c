@@ -139,9 +139,32 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
 
                 if (!is_mapped) {
                     uint32_t phys = pmm_alloc_frame();
-                    if (phys == 0xFFFFFFFF || map_page(page, phys, load_flags) != E_OK ||
-                        copy_to_user((void *)page, zero_page, sizeof(zero_page)) != E_OK) {
+                    if (phys == 0xFFFFFFFF) {
+                        printk("[ELF LOADER] Out of physical memory loading a segment!\n");
+                        goto cleanup_and_fail;
+                    }
+
+                    /*
+                     * Separated from the || chain these three used to share.
+                     *
+                     * A frame that is allocated and then fails to map belongs to
+                     * nobody. It is not in the directory, so the
+                     * cleanup_process_memory() on the failure path cannot find
+                     * it, and nothing hands it back either - one frame lost per
+                     * failed exec, permanently. The chain also collapsed three
+                     * different failures into one message that named only the
+                     * middle one.
+                     */
+                    if (map_page(page, phys, load_flags) != E_OK) {
+                        pmm_free_frame(phys);
                         printk("[ELF LOADER] Failed to map a user program page!\n");
+                        goto cleanup_and_fail;
+                    }
+
+                    /* Mapped, so the frame is the directory's now and the
+                     * teardown below reclaims it with the rest. */
+                    if (copy_to_user((void *)page, zero_page, sizeof(zero_page)) != E_OK) {
+                        printk("[ELF LOADER] Failed to clear a user program page!\n");
                         goto cleanup_and_fail;
                     }
                 } else if (pt_virt) {
@@ -239,13 +262,31 @@ load_success:
     {
         uint32_t page_addr = esp_addr - (j * 4096);
         uint32_t phys = pmm_alloc_frame();
-        if (phys == 0xFFFFFFFF || map_page(page_addr, phys, 7) != E_OK ||
-            copy_to_user((void *)page_addr, zero_page, sizeof(zero_page)) != E_OK) {
+        if (phys == 0xFFFFFFFF) {
+            printk("[ELF LOADER] Out of physical memory building the user stack!\n");
+            goto cleanup_and_fail;
+        }
+
+        /* Same split, same reason, as the segment loop above. */
+        if (map_page(page_addr, phys, 7) != E_OK) {
+            pmm_free_frame(phys);
+            printk("[ELF LOADER] Failed to map a user stack page!\n");
+            goto cleanup_and_fail;
+        }
+
+        if (copy_to_user((void *)page_addr, zero_page, sizeof(zero_page)) != E_OK) {
+            printk("[ELF LOADER] Failed to clear a user stack page!\n");
             goto cleanup_and_fail;
         }
     }
 
-    // Guard Page to catch stack overflows
+    /*
+     * Guard page to catch stack overflows. The result is deliberately not
+     * checked: this installs an entry with the present bit clear, and the only
+     * way it can fail is that the page table for the range could not be
+     * allocated - in which case the address is unmapped anyway, and an overflow
+     * faults there exactly as intended.
+     */
     uint32_t guard_page_addr = esp_addr - (33 * 4096);
     map_page(guard_page_addr, 0, 0); // 0 = Present Bit Cleared
 

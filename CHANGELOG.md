@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0-alpha] "Cleave" - 2026-08-20
+
+`fork()` stops copying. A child now gets the parent's pages themselves, both sides
+give up write access, and the first write from either of them splits the page it
+touched. The word cuts both ways on purpose: the pages cling together until
+somebody writes, and that write cleaves them apart.
+
+### Added
+
+- **Reference counting in the physical allocator.** A bit answered "is this frame in
+  use"; nothing could answer "by how many". One byte per frame — 32 KB at 128 MB of
+  RAM — now sits behind the bitmap, so two address spaces can hold the same page and
+  let go of it independently. `pmm_free_frame()` drops one owner and releases the
+  frame at the last; every existing caller kept working unchanged, which is why the
+  count lives there rather than beside it.
+
+  The table is counted into the memory the allocator marks as the kernel's. Anything
+  left out of that sum is memory the allocator considers free and will hand out, and
+  a reference table handed out is one that gets overwritten by whoever received it.
+
+- **Copy-on-write.** A fork used to duplicate every mapped page of the parent —
+  including a 32-page user stack — and the overwhelmingly common next call is
+  `exec()`, which throws all of it away. Sharing costs a page directory, the page
+  tables under it and the child's `process_t`; on the test payload that is the
+  difference between roughly 24 KB and roughly 170 KB per fork.
+
+  Only a page that was writable becomes copy-on-write. One that was already
+  read-only — a program's text — is shared exactly as it stands, because writing to
+  it is an access violation in the child for the same reason it is in the parent,
+  and marking it would have turned that into a silent private copy.
+
+- **`meminfo` reports what is shared.** "Free" stopped being a complete answer the
+  moment fork stopped spending memory: how much of what is in use is held by more
+  than one address space is not derivable from any other figure on that line.
+
+### Fixed
+
+- **The kernel heap ignored a failed mapping.** `heap_grow()` took frames one at a
+  time and mapped each one, dropping the result. `map_page()` fails when the page
+  table for a directory entry cannot be allocated — the same exhaustion the free
+  memory check above it watches for, one level down — and the loop carried on: the
+  heap end advanced over an address with nothing behind it, and the block header was
+  written into the hole. A kernel page fault, which is a panic, and it surfaced at
+  whatever allocated next rather than at the growth that caused it.
+
+- **The ELF loader leaked a frame whenever a mapping failed.** Allocation, mapping
+  and zeroing shared one `||` chain, so a frame that was allocated and then failed to
+  map belonged to nobody: not in the directory, so the teardown on the failure path
+  could not find it, and never handed back. One frame per failed `exec()`,
+  permanently. The chain also collapsed three distinct failures into one message
+  naming only the middle one.
+
+- **`kfree()` merged blocks that were neighbours in the list but not in memory.** The
+  block list is kept in address order, which invites the assumption that consecutive
+  entries are contiguous; the shrink path can leave a few dozen bytes between them.
+  Merging across such a gap does not corrupt anything — the merged size comes out
+  short of the real span, so the hole is lost rather than handed out — but the size
+  stops describing the block, and every later split inherits that. `heap_grow()` had
+  always made this check before merging onto the tail. Now both sites do.
+
+### Changed
+
+- **Two paths that a shared page would have broken silently.** Neither was reachable
+  from the kernel-side test modules, and both would have failed every program on the
+  system.
+
+  `validate_user_writable_pointer()` decides whether a destination is writable by
+  reading the page table entry's read/write bit — and after a fork that bit is clear
+  on every writable page either side owns. `wait()`, `getcwd()` and every other
+  syscall that answers into user memory would have returned `E_FAULT` on pointers
+  that were never invalid. A page marked copy-on-write now counts as writable there:
+  the write faults, the fault hands over a private copy, and the instruction retries.
+
+  The other is ordering. A syscall writing into a shared buffer faults in *kernel*
+  mode, because CR0.WP makes a read-only entry apply to Ring 0 as well. The page
+  fault handler checked for an in-progress user copy first and would have sent the
+  fault to that copy's fixup label, failing the syscall. The copy-on-write check now
+  comes before it.
+
+  A third followed from the second: resolving a fault inside a copy runs another
+  copy, whose exit cleared the fixup label the interrupted one was relying on. A
+  buffer inside a single page survived that; one reaching into a second shared page
+  faulted again, found nothing registered, and would have taken the kernel down.
+  Copies made from inside a fault handler now save and restore that state.
+
+- **The FPU stays eager, and this is now a decision rather than an omission.**
+  Switching lazily — parking the state behind CR0.TS and restoring it on the first
+  use — was on the roadmap as an optimisation. It is the mechanism behind LazyFP
+  (CVE-2018-3665), which leaks FPU and SSE register contents across processes
+  speculatively, and every major operating system moved back to eager switching in
+  2018. Exception 7 also lands in the general panic path here, so enabling TS would
+  bring the kernel down on the first floating-point instruction. The cost of staying
+  eager is one `fxsave` per context switch across at most 16 tasks.
+
 ## [0.6.1-alpha] - 2026-08-16
 
 The log becomes a log: a record of events that wraps, rather than a transcript of the

@@ -17,7 +17,22 @@ uint32_t *pmm_bitmap = 0;
 uint32_t pmm_bitmap_size_words = 0;
 uint32_t pmm_frames_count = 0;
 uint32_t used_memory = 0;
-uint32_t actual_total_memory = 0; 
+uint32_t actual_total_memory = 0;
+
+/*
+ * One reference count per frame, laid out immediately after the bitmap.
+ *
+ * A bit answers "is this frame in use"; copy-on-write needs "by how many", so
+ * that the second address space to let go of a shared page is the one that
+ * actually returns it. One byte per frame is 32 KB at 128 MB of RAM, and the
+ * ceiling it implies - 255 owners - sits far above MAX_TASKS.
+ *
+ * The table has to be inside the region init_pmm() marks as used below, for the
+ * same reason the bitmap does: it lives in physical memory that the allocator
+ * would otherwise hand out, and would then be overwritten by whatever received
+ * it. See the kernel_end_phys calculation.
+ */
+static uint8_t *pmm_refcount = 0;
 
 spinlock_t pmm_lock;
 static uint32_t lowest_free_idx = 0;
@@ -85,8 +100,16 @@ void init_pmm(multiboot_info_t *mboot_info) {
     // Multiboot structures (like the memory map) that GRUB places right after the kernel.
     pmm_bitmap = (uint32_t *)((uint32_t)&_kernel_end + 0x100000);
 
+    /* Directly behind the bitmap, one byte per frame. Both tables sit inside the
+     * first 16 MB of kernel space, which boot.asm identity maps, so they are
+     * reachable before any page table of our own exists. */
+    pmm_refcount = (uint8_t *)(pmm_bitmap + pmm_bitmap_size_words);
+
     for (uint32_t i = 0; i < pmm_bitmap_size_words; i++) {
         pmm_bitmap[i] = 0xFFFFFFFF;
+    }
+    for (uint32_t i = 0; i < pmm_frames_count; i++) {
+        pmm_refcount[i] = 0;
     }
 
     if (memory_map_found && (mboot_info->flags & (1 << 6))) {
@@ -111,18 +134,39 @@ void init_pmm(multiboot_info_t *mboot_info) {
     }
 
     uint32_t kernel_start_frame = 0;
-    // Calculate physical end including the 1MB margin!
-    uint32_t kernel_end_phys = ((uint32_t)&_kernel_end - 0xC0000000) + 0x100000 + (pmm_bitmap_size_words * 4);
+    /*
+     * Physical end of everything the kernel already owns: the image, the 1 MB
+     * margin GRUB's structures live in, the bitmap - and now the reference
+     * table behind it, one byte per frame.
+     *
+     * That last term is not bookkeeping. Whatever is not counted here is memory
+     * the allocator considers free and will hand out, and a table that is handed
+     * out is a table that gets overwritten by its new owner. The symptom would
+     * be reference counts changing on their own, and it would surface pages
+     * later as a frame freed while still in use.
+     */
+    uint32_t kernel_end_phys = ((uint32_t)&_kernel_end - 0xC0000000) + 0x100000 +
+                               (pmm_bitmap_size_words * 4) + pmm_frames_count;
     uint32_t kernel_end_frame = (kernel_end_phys + PAGE_SIZE - 1) / PAGE_SIZE;
 
     for (uint32_t i = kernel_start_frame; i < kernel_end_frame; i++) {
         pmm_bitmap[i / 32] |= (1U << (i % 32));
     }
 
+    /*
+     * Seed the reference counts from the bitmap.
+     *
+     * The frames marked above never went through pmm_alloc_frame(), so nothing
+     * has set their count. Leaving them at zero would mean the first
+     * pmm_free_frame() on one of them decrements below zero and wraps to 255,
+     * pinning the frame forever - or, read the other way, that a count of zero
+     * is ambiguous between "not allocated" and "allocated by the boot path".
+     */
     used_memory = 0;
     for (uint32_t i = 0; i < pmm_frames_count; i++) {
         if (pmm_bitmap[i / 32] & (1U << (i % 32))) {
             used_memory += PAGE_SIZE;
+            pmm_refcount[i] = 1;
         }
     }
     
@@ -145,9 +189,76 @@ uint32_t pmm_alloc_frame(void) {
         return 0xFFFFFFFF; // Out of memory
     }
     pmm_bitmap[frame / 32] |= (1U << (frame % 32));
+    pmm_refcount[frame] = 1;
     used_memory += PAGE_SIZE;
     spinlock_release(&pmm_lock);
     return frame * PAGE_SIZE;
+}
+
+/**
+ * @brief Takes an additional reference to an allocated frame.
+ *
+ * @param addr The physical address of the frame to share.
+ */
+void pmm_ref_frame(uint32_t addr) {
+    uint32_t frame = addr / PAGE_SIZE;
+
+    /* The same low-memory guard pmm_free_frame() applies: frames below 1 MB are
+     * not the allocator's to account for. */
+    if (frame < 256) return;
+    if (frame >= pmm_frames_count) return;
+
+    spinlock_acquire(&pmm_lock);
+
+    if ((pmm_bitmap[frame / 32] & (1U << (frame % 32))) == 0) {
+        spinlock_release(&pmm_lock);
+        klog_hex(LOG_LEVEL_ERROR, "PMM", "Refused to share a frame that is not allocated", addr);
+        return;
+    }
+
+    if (pmm_refcount[frame] == 0xFF) {
+        spinlock_release(&pmm_lock);
+        klog_hex(LOG_LEVEL_ERROR, "PMM", "Reference count saturated for frame", addr);
+        return;
+    }
+
+    /* A boot-path frame that predates the seeding loop would read as zero; treat
+     * it as the one owner it actually has rather than counting from nothing. */
+    if (pmm_refcount[frame] == 0) pmm_refcount[frame] = 1;
+
+    pmm_refcount[frame]++;
+    spinlock_release(&pmm_lock);
+}
+
+/**
+ * @brief Reads how many owners a frame currently has.
+ *
+ * A single byte, read without the lock: on x86 that load cannot tear, and every
+ * caller is deciding something it will act on immediately with interrupts
+ * already masked.
+ *
+ * @param addr The physical address of the frame.
+ * @return Reference count; 0 when out of range.
+ */
+uint32_t pmm_frame_refcount(uint32_t addr) {
+    uint32_t frame = addr / PAGE_SIZE;
+
+    if (frame >= pmm_frames_count) return 0;
+    return pmm_refcount[frame];
+}
+
+/**
+ * @brief Counts the frames more than one address space is using.
+ *
+ * @return Number of frames with a reference count above one.
+ */
+uint32_t pmm_get_shared_frames(void) {
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < pmm_frames_count; i++) {
+        if (pmm_refcount[i] > 1) count++;
+    }
+    return count;
 }
 
 /**
@@ -167,6 +278,22 @@ void pmm_free_frame(uint32_t addr) {
         spinlock_release(&pmm_lock);
         return;
     }
+
+    /*
+     * One owner lets go; the frame only goes when the last one does.
+     *
+     * A count of zero falls through to the release below rather than wrapping:
+     * it means nothing ever claimed this frame through pmm_alloc_frame(), and
+     * the honest reading of "free it" there is the behaviour this call had
+     * before frames could be shared.
+     */
+    if (pmm_refcount[frame] > 1) {
+        pmm_refcount[frame]--;
+        spinlock_release(&pmm_lock);
+        return;
+    }
+
+    pmm_refcount[frame] = 0;
     pmm_bitmap[frame / 32] &= ~(1U << (frame % 32));
     used_memory -= PAGE_SIZE;
     if ((frame / 32) < lowest_free_idx) lowest_free_idx = frame / 32;

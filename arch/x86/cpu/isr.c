@@ -6,6 +6,8 @@
 #include "process.h"
 #include "registers.h"
 #include "keyboard.h"
+#include "paging.h"
+#include "klog.h"
 #define PIC1_COMMAND 0x20
 #define PIC2_COMMAND 0xA0
 #define PIC_EOI      0x20
@@ -66,6 +68,36 @@ void save_stack_before_panic(void) {
 void page_fault_handler(arch_regs_t *regs) {
     uint32_t faulting_address;
     asm volatile("mov %%cr2, %0" : "=r" (faulting_address));
+
+    /*
+     * A write to a page that is present but shared is not a violation. It is the
+     * moment fork() deferred: the page is split here and the instruction that
+     * faulted is retried.
+     *
+     * Bit 1 of the error code is "the access was a write" and bit 0 is "the page
+     * was present", which together is the only shape a copy-on-write fault can
+     * take. cow_handle_fault() reads the entry and says whether it is one.
+     *
+     * This has to come before everything below it, and in particular before the
+     * uaccess fixup in the kernel branch. A syscall writing into a user buffer
+     * that is still shared faults in *kernel* mode - CR0.WP makes the read-only
+     * entry apply to Ring 0 as well - and handing that to the fixup would fail
+     * the syscall with E_FAULT on a perfectly valid pointer. Nothing on the
+     * kernel side of the test suite could have caught that: it calls the copy
+     * helpers with pages nobody has forked.
+     */
+    if ((regs->err_code & 0x3) == 0x3) {
+        int cow = cow_handle_fault(faulting_address);
+        if (cow == 1) return;
+        if (cow < 0) {
+            /* Shared, and no memory to split it with. Not an access violation,
+             * and the log has to say so - the task dies either way below, and a
+             * segfault message would send anyone reading it after the wrong
+             * bug. */
+            klog_hex(LOG_LEVEL_ERROR, "VMM",
+                     "Out of memory resolving a copy-on-write fault at", faulting_address);
+        }
+    }
 
     int is_user = regs->err_code & 0x4;
 

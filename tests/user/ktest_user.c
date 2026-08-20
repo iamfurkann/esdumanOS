@@ -93,6 +93,29 @@ static int kt_free_kb(void) {
 static volatile int fork_probe = 0;
 
 /**
+ * @brief Destination for a syscall answering into a page nobody has written yet.
+ *
+ * In the payload's own data rather than on the stack, and that is the whole
+ * point. After a fork every writable page on both sides is shared and read-only
+ * until somebody writes to it - but a stack buffer is written to the moment the
+ * frame is set up, which splits its page before any syscall can see it. A static
+ * buffer the parent touched and the child has not is still shared when the
+ * kernel goes to write into it, which is the state that has to work.
+ */
+static char cow_answer_buf[128];
+
+/**
+ * @brief Destination for a copy that has to cross a page boundary.
+ *
+ * Two pages' worth, so a landing site straddling the boundary between them can
+ * be computed at runtime - where the array falls is the linker's business, not
+ * this file's. A copy that faults twice is the case that matters: the kernel
+ * resolves the first fault by running a copy of its own, and the fixup state the
+ * interrupted copy left behind has to survive that.
+ */
+static char cow_span_buf[8192];
+
+/**
  * @brief Terminates a forked child. Does not return.
  *
  * Every child in this file leaves through here, and the loop below the exit is
@@ -982,6 +1005,116 @@ void main(void) {
     syscall(SYSCALL_WAIT, 0, 0, 0);
     KT_ASSERT(fork_probe == 0x1111,
               "[STRICT] [FORK] the child's write did not reach the parent");
+
+    /* ------------------------------------------------------------------
+     * Copy-on-write, from the only side that can see it.
+     *
+     * fork() no longer duplicates the parent's pages. It shares them, marks both
+     * sides read-only, and splits one when somebody writes. The kernel-mode
+     * module proves that mechanism against mappings it made itself; none of what
+     * follows is reachable from there, because all of it runs between a real
+     * process and a real syscall.
+     * ------------------------------------------------------------------ */
+    int cow_free_before = kt_free_kb();
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) kt_child_exit(0);
+    int cow_free_after = kt_free_kb();
+
+    /*
+     * A fork now costs a page directory, the page tables under it and the child's
+     * process_t - a few dozen kilobytes between them. It used to cost all of that
+     * *plus* a copy of every page this payload has mapped, and the 32-page user
+     * stack alone is 128 KB of that. The threshold sits between the two figures
+     * and nowhere near either.
+     */
+    KT_ASSERT(cow_free_before > 0 && cow_free_after > 0,
+              "[COW] the free-memory figure is readable around the fork");
+    KT_ASSERT(cow_free_before - cow_free_after < 64,
+              "[STRICT] [COW] fork() shares the parent's pages instead of copying them");
+
+    syscall(SYSCALL_WAIT, 0, 0, 0);
+
+    /*
+     * A syscall answering into a buffer that is still shared.
+     *
+     * This is the path that had nothing testing it and would have broken every
+     * program on the system. validate_user_writable_pointer() decides whether a
+     * destination is writable by reading the page table entry's read/write bit,
+     * and after a fork that bit is clear on every writable page either side
+     * owns. Refusing those would have failed wait(), getcwd() and every other
+     * syscall that answers into user memory, with E_FAULT, on pointers that were
+     * never invalid - and the kernel-side modules could not have noticed, since
+     * they call the copy helpers directly and never pass through the validator.
+     *
+     * The syscall is the very next thing after the fork on purpose: anything
+     * else here would touch the page first and split it, and the check would
+     * then prove nothing.
+     */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) kt_child_exit(0);
+    int shared_cwd = syscall(SYSCALL_GETCWD, (int)cow_answer_buf, 128, 0);
+
+    KT_ASSERT(shared_cwd > 0,
+              "[STRICT] [COW] a syscall writes into a page that is still shared");
+    KT_ASSERT(cow_answer_buf[0] == '/',
+              "[STRICT] [COW] and what it wrote actually arrived");
+    syscall(SYSCALL_WAIT, 0, 0, 0);
+
+    /*
+     * A copy that crosses two shared pages.
+     *
+     * One fault inside a copy is resolved by running another copy, and until
+     * this release that inner copy cleared the fixup label the interrupted one
+     * was relying on. Everything with a buffer inside a single page survived
+     * that; a copy reaching into a second shared page faulted again, found
+     * nothing registered, and took the kernel down with it.
+     *
+     * So the landing site is placed deliberately across a page boundary, with
+     * both pages touched by the parent beforehand - they have to exist and be
+     * shared, not absent. The failure mode here is a panic rather than a wrong
+     * answer, which is why the assertion is simply that the read completed.
+     */
+    unsigned int span_base = (unsigned int)cow_span_buf;
+    unsigned int span_boundary = (span_base + 4095u) & ~4095u;
+    if (span_boundary < span_base + 32u) span_boundary += 4096u;
+
+    char *span_edge = (char *)(span_boundary - 32u);
+    span_edge[0] = 0x11;
+    span_edge[63] = 0x22;
+
+    int span_fd = syscall(SYSCALL_OPEN, (int)"/dev/urandom", 0, 0);
+    KT_ASSERT(span_fd >= 0, "[COW] /dev/urandom opened for the page-crossing read");
+
+    if (span_fd >= 0) {
+        child = syscall(SYSCALL_FORK, 0, 0, 0);
+        if (child == 0) kt_child_exit(0);
+
+        int span_read = syscall(SYSCALL_READ, span_fd, (int)span_edge, 64);
+        KT_ASSERT(span_read == 64,
+                  "[STRICT] [COW] a copy spanning two shared pages completes");
+
+        syscall(SYSCALL_WAIT, 0, 0, 0);
+        syscall(SYSCALL_CLOSE, span_fd, 0, 0);
+    }
+
+    /*
+     * And the split still separates them, checked on a page a syscall wrote to
+     * rather than one the program wrote to. Both sides reach cow_handle_fault(),
+     * but only one of them arrives from Ring 0, and that is the direction that
+     * had no coverage at all.
+     */
+    cow_answer_buf[0] = 'P';
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        syscall(SYSCALL_GETCWD, (int)cow_answer_buf, 128, 0);
+        KT_ASSERT(cow_answer_buf[0] == '/',
+                  "[COW] the child's syscall wrote into its own copy");
+        kt_child_exit(0);
+    }
+
+    syscall(SYSCALL_WAIT, 0, 0, 0);
+    KT_ASSERT(cow_answer_buf[0] == 'P',
+              "[STRICT] [COW] a kernel write into the child did not reach the parent");
 
     /* ------------------------------------------------------------------
      * A status parked before anyone asked for it.

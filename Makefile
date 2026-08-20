@@ -98,6 +98,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_pmm.c \
 			tests/kernel/test_lifecycle.c \
 			tests/kernel/test_fork.c \
+			tests/kernel/test_cow.c \
 			tests/kernel/test_fault.c \
             tests/kernel/test_syscall.c \
             tests/kernel/test_process.c \

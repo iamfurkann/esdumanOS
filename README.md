@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.6.0--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.6.1--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.6.0-alpha
+**Version:** 0.6.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -180,6 +180,15 @@ carry that never looked at how long the month was, so 21:00 UTC on 31 August pro
 were read one after another, which lets a reading straddle an update and, at midnight,
 produce a date that never existed.
 
+v0.6.1 makes the log a log. It was a fill-once buffer that stopped accepting at 8 KB and
+silently dropped every record after, while this file and its own source both called it a
+ring buffer — so `dmesg` showed the oldest part of the boot and nothing since. What filled
+it was `printk()`, which fed every character the kernel printed into it: the boot banner,
+the ASCII art and the first-boot password prompts all competed for the space with actual
+records. It wraps now, and holds records rather than a transcript of the screen.
+`/var/log` also stops being an empty directory — the log is written to `kern.log` at
+`sync`, `halt` and `reboot`.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -208,7 +217,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
 | **Syscall Interface** | 55 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
-| **Kernel Logging** | 8 KB in-memory ring buffer logger (dmesg equivalent), readable through the `dmesg` syscall. Not persisted to disk — `/var/log` is created at first boot but nothing is written there yet |
+| **Kernel Logging** | 8 KB in-memory ring buffer (dmesg equivalent), readable through the `dmesg` syscall and written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
 ### Memory Management
@@ -812,7 +821,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.5.4-alpha)
+|   |-- kernel.h                     Master header (version 0.6.1-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
@@ -930,7 +939,7 @@ register `SIG_IGN` for it first and then check the return value.
 | 29 | `GET_DIR_ID` | Resolve directory path to ID |
 | 34 | `CAT_RAW` | Read raw (unencrypted) file contents |
 | 44 | `READDIR` | Read directory entries into user buffer |
-| 45 | `SYNC` | Write every dirty block-cache sector out to disk |
+| 45 | `SYNC` | Write dirty block-cache sectors out, and the kernel log to `/var/log` |
 | 46 | `CHDIR` | Change the calling process's working directory |
 | 47 | `GETCWD` | Write the working directory into a user buffer |
 | 48 | `STAT` | Report a path's metadata into a user `esd_stat_t` |

@@ -40,6 +40,7 @@
 #define E_PIPE          -32   /**< Broken pipe */
 #define E_NAMETOOLONG   -36   /**< File name too long */
 #define E_NOSYS         -38   /**< Function not implemented (Invalid syscall) */
+#define E_NOTEMPTY      -39   /**< Directory not empty */
 
 /*
  * There is no global errno, and this header used to declare one.

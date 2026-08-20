@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.5.2--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.5.4--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.5.3-alpha
+**Version:** 0.5.4-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -154,6 +154,17 @@ terminal and no Ctrl-C, a read that cannot end takes the machine with it. Testin
 that turned up one more thing: `ls` and `dmesg` printed from inside the kernel, straight
 to the screen, so they had never gone through a pipe or a redirect in their lives.
 Both now hand their output back and let the shell write it.
+
+v0.5.4 stops the parser guessing. `a | b | c` used to run `a` against the literal tokens
+`b | c`, and `a | b > f` handed `> f` to `b` as two words: the parser took whichever
+operator it met first and passed the rest on as ordinary arguments, so the wrong thing ran
+and reported success. A pipeline is up to four processes now, `>` belongs to the stage it
+appears in, and the cases that are still not supported are refused with a message instead
+of reinterpreted. Three programs in `/bin` — `rm`, `mv` and `kill` — became reachable in
+the same change, having shipped in every image so far and been shadowed by builtins of the
+same name. The other half of the release is that `/etc` finally holds something: the
+hostname the prompt prints, the version the kernel was built with, a message of the day,
+and a `profile` the shell reads before its first prompt.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -579,8 +590,15 @@ exit                  Exit the shell
 `echo` and `clear` are not builtins — they are ELF programs in `/bin`, reached
 through the same path as any other program. `echo` does not implement `-n`.
 
-**Operators:** Pipes (`cmd1 | cmd2`, two stages only), output redirection
+**Operators:** Pipes (`cmd1 | cmd2 | cmd3`, up to four stages), output redirection
 (`cmd > file`), chaining (`cmd1 && cmd2`, `cmd1 || cmd2`).
+
+Four stages is a process budget rather than a preference: an external stage costs two
+tasks, because the forked child runs the program through `exec()`, which creates a task of
+its own. A fifth is refused with a message, as are a bare `|` and a backgrounded pipeline.
+
+A command word containing a `/` is a path and is never matched against the builtin table,
+so `rm` is the builtin and `/bin/rm` is the program of that name.
 
 **Reading standard input.** `cat`, `grep`, `head` and `wc` read standard input when no
 file is named, which is what lets them sit at the far end of a pipe:
@@ -598,9 +616,9 @@ writing into a pipe whose reader has finished is sent `SIGPIPE` and terminates, 
 run to the end of its input. The shell declines `SIGPIPE` for itself — losing it would end
 the session — and restores the default in every process it forks.
 
-Redirection truncates: the target is created if it does not exist and emptied if
-it does. `>` and `|` cannot be combined in one command — the parser takes
-whichever it meets first and passes the other through as an ordinary argument.
+Redirection truncates: the target is created if it does not exist and emptied if it does.
+It can be combined with a pipe, and belongs to the stage it appears in — in `a | b > f`,
+`b`'s output goes to the file.
 
 **Writing a file is all-or-nothing.** Bytes written through a descriptor are held
 until the last descriptor closes and then committed as the file's entire new
@@ -609,9 +627,14 @@ and no seeking during a write. That is not a shortcut: a stored file is a single
 AES-CBC blob authenticated over its whole plaintext, so it can be replaced but
 never extended. A single file is capped at 64 KB on this path.
 
-**Variables:** `$VAR` expansion, `$?` last exit code, `~` home directory. Note
-that every `~` in a single command expands into one shared buffer, so
-`cp ~/a ~/b` passes the same path twice.
+**Variables:** `$VAR` expansion, `$?` last exit code, `~` home directory. Expansion runs
+over the whole line before it is split into stages, so a variable in any stage is
+expanded, and each `~` gets storage of its own.
+
+**Startup files.** The shell reads three files under `/etc` before its first prompt, and
+carries on without any of them. `/etc/hostname` supplies the name in the prompt,
+`/etc/motd` is printed, and `/etc/profile` is applied — only `export KEY VALUE` lines,
+because it is a settings file rather than a script.
 
 ---
 
@@ -773,7 +796,7 @@ esdumanOS/
 |       +-- stat.c                   Show a file's size, type and owner
 |
 |-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.5.3-alpha)
+|   |-- kernel.h                     Master header (version 0.5.4-alpha)
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    50 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
@@ -1038,11 +1061,15 @@ The following are known constraints of the current implementation. These are doc
   single global. Making the kernel preemptible means fixing all of that first,
   starting with the interrupt frame layout, which cannot currently describe a
   Ring 0 frame.
-- **A pipeline is two stages at most.** The parser takes the first `|` it meets and
-  treats everything after it as the second stage, so `a | b | c` passes `b | c` to
-  the second stage as ordinary arguments rather than reporting an error.
-- **`>` and `|` cannot be combined** in one command. The parser takes whichever it
-  meets first and passes the other through as a literal argument.
+- **A pipeline is four stages at most**, and cannot be backgrounded. An external stage
+  costs two tasks — the forked child plus the one `exec()` creates — and `MAX_TASKS` is
+  16. Both limits are reported rather than reinterpreted.
+- **`/etc` is written only on a fresh disk.** The system files live in the same block as
+  the `/bin` tools, which runs when `init.elf` is absent, so an image carried over from an
+  earlier version keeps its old `/etc`.
+- **`/etc/profile` is a settings file, not a script.** Only `export KEY VALUE` is
+  recognised. Running arbitrary commands from it would mean forking and exec'ing before
+  the first prompt, and a syntax error in it would be a shell that will not start.
 - **Job control stops at `&`, `jobs` and `wait`.** There is no `fg`, no `bg`, no
   Ctrl-Z and no process groups, so a background job can be waited for or killed but
   not brought back to the foreground. The shell tracks at most eight jobs.
@@ -1102,7 +1129,7 @@ Near-term priorities for the project, roughly in order:
 | P1 | Bounded string operations throughout user space |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
-| P1 | Shell parsing: more than two pipeline stages, and `>` combined with `|` |
+| P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
 | P1 | A real clock — the status bar time is frozen at boot and `date` prints fixed text |
 | P2 | Copy-on-write for `fork`, which needs reference counting on physical frames |
 | P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments |

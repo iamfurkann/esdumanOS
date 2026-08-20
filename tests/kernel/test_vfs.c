@@ -212,6 +212,50 @@ static void test_vfs_write_bounds(void) {
 }
 
 /**
+ * @brief Deleting a directory that still holds something.
+ *
+ * A child records its parent as the parent's index in dir_table, and fs_delete()
+ * used to clear the parent's slot and stop there. The children stayed behind
+ * pointing at an index that no longer described them: unreachable through any
+ * path, and visible again as somebody else's contents the moment the slot was
+ * reused. Nothing tested it because nothing had reason to delete a directory.
+ *
+ * An empty one still goes, which is what makes this rmdir(2) rather than a
+ * refusal to remove directories at all - there is no separate rmdir call here,
+ * so refusing outright would leave a directory with no way to remove it.
+ */
+static void test_vfs_rmdir_semantics(void) {
+    printk("\n--- VFS: directory deletion ---\n");
+
+    KTEST_ASSERT(fs_mkdir("rmdirprobe", 0) == E_OK,
+                 "[VFS] a directory was created for the deletion checks");
+
+    int dir_id = fs_get_entry_idx("rmdirprobe", 0);
+    KTEST_ASSERT(dir_id > 0, "[VFS] and it resolves to an entry id");
+
+    if (dir_id > 0) {
+        const char *payload = "occupied";
+        KTEST_ASSERT(fs_create_file("inside.txt", (const uint8_t *)payload, 8, (uint8_t)dir_id) >= 0,
+                     "[VFS] a file was created inside it");
+
+        KTEST_ASSERT(fs_delete("rmdirprobe", 0) == E_NOTEMPTY,
+                     "[STRICT] [VFS] deleting a directory that still holds a file is refused");
+        KTEST_ASSERT(fs_get_entry_idx("rmdirprobe", 0) == dir_id,
+                     "[STRICT] [VFS] the refused delete left the directory in place");
+        KTEST_ASSERT(fs_get_entry_idx("inside.txt", (uint8_t)dir_id) > 0,
+                     "[STRICT] [VFS] and left its contents reachable rather than orphaned");
+
+        KTEST_ASSERT(fs_delete("inside.txt", (uint8_t)dir_id) == E_OK,
+                     "[VFS] the file inside deletes normally");
+        KTEST_ASSERT(fs_delete("rmdirprobe", 0) == E_OK,
+                     "[STRICT] [VFS] an empty directory deletes");
+        KTEST_ASSERT(fs_get_entry_idx("rmdirprobe", 0) < 0,
+                     "[VFS] and is gone afterwards");
+    }
+}
+
+
+/**
  * @brief Tests VFS directory boundaries, depth limits, and prevents path traversal (OOB).
  *
  * This test evaluates the robustness of the Virtual File System (VFS) against
@@ -390,4 +434,5 @@ void run_vfs_tests(void) {
     test_vfs_boundary_and_depth();
     test_vfs_size_reporting();
     test_vfs_write_bounds();
+    test_vfs_rmdir_semantics();
 }

@@ -15,6 +15,28 @@ typedef unsigned int uint32_t;
  */
 #define MAX_ARGS 32
 
+/*
+ * Stages a single pipeline may have.
+ *
+ * Bounded by processes rather than by taste. An external stage costs two tasks,
+ * not one: the shell forks a child, and that child runs the program through
+ * exec(), which creates a task of its own and blocks waiting for it. Four stages
+ * of externals is eight tasks, and MAX_TASKS is 16 with the idle task, init and
+ * the shell already in it. Asking for more is refused with a message rather than
+ * silently reinterpreted, which is what the parser used to do.
+ */
+#define MAX_STAGES 4
+
+/*
+ * Storage for '~' expansions, handed out per token and reset per command.
+ *
+ * One shared buffer used to serve every '~' in a line, so each expansion
+ * overwrote the last and every token ended up pointing at the same string:
+ * "cp ~/a ~/b" passed ~/b twice.
+ */
+static char tilde_arena[512];
+static uint32_t tilde_used = 0;
+
 /**
  * @brief Performs a system call.
  * 
@@ -485,6 +507,14 @@ char current_path[64] = "/";
 int current_uid = -1;
 char current_username[32];
 
+/*
+ * The prompt used to have this in a string literal, twice - once where the
+ * prompt is printed and once where tab completion redraws it. It is read from
+ * /etc/hostname now, and the literal survives only as the fallback for a disk
+ * that does not have the file.
+ */
+char current_hostname[32] = "esdumanOS";
+
 /**
  * @brief Sets an environment variable.
  * 
@@ -807,8 +837,34 @@ int builtin_ls(char **args) {
  * closed file for the rest of the session. run_with_redirect() below wraps the
  * call instead, so the teardown cannot be bypassed.
  */
+/**
+ * @brief Whether a command word names a path rather than a command.
+ *
+ * A word containing a slash is a path and is never matched against the builtin
+ * table, which is the rule every real shell uses and the reason "/bin/rm" now
+ * reaches the ELF of that name. Three programs in /bin - rm, mv and kill - share
+ * their names with builtins that were checked first, so they had been shipped in
+ * the image and were unreachable by any spelling.
+ *
+ * @param word The first word of a command.
+ * @return 1 when the word contains a slash.
+ */
+void run_external(char **args);
+
+static int word_is_path(const char *word) {
+    for (int i = 0; word[i] != '\0'; i++) {
+        if (word[i] == '/') return 1;
+    }
+    return 0;
+}
+
 void execute_command(char **args) {
     if (!args[0]) return;
+
+    if (word_is_path(args[0])) {
+        run_external(args);
+        return;
+    }
 
     if (ft_strcmp(args[0], "cat") == 0) {
         last_exit_status = builtin_cat(args);
@@ -1093,16 +1149,37 @@ void execute_command(char **args) {
         }
     }
     else {
+        run_external(args);
+    }
+}
+
+/**
+ * @brief Runs a command as an ELF, either by name from /bin or by path.
+ *
+ * Split out of execute_command() so that a word containing a slash can reach it
+ * without walking the builtin table first - see word_is_path().
+ *
+ * @param args Array of command-line arguments.
+ */
+void run_external(char **args) {
         if (ft_strlen(args[0]) > 58) {
             printk("sh: command name too long (max 58 characters)\n");
             last_exit_status = 127;
             return;
         }
 
-        // Try to execute it as an ELF from /bin/
+        /*
+         * A word with a slash in it is used as written; anything else is looked
+         * for in /bin. There is no PATH variable to search, and one directory is
+         * the whole of the search this shell does.
+         */
         char exec_path[64];
-        ft_strcpy(exec_path, "/bin/");
-        ft_strcpy(&exec_path[5], args[0]);
+        if (word_is_path(args[0])) {
+            ft_strcpy(exec_path, args[0]);
+        } else {
+            ft_strcpy(exec_path, "/bin/");
+            ft_strcpy(&exec_path[5], args[0]);
+        }
 
         char arg_str[256];
         for(int k=0; k<256; k++) arg_str[k] = '\0';
@@ -1164,7 +1241,6 @@ void execute_command(char **args) {
              */
             last_exit_status = exec_res;
         }
-    }
 }
 
 /**
@@ -1424,7 +1500,7 @@ static void handle_tab_completion(char *buf, int *idx) {
             // Redraw prompt and current input
             printk("\n");
             printk(current_username);
-            printk("@esdumanOS ");
+            printk("@"); printk(current_hostname); printk(" ");
             printk(current_path);
             if (current_uid == 0) printk(" # ");
             else printk(" $ ");
@@ -1435,8 +1511,107 @@ static void handle_tab_completion(char *buf, int *idx) {
 }
 
 /**
+ * @brief Copies a whole small file into a buffer, null-terminated.
+ *
+ * Shared by the three startup files under /etc. A file that is not there is not
+ * an error - the caller falls back to what it compiled in - which is what keeps
+ * a disk image made before these existed from failing to boot a shell.
+ *
+ * @param path File to read.
+ * @param buf Destination.
+ * @param size Capacity of buf, including the terminator.
+ * @return Bytes read, or a negative errno.
+ */
+static int read_small_file(const char *path, char *buf, int size) {
+    int fd = sys_open(path);
+    if (fd < 0) return fd;
+
+    int total = 0;
+    int n;
+    while (total < size - 1 &&
+           (n = syscall(SYSCALL_READ, fd, (int)&buf[total], size - 1 - total)) > 0) {
+        total += n;
+    }
+
+    buf[total] = '\0';
+    sys_close(fd);
+    return total;
+}
+
+/**
+ * @brief Applies one line of /etc/profile.
+ *
+ * Only "export KEY VALUE" is recognised, and the file says so in its own first
+ * two lines. This is a settings file rather than a script: running arbitrary
+ * commands from it would mean forking and exec'ing before the first prompt, and
+ * a syntax error in it would be a shell that will not start.
+ *
+ * @param line One line, modified in place while it is split into words.
+ */
+static void apply_profile_line(char *line) {
+    if (line[0] == '#' || line[0] == '\0') return;
+
+    char *word[3] = { 0, 0, 0 };
+    int count = 0;
+    int in_word = 0;
+
+    for (int i = 0; line[i] != '\0'; i++) {
+        if (line[i] == ' ' || line[i] == '\t') { line[i] = '\0'; in_word = 0; }
+        else if (!in_word) {
+            if (count >= 3) break;
+            word[count++] = &line[i];
+            in_word = 1;
+        }
+    }
+
+    if (count == 3 && ft_strcmp(word[0], "export") == 0) {
+        set_env(word[1], word[2]);
+    }
+}
+
+/**
+ * @brief Reads the three startup files under /etc, if they are there.
+ *
+ * The hostname was a string literal in two places, and there was nothing a user
+ * could change without rebuilding the image. None of these is required: each
+ * falls back to what the shell already had.
+ */
+static void read_startup_files(void) {
+    char buf[512];
+
+    if (read_small_file("/etc/hostname", buf, sizeof(buf)) > 0) {
+        int i = 0;
+        while (buf[i] != '\0' && buf[i] != '\n' && buf[i] != '\r' &&
+               i < (int)sizeof(current_hostname) - 1) {
+            current_hostname[i] = buf[i];
+            i++;
+        }
+        /* An empty or blank-first-line file leaves the built-in name alone
+         * rather than producing a prompt with nothing between @ and the path. */
+        if (i > 0) current_hostname[i] = '\0';
+    }
+
+    if (read_small_file("/etc/profile", buf, sizeof(buf)) > 0) {
+        int start = 0;
+        for (int i = 0; ; i++) {
+            if (buf[i] == '\n' || buf[i] == '\0') {
+                char end = buf[i];
+                buf[i] = '\0';
+                apply_profile_line(&buf[start]);
+                start = i + 1;
+                if (end == '\0') break;
+            }
+        }
+    }
+
+    if (read_small_file("/etc/motd", buf, sizeof(buf)) > 0) {
+        printk(buf);
+    }
+}
+
+/**
  * @brief Main entry point for the shell process.
- * 
+ *
  * Sets up environment, registers signals, and runs the command loop.
  */
 void main(void) {
@@ -1492,6 +1667,12 @@ void main(void) {
      */
     sys_register_signal(SIG_PIPE, (void *)SIG_IGN);
 
+    /*
+     * Last in the setup, so that a value exported from /etc/profile wins over
+     * the ones set above rather than being overwritten by them.
+     */
+    read_startup_files();
+
     while (1) {
         /*
          * Collect finished background jobs here rather than the moment they
@@ -1503,7 +1684,7 @@ void main(void) {
 
         printk("\n");
         printk(current_username);
-        printk("@esdumanOS ");
+        printk("@"); printk(current_hostname); printk(" ");
         printk(current_path); 
         
         if (current_uid == 0) printk(" # ");
@@ -1543,11 +1724,15 @@ void main(void) {
 
             if (!skip_execution) {
                 for (int i = 0; i < MAX_ARGS; i++) { args[i] = 0; }
-                int arg_count = 0; int in_word = 0; char *redirect_file = 0;
-                char *pipe_args[MAX_ARGS]; for (int i = 0; i < MAX_ARGS; i++) { pipe_args[i] = 0; }
-                int has_pipe = 0; int pipe_arg_count = 0;
+                int arg_count = 0; int in_word = 0;
+                char *stage_args[MAX_STAGES][MAX_ARGS];
+                char *stage_redirect[MAX_STAGES];
+                int stage_count = 0;
                 int background = 0;
                 int too_many_args = 0;
+                int parse_error = 0;
+
+                for (int s = 0; s < MAX_STAGES; s++) { stage_args[s][0] = 0; stage_redirect[s] = 0; }
 
                 for (int i = 0; current_cmd[i] != '\0'; i++) {
                     if (current_cmd[i] == ' ') { current_cmd[i] = '\0'; in_word = 0; }
@@ -1578,24 +1763,20 @@ void main(void) {
                     background = 1;
                 }
 
-                for (int i = 0; i < arg_count; i++) {
-                    if (ft_strcmp(args[i], ">") == 0) {
-                        /* i + 1 can be arg_count, which is a slot inside the
-                         * array only because the count is now bounded. */
-                        args[i] = 0;
-                        if (i + 1 < arg_count && args[i + 1]) redirect_file = args[i + 1];
-                        break;
-                    }
-                    else if (ft_strcmp(args[i], "|") == 0) {
-                        args[i] = 0; has_pipe = 1;
-                        for (int j = i + 1; j < arg_count && pipe_arg_count < MAX_ARGS - 1; j++) {
-                            pipe_args[pipe_arg_count++] = args[j];
-                        }
-                        break;
-                    }
-                }
+                /*
+                 * Expansion runs before the line is split into stages, and over
+                 * arg_count tokens rather than up to the first null.
+                 *
+                 * It used to run afterwards, and the split had already written a
+                 * null over the '|' - so the loop stopped there and no token in
+                 * the second stage was ever expanded. "echo $HOME | cat" passed
+                 * the literal text to the first stage's expansion and nothing to
+                 * the second's, because there was no second pass.
+                 */
+                tilde_used = 0;
+                int tilde_full = 0;
 
-                for (int i = 0; args[i] != 0; i++) {
+                for (int i = 0; i < arg_count; i++) {
                     if (args[i][0] == '$') {
                         if (args[i][1] == '?') {
                             static char status_str[16]; ft_itoa(last_exit_status, status_str); args[i] = status_str;
@@ -1603,109 +1784,215 @@ void main(void) {
                     }
                     else if (args[i][0] == '~') {
                         /*
-                         * Bounded append. The tail came from the input line with
-                         * no length check, so "~/AAAA..." wrote past a 128-byte
-                         * buffer in .bss - straight into env_keys, env_vals,
-                         * current_path and current_username, which sit beside it.
+                         * Each ~ gets its own storage, taken from an arena that
+                         * is reset per command.
                          *
-                         * KNOWN LIMITATION, not fixed here: this buffer is
-                         * static and shared, so every ~ token in one command
-                         * ends up pointing at the same string. "cp ~/a ~/b"
-                         * passes ~/b twice. Fixing that needs per-token storage.
+                         * A single shared buffer used to serve every ~ in a line,
+                         * so each expansion overwrote the last and every token
+                         * ended up pointing at the same string: "cp ~/a ~/b"
+                         * passed ~/b twice and copied a file onto itself.
+                         *
+                         * The append is bounded, as it has been since the tail
+                         * came straight from the input line with no length check
+                         * and "~/AAAA..." wrote past the buffer into the
+                         * environment table beside it. Running out of arena is
+                         * reported rather than absorbed - falling back to sharing
+                         * is the bug this replaces.
                          */
-                        static char expanded_path[128];
-                        uint32_t p = 0;
                         const char *home = get_env("HOME");
-                        for (int k = 0; home && home[k] != '\0' && p < sizeof(expanded_path) - 1; k++) {
-                            expanded_path[p++] = home[k];
+                        uint32_t start = tilde_used;
+                        uint32_t p = start;
+
+                        for (int k = 0; home && home[k] != '\0' && p < sizeof(tilde_arena) - 1; k++) {
+                            tilde_arena[p++] = home[k];
                         }
                         if (args[i][1] == '/') {
-                            for (int k = 1; args[i][k] != '\0' && p < sizeof(expanded_path) - 1; k++) {
-                                expanded_path[p++] = args[i][k];
+                            for (int k = 1; args[i][k] != '\0' && p < sizeof(tilde_arena) - 1; k++) {
+                                tilde_arena[p++] = args[i][k];
                             }
                         }
-                        expanded_path[p] = '\0';
-                        args[i] = expanded_path;
+
+                        if (p >= sizeof(tilde_arena) - 1) { tilde_full = 1; break; }
+
+                        tilde_arena[p++] = '\0';
+                        args[i] = &tilde_arena[start];
+                        tilde_used = p;
                     }
                 }
 
-                if (args[0] != 0) {
-                    if (has_pipe) {
-                        int pfd[2];
-                        if (pipe(pfd) >= 0) {
-                            /*
-                             * Both stages run at once, each in its own process.
-                             *
-                             * They used to run one after the other in this shell:
-                             * the first stage was executed to completion with
-                             * stdout pointing at the pipe, and only then was the
-                             * second started to drain it. Nothing was reading
-                             * while the first stage wrote, so a first stage that
-                             * produced more than the 4 KB the pipe holds blocked
-                             * with no reader and never resumed - the shell along
-                             * with it. That is what fork() was added for.
-                             *
-                             * Redirection combined with a pipe is still not
-                             * supported: the parser takes whichever it meets
-                             * first, so the other is passed through as a literal
-                             * argument.
-                             */
-                            int left = sys_fork();
-                            if (left == 0) {
-                                /* Undo the shell's own SIG_IGN, inherited a line
-                                 * ago through fork(). The writing end of a
-                                 * pipeline is the one process that has to die
-                                 * when its reader does, and if this stage is a
-                                 * builtin it runs right here in the shell's
-                                 * image with the shell's dispositions. */
-                                sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
-                                dup2(pfd[1], 1);
-                                sys_close(pfd[0]);
-                                sys_close(pfd[1]);
-                                execute_command(args);
-                                sys_exit_status(last_exit_status);
+                if (tilde_full) {
+                    printk("sh: too many ~ expansions in one command\n");
+                    last_exit_status = 1;
+                    parse_error = 1;
+                }
+
+                /*
+                 * Split into pipeline stages on '|', with '>' belonging to the
+                 * stage it appears in.
+                 *
+                 * The parser used to take whichever of the two it met first and
+                 * stop, so everything after it was handed on as ordinary
+                 * arguments: "a | b | c" ran "a" against the literal tokens
+                 * "b | c", and "a | b > f" passed "> f" to b as two words. Both
+                 * were silent - the wrong thing ran and reported success.
+                 */
+                int slot = 0;
+                for (int i = 0; !parse_error && i < arg_count; i++) {
+                    if (ft_strcmp(args[i], "|") == 0) {
+                        if (stage_count + 1 >= MAX_STAGES) {
+                            printk("sh: too many pipeline stages (max 4)\n");
+                            last_exit_status = 1;
+                            parse_error = 1;
+                            break;
+                        }
+                        stage_args[stage_count][slot] = 0;
+                        stage_count++;
+                        slot = 0;
+                    }
+                    else if (ft_strcmp(args[i], ">") == 0) {
+                        if (i + 1 >= arg_count || args[i + 1] == 0) {
+                            printk("sh: syntax error: > without a file\n");
+                            last_exit_status = 1;
+                            parse_error = 1;
+                            break;
+                        }
+                        stage_redirect[stage_count] = args[i + 1];
+                        i++;   /* the filename is consumed, not an argument */
+                    }
+                    else if (slot < MAX_ARGS - 1) {
+                        stage_args[stage_count][slot++] = args[i];
+                    }
+                }
+
+                stage_args[stage_count][slot] = 0;
+                stage_count++;
+
+                /* An empty stage means a bare or doubled '|', which would
+                 * otherwise fork a child with nothing to run. */
+                for (int s = 0; !parse_error && s < stage_count; s++) {
+                    if (stage_args[s][0] == 0 && stage_count > 1) {
+                        printk("sh: syntax error: empty pipeline stage\n");
+                        last_exit_status = 1;
+                        parse_error = 1;
+                    }
+                }
+
+                /*
+                 * A backgrounded pipeline is refused rather than run in the
+                 * foreground with the '&' quietly dropped, which is what would
+                 * happen otherwise - the pipeline branch below is chosen first
+                 * and never looks at the flag. Backgrounding one properly needs
+                 * a process to own the whole pipeline, and this shell tracks
+                 * jobs by pid.
+                 */
+                if (!parse_error && background && stage_count > 1) {
+                    printk("sh: cannot background a pipeline\n");
+                    last_exit_status = 1;
+                    parse_error = 1;
+                }
+
+                if (parse_error) { stage_count = 0; }
+
+                if (stage_count > 0 && stage_args[0][0] != 0) {
+                    if (stage_count > 1) {
+                        /*
+                         * Every stage runs at once, each in its own process,
+                         * joined by one pipe per gap.
+                         *
+                         * They used to run one after the other in this shell: the
+                         * first stage was executed to completion with stdout
+                         * pointing at the pipe, and only then was the second
+                         * started to drain it. Nothing was reading while the
+                         * first wrote, so a first stage producing more than the
+                         * 4 KB the pipe holds blocked with no reader and never
+                         * resumed - the shell along with it. That is what fork()
+                         * was added for, and v0.5.2 fixed it for two stages;
+                         * this is the same thing for any number up to MAX_STAGES.
+                         */
+                        int pfd[MAX_STAGES - 1][2];
+                        int pipes_made = 0;
+                        int pipes_needed = stage_count - 1;
+
+                        while (pipes_made < pipes_needed && pipe(pfd[pipes_made]) >= 0) {
+                            pipes_made++;
+                        }
+
+                        if (pipes_made < pipes_needed) {
+                            printk("sh: cannot create pipe\n");
+                            last_exit_status = 1;
+                            for (int k = 0; k < pipes_made; k++) {
+                                sys_close(pfd[k][0]); sys_close(pfd[k][1]);
+                            }
+                        } else {
+                            int forked = 0;
+                            int last_pid = -1;
+
+                            for (int s = 0; s < stage_count; s++) {
+                                int pid = sys_fork();
+
+                                if (pid == 0) {
+                                    /* Undo the shell's own SIG_IGN, inherited a
+                                     * line ago through fork(). A writing stage is
+                                     * the one process that has to die when its
+                                     * reader does, and a builtin stage runs right
+                                     * here in the shell's image with the shell's
+                                     * dispositions. */
+                                    sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
+
+                                    if (s > 0) dup2(pfd[s - 1][0], 0);
+                                    if (s < pipes_needed) dup2(pfd[s][1], 1);
+
+                                    /* Every pipe end, not just this stage's. A
+                                     * descriptor left open anywhere in the
+                                     * pipeline keeps a reader or a writer alive
+                                     * that has no business being one, and the
+                                     * stage downstream never sees end-of-file. */
+                                    for (int k = 0; k < pipes_needed; k++) {
+                                        sys_close(pfd[k][0]); sys_close(pfd[k][1]);
+                                    }
+
+                                    if (stage_redirect[s]) run_with_redirect(stage_args[s], stage_redirect[s]);
+                                    else execute_command(stage_args[s]);
+
+                                    sys_exit_status(last_exit_status);
+                                }
+
+                                if (pid < 0) break;
+
+                                last_pid = pid;
+                                forked++;
                             }
 
-                            int right = (left < 0) ? -1 : sys_fork();
-                            if (right == 0) {
-                                sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
-                                dup2(pfd[0], 0);
-                                sys_close(pfd[0]);
-                                sys_close(pfd[1]);
-                                execute_command(pipe_args);
-                                sys_exit_status(last_exit_status);
+                            /*
+                             * The shell closes every end before waiting, and this
+                             * is load-bearing rather than tidiness: a reader sees
+                             * end-of-file only when every write end is shut, and
+                             * the shell holds one of each.
+                             */
+                            for (int k = 0; k < pipes_needed; k++) {
+                                sys_close(pfd[k][0]); sys_close(pfd[k][1]);
                             }
 
-                            /*
-                             * The shell closes both ends before waiting, and this
-                             * is load-bearing rather than tidiness: the reader
-                             * sees end-of-file only when every write end is shut,
-                             * and the shell holds one. Leaving it open hangs the
-                             * second stage on a pipe nobody will ever write to.
-                             */
-                            sys_close(pfd[0]);
-                            sys_close(pfd[1]);
-
-                            if (left < 0 || right < 0) {
+                            if (forked < stage_count) {
                                 printk("sh: cannot fork for pipeline\n");
                                 last_exit_status = 1;
                             }
 
                             /*
-                             * Collect both, and report the last stage's status as
-                             * the pipeline's - which is why wait() has to say
-                             * which child it is talking about. They finish in
-                             * whatever order they finish.
+                             * Collect them all, and report the last stage's
+                             * status as the pipeline's - which is why wait() has
+                             * to say which child it is talking about. They finish
+                             * in whatever order they finish.
                              */
                             int reaped = 0;
-                            while (reaped < 2) {
+                            while (reaped < forked) {
                                 int st = 0;
                                 int who = sys_wait(&st);
                                 if (who < 0) break;
-                                if (who == right) last_exit_status = st;
+                                if (who == last_pid) last_exit_status = st;
                                 reaped++;
                             }
-                        } else printk("Error: Failed to create pipe!\n");
+                        }
                     } else if (background) {
                         /*
                          * Run it in a child and carry on. The status is collected
@@ -1719,8 +2006,8 @@ void main(void) {
                             /* Same reason as the pipeline stages: only the shell
                              * itself gets to ignore SIG_PIPE. */
                             sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
-                            if (redirect_file) run_with_redirect(args, redirect_file);
-                            else execute_command(args);
+                            if (stage_redirect[0]) run_with_redirect(stage_args[0], stage_redirect[0]);
+                            else execute_command(stage_args[0]);
                             sys_exit_status(last_exit_status);
                         } else if (pid < 0) {
                             printk("sh: cannot fork\n");
@@ -1735,8 +2022,8 @@ void main(void) {
                             last_exit_status = 0;
                         }
                     } else {
-                        if (redirect_file) run_with_redirect(args, redirect_file);
-                        else execute_command(args);
+                        if (stage_redirect[0]) run_with_redirect(stage_args[0], stage_redirect[0]);
+                        else execute_command(stage_args[0]);
                     }
                 }
             }

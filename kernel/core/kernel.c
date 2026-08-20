@@ -571,6 +571,58 @@ static int init_filesystem_and_vfs(void) {
                 fs_create_file_raw("clear", clear_elf, clear_elf_len, bin_id);
                 fs_create_file_raw("echo", echo_elf, echo_elf_len, bin_id);
             }
+
+            /*
+             * System files under /etc.
+             *
+             * The directory has existed since the FHS hierarchy was created and
+             * held nothing but the password database, so every tool that wanted
+             * one of these facts carried it compiled in instead - the shell's
+             * prompt had the hostname in a string literal, and the version was
+             * readable from Ring 0 only.
+             *
+             * Written here rather than at first boot so they arrive with the
+             * /bin tools they belong to. That means the same caveat: this block
+             * runs only when init.elf is absent, so a disk image carried over
+             * from an earlier version keeps its old /etc until it is recreated.
+             *
+             * fs_create_file() rather than the _raw() above: these are text, and
+             * they have to come back out through the ordinary decrypting read
+             * that cat and the shell use.
+             */
+            int sys_etc_id = get_vfs_id("etc", 0);
+            if (sys_etc_id != -1) {
+                const char *os_release =
+                    "NAME=\"esdumanOS\"\n"
+                    "VERSION=\"" OS_VERSION_PLAIN "\"\n"
+                    "ID=esdumanos\n"
+                    "PRETTY_NAME=\"esdumanOS " OS_VERSION_PLAIN "\"\n"
+                    "HOME_URL=\"https://github.com/iamfurkann/esdumanOS\"\n";
+                fs_create_file("os-release", (const uint8_t *)os_release, ft_strlen(os_release), sys_etc_id);
+
+                const char *hostname = "esdumanOS\n";
+                fs_create_file("hostname", (const uint8_t *)hostname, ft_strlen(hostname), sys_etc_id);
+
+                const char *motd =
+                    "esdumanOS " OS_VERSION_PLAIN "\n"
+                    "Type 'help' for the builtin commands, or look in /bin.\n"
+                    "Ctrl-D ends input for a program reading the keyboard.\n";
+                fs_create_file("motd", (const uint8_t *)motd, ft_strlen(motd), sys_etc_id);
+
+                /*
+                 * Read by the shell at startup. Only "export KEY VALUE" is
+                 * recognised - it is a settings file, not a script, and running
+                 * arbitrary commands from it would mean forking and exec'ing
+                 * before the first prompt appears. The file says so itself, so
+                 * nobody has to read the shell to find out.
+                 */
+                const char *profile =
+                    "# Read by /bin/sh at startup.\n"
+                    "# Only 'export KEY VALUE' is recognised; '#' begins a comment.\n"
+                    "export SHELL /bin/sh\n"
+                    "export TERM vga\n";
+                fs_create_file("profile", (const uint8_t *)profile, ft_strlen(profile), sys_etc_id);
+            }
             printk("[VFS] Encrypted '/bin' tools successfully written to disk!\n");
         }
     }

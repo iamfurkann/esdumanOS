@@ -638,9 +638,36 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
     }
 
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
-        if (dir_table[i].is_used == 1 && 
-            dir_table[i].parent_id == parent_id && 
+        if (dir_table[i].is_used == 1 &&
+            dir_table[i].parent_id == parent_id &&
             ft_strcmp(dir_table[i].filename, name) == 0) {
+            /*
+             * A directory that still holds something is refused.
+             *
+             * A child records its parent as the parent's index in this table,
+             * and deleting the parent used to clear that slot and stop there.
+             * The children stayed behind pointing at an index that no longer
+             * described them, unreachable through any path - and visible again
+             * the moment the slot was reused, as somebody else's contents.
+             *
+             * An empty directory still deletes, which is what makes this
+             * rmdir(2) rather than a refusal to remove directories at all:
+             * there is no separate rmdir in this system, so refusing outright
+             * would leave a directory with no way to remove it.
+             *
+             * Index 0 is the root and is never allocated to a real entry -
+             * fs_mkdir() starts its search at 1 - so scanning for parent_id == i
+             * cannot confuse a directory's children with the root's.
+             */
+            if (dir_table[i].file_type == FT_DIR) {
+                for (int c = 0; c < MAX_FILES_IN_DIR; c++) {
+                    if (dir_table[c].is_used == 1 && dir_table[c].parent_id == (uint8_t)i) {
+                        klog(LOG_LEVEL_WARN, "VFS", "Refusing to delete a directory that is not empty.");
+                        vfs_unlock(); return E_NOTEMPTY;
+                    }
+                }
+            }
+
             /*
              * The index is bounded before every use.
              *

@@ -9,7 +9,7 @@
  */
 #define OS_VERSION_MAJOR    0
 #define OS_VERSION_MINOR    5
-#define OS_VERSION_PATCH    3
+#define OS_VERSION_PATCH    4
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
@@ -30,6 +30,15 @@
  * @brief Formatted OS version string
  */
 #define OS_VERSION_STR "  v" STRINGIFY(OS_VERSION_MAJOR) "." STRINGIFY(OS_VERSION_MINOR) "." STRINGIFY(OS_VERSION_PATCH) OS_VERSION_PRE " "
+
+/**
+ * @brief The version with no padding, for anything that is not a status bar.
+ *
+ * OS_VERSION_STR carries the two spaces the status bar wants around it, which
+ * makes it unusable anywhere the version is data rather than decoration. This is
+ * what /etc/os-release is written from, so the file and the banner cannot drift.
+ */
+#define OS_VERSION_PLAIN STRINGIFY(OS_VERSION_MAJOR) "." STRINGIFY(OS_VERSION_MINOR) "." STRINGIFY(OS_VERSION_PATCH) OS_VERSION_PRE
 
 #include "types.h"
 #include "tty.h"

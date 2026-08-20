@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4-alpha] - 2026-08-16
+
+The parser stops guessing, and `/etc` stops being an empty directory.
+
+### Fixed
+
+- **A pipeline can have more than two stages, and `>` can be combined with `|`.** The
+  parser took whichever of the two it met first and stopped, handing everything after it
+  on as ordinary arguments: `a | b | c` ran `a` against the literal tokens `b | c`, and
+  `a | b > f` passed `> f` to `b` as two words. Both were silent — the wrong thing ran and
+  reported success.
+
+  Up to four stages now, each forked, joined by one pipe per gap, and `>` belongs to the
+  stage it appears in. Four is a process budget rather than a preference: an external
+  stage costs two tasks, because the forked child runs the program through `exec()`, which
+  creates a task of its own. Asking for a fifth is refused with a message. So is a bare or
+  doubled `|`, and so is backgrounding a pipeline — that last one used to run in the
+  foreground with the `&` quietly dropped.
+- **`$VAR` and `~` are expanded in every stage.** Expansion ran after the split, and the
+  split had already written a null over the `|`, so the loop stopped there and no token
+  past the first stage was ever expanded.
+- **Every `~` gets its own storage.** One shared static buffer served the whole line, so
+  each expansion overwrote the last and every token ended up pointing at the same string:
+  `cp ~/a ~/b` passed `~/b` twice and copied a file onto itself. Expansions come out of an
+  arena that is reset per command, and running out of it is reported rather than absorbed.
+- **`/bin/rm`, `/bin/mv` and `/bin/kill` are reachable.** All three shipped in the image
+  and were unreachable by any spelling, because the builtin table was consulted first and
+  each name is also a builtin. A word containing a slash is a path now and is never
+  matched against that table, which is the rule every real shell uses.
+- **`rm <directory>` no longer orphans what is inside it.** A child records its parent as
+  the parent's index in the directory table, and deleting the parent cleared that slot and
+  stopped. The children stayed behind pointing at an index that no longer described them —
+  unreachable through any path, and visible again as somebody else's contents the moment
+  the slot was reused. A directory that still holds something is refused with `ENOTEMPTY`;
+  an empty one still goes, which makes this `rmdir(2)` rather than a refusal to remove
+  directories at all.
+
+### Added
+
+- **`/etc` has system files in it.** The directory has existed since the FHS hierarchy was
+  created and held nothing but the password database, so every fact a tool needed was
+  compiled into it instead.
+
+  `/etc/os-release` carries the version the kernel was built with, generated from the same
+  macro the status bar uses, so the two cannot drift. `/etc/hostname` is what the prompt
+  now reads — the name was a string literal in two places. `/etc/motd` is printed at
+  startup. `/etc/profile` is read by the shell before its first prompt: only
+  `export KEY VALUE` is recognised, and the file says so in its own opening lines. It is a
+  settings file rather than a script, because running arbitrary commands from it would
+  mean forking and exec'ing before a prompt appears, and a syntax error in it would be a
+  shell that will not start.
+
+  None of the four is required. Each falls back to what the shell already had, so a disk
+  image made before this release still boots.
+
+### Known issues
+
+These files are written in the same block as the `/bin` tools, which runs only when
+`init.elf` is absent from the disk — so a disk image carried over from an earlier version
+keeps its old `/etc` until it is recreated. `make run` clears the disk; `make run-dev` and
+`make restart` need `make reset-disk`.
+
 ## [0.5.3-alpha] - 2026-08-16
 
 Both ends of a pipeline learn how to stop. The writer gets a death, the reader gets an

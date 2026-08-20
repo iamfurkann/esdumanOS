@@ -604,6 +604,7 @@ void show_help(void) {
     printk("    export [K] [V]    Set environment variable\n");
     printk("    meminfo           Display RAM information\n");
     printk("    dmesg             Show kernel log buffer\n");
+    printk("    sync              Flush the disk cache and write the log to /var/log\n");
     printk("    jobs              List background jobs started with &\n");
     printk("    wait              Block until every background job has finished\n");
     printk("    hexdump [addr]    Show memory dump at address\n");
@@ -960,6 +961,17 @@ void execute_command(char **args) {
         else if (args[1] && ft_strcmp(args[1], "us") == 0) { syscall(12, 0, 0, 0); last_exit_status = 0; }
         else { printk("Usage: layout tr|us\n"); last_exit_status = 1; }
     }
+    else if (ft_strcmp(args[0], "sync") == 0) {
+        /*
+         * SYSCALL_SYNC has existed since v0.4.x and nothing in user space had
+         * ever called it - it was in the syscall table and reachable from
+         * nowhere. That did not matter while it only flushed the block cache;
+         * it does now that it is also when the kernel log is written to
+         * /var/log/kern.log, because the other two moments that write it are
+         * halt and reboot, and neither leaves a session to look at the result in.
+         */
+        last_exit_status = syscall(SYSCALL_SYNC, 0, 0, 0) == E_OK ? 0 : 1;
+    }
     else if (ft_strcmp(args[0], "lockdown") == 0) { last_exit_status = syscall(13, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "stack") == 0) { last_exit_status = syscall(14, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "meminfo") == 0) { last_exit_status = syscall(15, 0, 0, 0) < 0 ? 1 : 0; }
@@ -1303,7 +1315,7 @@ static const char *builtin_commands[] = {
     "jobs", "wait",
     "exit", "export", "halt", "help", "hexdump", "kill", "layout",
     "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
-    "rm", "sleep", "su", "write",
+    "rm", "sleep", "su", "sync", "write",
     0  // sentinel
 };
 

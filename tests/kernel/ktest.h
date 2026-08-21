@@ -167,6 +167,8 @@ void run_reap_tests(void);
 void run_fork_tests(void);
 /** @brief Copy-on-write: frame reference counting and the split on first write. */
 void run_cow_tests(void);
+/** @brief User dynamic memory: the program break, anonymous mappings, their bounds. */
+void run_umem_tests(void);
 void run_crypto_tests(void);
 void run_entropy_tests(void);
 void run_bcache_tests(void);

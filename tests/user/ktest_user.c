@@ -18,6 +18,18 @@
 #include "syscall.h"
 #include "errno.h"
 #include "stat.h"
+#include "umalloc.h"
+
+/*
+ * Bounds of the region mmap() hands out, mirrored from USER_MMAP_FLOOR and
+ * USER_MMAP_TOP in include/paging.h. Written out rather than included because
+ * paging.h is a kernel header and pulls in a kernel's worth of declarations;
+ * these two figures are part of the syscall's contract with user space, and a
+ * program checking that its mapping landed where it was promised is exactly the
+ * kind of thing that should notice if they ever move.
+ */
+#define ADDR_MMAP_FLOOR 0xA0000000u
+#define ADDR_MMAP_TOP   0xAFFDF000u
 
 /* Report kinds understood by sys_ktest_report() in tests/kernel/selftest.c. */
 #define KT_FAIL    0
@@ -1115,6 +1127,160 @@ void main(void) {
     syscall(SYSCALL_WAIT, 0, 0, 0);
     KT_ASSERT(cow_answer_buf[0] == 'P',
               "[STRICT] [COW] a kernel write into the child did not reach the parent");
+
+    /* ------------------------------------------------------------------
+     * Dynamic memory, from the side that has never had any.
+     *
+     * Every program in /bin works from arrays sized at compile time, because
+     * until now that was all there was. Two ways to ask for more - a break that
+     * grows and mappings that stand on their own - and one allocator over both,
+     * which is what a program actually calls.
+     * ------------------------------------------------------------------ */
+    unsigned int brk_first = (unsigned int)syscall(56, 0, 0, 0);
+
+    KT_ASSERT(brk_first > 0x400000u && brk_first < ADDR_MMAP_FLOOR,
+              "[STRICT] [UMEM] the break starts above the image and below the mmap region");
+    KT_ASSERT((brk_first & 0xFFFu) == 0, "[UMEM] the break is page-aligned");
+    KT_ASSERT((unsigned int)syscall(56, 0, 0, 0) == brk_first,
+              "[STRICT] [UMEM] reading the break does not move it");
+
+    /* A small allocation comes out of the break. */
+    char *small = (char *)umalloc(64);
+    KT_ASSERT(small != 0, "[UMEM] umalloc returns memory");
+
+    if (small) {
+        int zeroed = 1;
+        for (int i = 0; i < 64; i++) if (small[i] != 0) zeroed = 0;
+        KT_ASSERT(zeroed, "[STRICT] [UMEM] memory from a fresh heap page arrives zeroed");
+
+        for (int i = 0; i < 64; i++) small[i] = (char)(i + 1);
+
+        int held = 1;
+        for (int i = 0; i < 64; i++) if (small[i] != (char)(i + 1)) held = 0;
+        KT_ASSERT(held, "[UMEM] and it holds what is written to it");
+
+        KT_ASSERT((unsigned int)syscall(56, 0, 0, 0) > brk_first,
+                  "[STRICT] [UMEM] the allocation actually moved the break");
+    }
+
+    /* Freeing and asking again reuses the block rather than growing further. */
+    unsigned int brk_before_reuse = (unsigned int)syscall(56, 0, 0, 0);
+    ufree(small);
+    char *reused = (char *)umalloc(64);
+
+    KT_ASSERT(reused == small, "[UMEM] a freed block is handed back out again");
+    KT_ASSERT((unsigned int)syscall(56, 0, 0, 0) == brk_before_reuse,
+              "[STRICT] [UMEM] reusing a freed block does not grow the heap");
+
+    /* ucalloc has to clear a reused block itself: only the kernel's pages are
+     * fresh, and this one has the bytes written above still in it. */
+    ufree(reused);
+    char *cleared = (char *)ucalloc(16, 4);
+    if (cleared) {
+        int all_zero = 1;
+        for (int i = 0; i < 64; i++) if (cleared[i] != 0) all_zero = 0;
+        KT_ASSERT(all_zero, "[STRICT] [UMEM] ucalloc clears a block that came off the free list");
+        ufree(cleared);
+    }
+
+    /* urealloc grows and carries the contents over. */
+    char *grow = (char *)umalloc(32);
+    if (grow) {
+        for (int i = 0; i < 32; i++) grow[i] = (char)(0x40 + i);
+
+        char *bigger = (char *)urealloc(grow, 512);
+        KT_ASSERT(bigger != 0, "[UMEM] urealloc grows an allocation");
+
+        if (bigger) {
+            int carried = 1;
+            for (int i = 0; i < 32; i++) if (bigger[i] != (char)(0x40 + i)) carried = 0;
+            KT_ASSERT(carried, "[STRICT] [UMEM] urealloc carries the old contents over");
+            ufree(bigger);
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * A large allocation gets its own mapping, and gives it back.
+     *
+     * This is the split the allocator exists for: one big buffer that outlives
+     * the small allocations around it, returned to the kernel exactly when it is
+     * freed rather than trapped under a break that only moves from the top.
+     * ------------------------------------------------------------------ */
+    int mm_before = kt_free_kb();
+    char *buffer = (char *)umalloc(128 * 1024);
+    int mm_after = kt_free_kb();
+
+    KT_ASSERT(buffer != 0, "[UMEM] a large allocation succeeds");
+
+    if (buffer) {
+        KT_ASSERT((unsigned int)buffer >= ADDR_MMAP_FLOOR &&
+                  (unsigned int)buffer < ADDR_MMAP_TOP,
+                  "[STRICT] [UMEM] a large allocation lands in the mmap region, not on the break");
+        KT_ASSERT(mm_before - mm_after >= 128,
+                  "[UMEM] and the pages behind it really were taken from the kernel");
+
+        int big_zero = 1;
+        for (int i = 0; i < 128 * 1024; i += 4093) if (buffer[i] != 0) big_zero = 0;
+        KT_ASSERT(big_zero, "[STRICT] [UMEM] a mapped buffer arrives zeroed");
+
+        buffer[0] = 'A';
+        buffer[(128 * 1024) - 1] = 'Z';
+        KT_ASSERT(buffer[0] == 'A' && buffer[(128 * 1024) - 1] == 'Z',
+                  "[UMEM] the whole mapping is writable, first byte to last");
+
+        ufree(buffer);
+        KT_ASSERT(kt_free_kb() >= mm_after + 128,
+                  "[STRICT] [UMEM] freeing it hands the pages back to the kernel");
+    }
+
+    /* ------------------------------------------------------------------
+     * munmap refuses anything outside the region it owns.
+     *
+     * The assertion this whole syscall hangs on. Every address below is
+     * legitimately this process's own, which is exactly why nothing further
+     * down would object: without the bounds check the kernel would take the
+     * caller's stack away and the fault would arrive somewhere else entirely.
+     * ------------------------------------------------------------------ */
+    int stack_witness = 0x1234;
+    unsigned int stack_page = ((unsigned int)&stack_witness) & 0xFFFFF000u;
+
+    KT_ASSERT(syscall(58, (int)stack_page, 4096, 0) == E_INVAL,
+              "[STRICT] [UMEM] munmap refuses the caller's own stack");
+    KT_ASSERT(syscall(58, (int)brk_first, 4096, 0) == E_INVAL,
+              "[STRICT] [UMEM] munmap refuses the caller's own heap");
+    KT_ASSERT(stack_witness == 0x1234,
+              "[STRICT] [UMEM] and the refused pages are still there");
+
+    /* mmap will not honour a flag it does not implement. */
+    KT_ASSERT((unsigned int)syscall(57, 4096, 1, 0) == 0xFFFFFFFFu,
+              "[UMEM] mmap refuses a reserved argument that is not zero");
+
+    /* ------------------------------------------------------------------
+     * The heap is copy-on-write across a fork, like everything else.
+     *
+     * Nothing special was done to make this true - heap pages are ordinary user
+     * pages and fork() shares them the same way - which is the point worth
+     * asserting. A separate bookkeeping path for the heap would be where that
+     * stopped being true.
+     * ------------------------------------------------------------------ */
+    char *shared = (char *)umalloc(64);
+    if (shared) {
+        shared[0] = 'P';
+
+        child = syscall(SYSCALL_FORK, 0, 0, 0);
+        if (child == 0) {
+            shared[0] = 'C';
+            kt_child_exit(shared[0] == 'C' ? 0 : 1);
+        }
+
+        int heap_status = -1;
+        syscall(SYSCALL_WAIT, (int)&heap_status, 0, 0);
+
+        KT_ASSERT(heap_status == 0, "[UMEM] the child could write to its copy of the heap");
+        KT_ASSERT(shared[0] == 'P',
+                  "[STRICT] [UMEM] the child's heap write did not reach the parent");
+        ufree(shared);
+    }
 
     /* ------------------------------------------------------------------
      * A status parked before anyone asked for it.

@@ -27,6 +27,7 @@
 #include "rtc.h"
 #include "chacha20.h"
 #include "entropy.h"
+#include "process.h"
 
 /**
  * @brief Reads from the null device. Always returns 0 (EOF).
@@ -304,10 +305,117 @@ int dev_random_write(const uint8_t *buf, int size) {
     return E_PERM;
 }
 
+/* ── /dev/kmsg ─────────────────────────────────────────────────────── */
+
+/**
+ * @brief Reads the next kernel log record for the calling process.
+ *
+ * One record per call, rendered in the structured form - the machine-readable
+ * fields ahead of the semicolon, the human text after it. A reader wanting only
+ * errors reads the first field instead of parsing a prefix out of a line, which
+ * is the whole reason the ring holds records rather than text.
+ *
+ * The cursor lives in the process control block, not here and not per open file.
+ * The device interface has no per-descriptor state to hang one on, and a single
+ * global cursor would mean two readers stealing records from each other. Linux
+ * keeps one per open; this keeps one per process, so two descriptors in the same
+ * program share a position. That is a real difference and it is documented
+ * rather than hidden.
+ *
+ * A cursor that has fallen behind what the ring still holds is moved forward to
+ * the oldest surviving record rather than being quietly satisfied with the wrong
+ * one. How many went missing is what klog_dropped() is for.
+ *
+ * @param buf Kernel buffer receiving the rendered record.
+ * @param size Capacity of @p buf.
+ * @return Bytes written, 0 when the reader has caught up, or a negative errno.
+ */
+int dev_kmsg_read(uint8_t *buf, int size) {
+    if (!buf) return E_FAULT;
+    if (size <= 0) return E_INVAL;
+    if (current_task == 0) return E_SRCH;
+
+    uint32_t oldest = klog_oldest_seq();
+    if (oldest == 0) return 0;
+
+    if (current_task->kmsg_seq < oldest) current_task->kmsg_seq = oldest;
+
+    const klog_record_t *rec = klog_by_seq(current_task->kmsg_seq);
+    if (rec == 0) return 0;
+
+    char line[KLOG_LINE_MAX];
+    int n = klog_format_kmsg(rec, line, (int)sizeof(line));
+    if (n <= 0) return 0;
+    if (n > size) n = size;
+
+    for (int i = 0; i < n; i++) buf[i] = (uint8_t)line[i];
+
+    current_task->kmsg_seq++;
+    return n;
+}
+
+/**
+ * @brief Records a message a program wrote to /dev/kmsg.
+ *
+ * Writable, unlike /dev/random, and the difference is what a write does. Writing
+ * to a random device would feed the generator's own state, which is a thing to
+ * have to reason about; writing here appends a record that is explicitly marked
+ * as having come from user space and carries the author's uid, so nothing a
+ * program writes can be mistaken for something the kernel said.
+ *
+ * Root only, which is what Linux's permissions on this device amount to. An
+ * unprivileged program that could write here could push every diagnostic record
+ * out of the ring, and root can already do worse. The rate limit in
+ * klog_user_record() is the second half of that: root in a loop is still a loop.
+ *
+ * An optional `<N>` prefix sets the severity, as it does on Linux. Without one
+ * the record is INFO.
+ *
+ * @param buf Kernel buffer holding the message.
+ * @param size Bytes in @p buf.
+ * @return Bytes accepted, or a negative errno.
+ */
+int dev_kmsg_write(const uint8_t *buf, int size) {
+    if (!buf) return E_FAULT;
+    if (size <= 0) return E_INVAL;
+    if (current_task == 0) return E_SRCH;
+
+    if (current_task->uid != 0) {
+        klog(LOG_LEVEL_WARN, "DEVFS", "Refused a /dev/kmsg write: ROOT permission is required.");
+        return E_PERM;
+    }
+
+    int level = LOG_LEVEL_INFO;
+    int start = 0;
+
+    if (size >= 3 && buf[0] == '<' && buf[1] >= '0' && buf[1] <= '4' && buf[2] == '>') {
+        level = buf[1] - '0';
+        start = 3;
+    }
+
+    char text[KLOG_TEXT_MAX];
+    int n = 0;
+    for (int i = start; i < size && n < (int)sizeof(text) - 1; i++) {
+        /* A trailing newline is how a program ends a line, not part of what it
+         * said; the renderer adds its own. */
+        if (buf[i] == '\n') break;
+        text[n++] = (char)buf[i];
+    }
+    text[n] = '\0';
+
+    if (n == 0) return size;
+
+    int rc = klog_user_record(level, text, current_task->uid);
+    if (rc != E_OK) return rc;
+
+    return size;
+}
+
 device_node_t dev_table[] = {
     {"null", dev_null_read, dev_null_write},
     {"random", dev_random_read, dev_random_write},
     {"urandom", dev_urandom_read, dev_random_write},
+    {"kmsg", dev_kmsg_read, dev_kmsg_write},
     {"", 0, 0}
 };
 

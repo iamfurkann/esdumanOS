@@ -352,6 +352,13 @@ void inherit_pcb_state(process_t *child, process_t *parent) {
     child->brk_start = parent->brk_start;
     child->brk_current = parent->brk_current;
 
+    /*
+     * The log cursor comes over too, so a child continues reading where its
+     * parent had got to rather than being handed the whole ring again. A shell
+     * that forks to run something is not asking for the boot log a second time.
+     */
+    child->kmsg_seq = parent->kmsg_seq;
+
     ft_memcpy(child->cmd_args, parent->cmd_args, sizeof(child->cmd_args));
     ft_memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
     child->fpu_initialized = parent->fpu_initialized;

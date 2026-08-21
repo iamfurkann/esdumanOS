@@ -15,9 +15,47 @@
 #define RECURSIVE_PT_VADDR 0xFFC00000
 
 /**
- * @brief Top of the user-mode (Ring 3) stack space.
+ * @brief Top of the user-mode (Ring 3) stack.
+ *
+ * This read 0xBFFFF000 and nothing used it. The ELF loader has always built the
+ * stack at 0xB0000000 with its own literal, and the memory map in the README
+ * documents that address, so the one constant naming the boundary was the only
+ * place that disagreed with everyone else. Anything laid out relative to the
+ * stack - which is now both of the regions below - has to start from the real
+ * figure.
  */
-#define USER_STACK_TOP     0xBFFFF000
+#define USER_STACK_TOP     0xB0000000
+
+/**
+ * @brief Number of stack pages the loader maps below USER_STACK_TOP.
+ */
+#define USER_STACK_PAGES   32
+
+/**
+ * @brief The unmapped page below the stack that catches an overflow.
+ */
+#define USER_STACK_GUARD   (USER_STACK_TOP - ((USER_STACK_PAGES + 1) * PAGE_SIZE))
+
+/**
+ * @brief Highest address mmap() will hand out, exclusive.
+ *
+ * Directly below the stack guard page, and mmap() searches downwards from here.
+ */
+#define USER_MMAP_TOP      USER_STACK_GUARD
+
+/**
+ * @brief Lowest address mmap() will hand out, and the ceiling on the brk heap.
+ *
+ * The two regions grow towards each other, so something has to stop them from
+ * meeting. A fixed split rather than a moving boundary: it costs address space
+ * that a 128 MB machine cannot use anyway, and it means neither region's bounds
+ * depend on what the other has done. mmap gets 0xA0000000 upwards to the guard
+ * page, roughly 256 MB; the heap gets everything from the end of the program's
+ * image up to here.
+ *
+ * Clear of 0x80000000, which the idle task's page uses in the kernel directory.
+ */
+#define USER_MMAP_FLOOR    0xA0000000
 
 /**
  * @brief Temporary mapping virtual address used during address space cloning.

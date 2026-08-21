@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1-alpha] - 2026-08-21
+
+Programs can ask for memory. Until now one had its ELF segments and a fixed 32-page
+stack, decided by the loader and never changed again, and every tool in `/bin` worked
+from arrays sized at compile time because there was nothing else to work from.
+
+### Added
+
+- **`brk` (56).** Moves a single boundary upwards from the end of the program's image.
+  Raw kernel semantics rather than the libc wrapper's: the *resulting* break comes back
+  whether or not it is the one that was asked for, so a caller finds out it failed by
+  comparing. That also makes `brk(0)` the way to read the current break without moving
+  it — zero can never be granted — which is why there is no second syscall for it.
+
+  The loader plants the starting point from the highest address any `PT_LOAD` segment
+  reaches, rounded up to a page. A task with no ELF image behind it — the idle task, or
+  anything the test suite creates by hand — has no break and is refused rather than
+  given one at whatever address its address space happened to be empty.
+
+- **`mmap` (57) and `munmap` (58).** Anonymous, private, zero-filled pages in a region
+  below the stack guard page, released independently of anything else. This is the
+  primitive for one large buffer that outlives the allocations around it, which is what
+  a text editor needs and what the break cannot give: a run can only be returned from
+  the top, and the top is rarely the part a program has finished with.
+
+  `munmap` refuses any range outside that region, and that check is the load-bearing
+  one. Without it this is an arbitrary unmap: a program could pass its own stack, its
+  own text, or the heap its allocator is standing on, and every address involved would
+  be legitimately its own — nothing further down would object, and the fault would
+  arrive somewhere else entirely.
+
+- **`include/umalloc.h`.** A header-only allocator over both. Every program in
+  `apps/bin` is a single translation unit compiled with `-nostdlib`, so there is no
+  user-space libc to put an allocator in and no link step that would find one; each
+  program takes a private copy by including it, which is the bargain they already make
+  with their string helpers. It brings its own syscall wrapper rather than calling the
+  program's, so that including it carries no ordering requirement.
+
+  Small requests come off the break and freed blocks are reused, merged with whichever
+  neighbours are also free. Requests of 64 KB or more get their own mapping, which
+  `ufree()` hands straight back to the kernel.
+
+- **Neither region keeps a list of what it has handed out.** The page tables already
+  record exactly that, they are already walked by `fork()` and by process teardown, and
+  a second record of the same facts is a second record to keep in step. `mmap` walks to
+  find a free run instead of looking one up, which on a machine with sixteen processes
+  is not a cost worth a subsystem.
+
+### Changed
+
+- **`ls` reads through the heap.** Its listing buffer was 1024 bytes on the stack, and
+  `SYSCALL_READDIR` has always been willing to return 4096 — the listing simply stopped
+  at an entry boundary with nothing to say that it had. The buffer is now allocated, and
+  sized from the kernel's own ceiling rather than from what would fit in a stack frame.
+
+- **`USER_STACK_TOP` was wrong and unused.** It read `0xBFFFF000` while the ELF loader
+  built the stack at `0xB0000000` with its own literal, so the one constant naming the
+  boundary was the only thing that disagreed with everyone else. It is the real figure
+  now, and the loader reads it — which matters because the mmap region is laid out
+  directly beneath the guard page and cannot be positioned from a number that is wrong.
+
+- **Every page handed to user space is zeroed first.** A frame the allocator has just
+  returned holds whatever its last owner left in it, so this is a security property
+  rather than a courtesy: an unzeroed heap page is another process's memory delivered
+  to this one. The pages go through `copy_to_user()` for the same reason the ELF
+  loader's do — SMAP forbids a supervisor write to a user page outside that window.
+
 ## [0.7.0-alpha] "Cleave" - 2026-08-20
 
 `fork()` stops copying. A child now gets the parent's pages themselves, both sides

@@ -131,4 +131,13 @@ void sys_chdir(arch_regs_t *regs);
 /** @brief Syscall handler for reading the working directory */
 void sys_getcwd(arch_regs_t *regs);
 
+
+// sys_mem.c
+/** @brief Syscall handler for moving the program break; returns the resulting break */
+void sys_brk(arch_regs_t *regs);
+/** @brief Syscall handler for mapping anonymous zeroed pages; returns the address */
+void sys_mmap(arch_regs_t *regs);
+/** @brief Syscall handler for releasing pages obtained from mmap */
+void sys_munmap(arch_regs_t *regs);
+
 #endif // SYSCALLS_INTERNAL_H

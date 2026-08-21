@@ -63,6 +63,7 @@ static const ktest_module_t kernel_modules[] = {
     { "lifecycle",   run_lifecycle_tests },
     { "fork",        run_fork_tests },
     { "cow",         run_cow_tests },
+    { "umem",        run_umem_tests },
     { "fault",       run_fault_tests },
     { "syscall",     run_syscall_tests },
     { "process",     run_process_tests },

@@ -1,7 +1,20 @@
 #include "syscall.h"
 #include "errno.h"
+#include "umalloc.h"
 
 typedef unsigned int uint32_t;
+
+/**
+ * @brief Size of the buffer `ls` reads a directory listing into.
+ *
+ * This is the kernel's own ceiling - READDIR_STAGE_MAX in sys_fs.c - rather than
+ * a number chosen here. SYSCALL_READDIR stages the listing in kernel memory and
+ * caps that staging buffer whatever the caller asks for, so a larger buffer
+ * gains nothing and a smaller one throws entries away: the listing stops at an
+ * entry boundary with no indication that it stopped. It was 1024 bytes on the
+ * stack, which is a quarter of what the kernel was prepared to hand over.
+ */
+#define LS_BUF_SIZE 4096
 
 /**
  * @brief Slots in the argument vector, including the terminating NULL.
@@ -790,11 +803,17 @@ int builtin_ls(char **args) {
 
     /* One call, one buffer. A directory holding more entries than fit is
      * truncated by the kernel at an entry boundary rather than split across
-     * calls; readdir has no cursor to resume from. 256 entries is the table
-     * limit and this holds well over a hundred typical names. */
-    char dir_buf[1024];
-    int bytes = sys_readdir(dir_id, dir_buf, sizeof(dir_buf));
-    if (bytes < 0) { printk("ls: cannot read directory\n"); return 1; }
+     * calls; readdir has no cursor to resume from.
+     *
+     * Off the stack and onto the heap, which is the point: 4 KB is what the
+     * kernel is willing to return and there was no room for it here. main()'s
+     * frame carries the line buffer, the argument vector and the pipeline stage
+     * tables, and the stack is 32 pages for the whole program. */
+    char *dir_buf = (char *)umalloc(LS_BUF_SIZE);
+    if (!dir_buf) { printk("ls: out of memory\n"); return 1; }
+
+    int bytes = sys_readdir(dir_id, dir_buf, LS_BUF_SIZE);
+    if (bytes < 0) { ufree(dir_buf); printk("ls: cannot read directory\n"); return 1; }
 
     printk("Contents:\n----------------------------------------\n");
 
@@ -819,6 +838,8 @@ int builtin_ls(char **args) {
 
     if (!found) printk("(Empty)\n");
     printk("----------------------------------------\n");
+
+    ufree(dir_buf);
     return 0;
 }
 

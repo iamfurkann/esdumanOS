@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.7.0-alpha
+**Version:** 0.7.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -205,6 +205,20 @@ reading rather than by testing — the writable-pointer validator rejects a page
 read/write bit is clear, which after a fork is every writable page on both sides, and the
 page fault handler examined the in-progress-copy fixup before it examined the page.
 
+v0.7.1 gives user-space programs memory they can ask for. Until now a program had
+its ELF segments and a fixed 32-page stack, decided once by the loader, and every tool
+in `/bin` worked from arrays sized at compile time - there was no allocator, and with
+each program compiled as a single translation unit against `-nostdlib`, nowhere to put
+one. Two syscalls now: `brk` moves a single boundary upwards from the end of the image,
+and `mmap` hands out an independent run below the stack that `munmap` releases on its
+own. `include/umalloc.h` is the allocator over both, in a header because there is no
+link step that would find a library; small requests come off the break, and anything
+from 64 KB up takes its own mapping so that freeing it really returns the pages. Both
+kinds arrive zeroed, which is a security property rather than a courtesy - a frame the
+allocator has just handed out holds whatever its last owner left in it. `ls` is the
+first user: its listing buffer moved off the stack and grew to the 4 KB the kernel was
+always willing to return, four times what it had been reading.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -214,7 +228,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 16 user-space programs and 28 shell builtins
-- 27 kernel self-test modules and CI pipeline
+- 28 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -243,6 +257,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Physical Memory (PMM)** | Bitmap allocator with per-frame reference counting, multiboot memory map detection, 128 MB addressable, next-fit optimization |
 | **Virtual Memory (Paging)** | Recursive page directory mapping, per-process address spaces, 4 KB page granularity, copy-on-write on `fork` |
 | **Kernel Heap** | First-fit allocator with block splitting, bidirectional coalescing with adjacency checks, magic-number corruption detection, double-free protection |
+| **User Memory** | Program break (`brk`) and anonymous `mmap`/`munmap`, both zero-filled; `include/umalloc.h` is a header-only allocator over them |
 
 ### Process Management
 
@@ -358,10 +373,16 @@ anyone curious about kernel internals — not for storing anything you care abou
 0xBFFFFFFF  +-------------------------+
             |  (unmapped)             |  Top of the user range; validated as
             |                         |  writable but nothing is mapped here
-0xB0000000  +-------------------------+
-            |  User Stack             |  Stack top set by the ELF loader,
-            +                         +  grows down, guard page below
-
+0xB0000000  +-------------------------+  USER_STACK_TOP
+            |  User Stack             |  32 pages, grows down
+0xAFFDF000  +-------------------------+  Guard page, never mapped
+            |  mmap region            |  Anonymous mappings, allocated
+            |                         |  downwards from the guard page
+0xA0000000  +-------------------------+  USER_MMAP_FLOOR
+            |                         |
+            |  (unmapped)             |  The two regions grow towards each
+            |                         |  other and stop at this fixed split
+            |  Program break / heap   |  Grows up from the end of the image
             |                         |
             |  User Space             |  Process-specific mappings
             |  (ELF segments)         |
@@ -689,7 +710,7 @@ make test
 # Run parser fuzzing with 54 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 27 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 28 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -848,7 +869,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      27 kernel-mode test modules + framework
+|   |-- kernel/                      28 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (54 corpus files)
 |
@@ -882,6 +903,9 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | 53 | `FORK` | Duplicate the caller; returns 0 in the child and its pid in the parent |
 | 54 | `WAIT` | Collect a finished child's exit status; blocks if none has finished yet |
 | 55 | `TIME` | Fill an `esd_time_t` with the current wall-clock time |
+| 56 | `BRK` | Move the program break; returns the resulting break, so a refusal is the break unmoved |
+| 57 | `MMAP` | Map anonymous, private, zeroed pages; returns the address or `0xFFFFFFFF` |
+| 58 | `MUNMAP` | Release pages obtained from `MMAP`; refuses any range outside that region |
 | 99 | `YIELD` | Voluntarily yield the CPU |
 
 `TIME` fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space the
@@ -1153,7 +1177,17 @@ The following are known constraints of the current implementation. These are doc
   speculatively, and every major operating system moved back to eager switching in
   2018. One `fxsave` per switch across at most 16 tasks is the cheaper side of that
   trade by a wide margin.
-- **No mmap() or brk().** User-space programs cannot dynamically allocate memory beyond their initial ELF segments and stack.
+- **`mmap()` is anonymous only.** There is no file backing and no `MAP_FIXED`: the
+  kernel picks the address, the pages arrive zeroed, and nothing on disk is behind
+  them. Mapping a file would need a page cache, which is a subsystem rather than a
+  flag.
+- **The program break never comes back down.** `umalloc()` reuses freed blocks but
+  does not return the run to the kernel, because a run can only be released from the
+  top and the top is rarely the part a program finished with. Allocations of 64 KB or
+  more sidestep this by taking their own mapping, which `ufree()` releases exactly.
+- **Pages are allocated eagerly.** `brk` and `mmap` both map every page before they
+  return, rather than mapping on first touch. A program that reserves a large range
+  and uses a little of it pays for all of it.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.
 - **No dynamic linking.** All user-space programs are statically linked.
@@ -1194,7 +1228,6 @@ Near-term priorities for the project, roughly in order:
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
 | P2 | Setting the clock — the RTC is read and never written |
-| P3 | `mmap`/`brk` so user programs can allocate beyond their ELF segments, on the reference counting copy-on-write introduced |
 | P3 | ANSI escape code support in terminal |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |

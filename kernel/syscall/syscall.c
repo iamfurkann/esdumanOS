@@ -114,6 +114,11 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_CHDIR:        sys_chdir(regs); break;
         case SYSCALL_GETCWD:       sys_getcwd(regs); break;
 
+        //sys_mem.c
+        case SYSCALL_BRK:          sys_brk(regs); break;
+        case SYSCALL_MMAP:         sys_mmap(regs); break;
+        case SYSCALL_MUNMAP:       sys_munmap(regs); break;
+
         case SYSCALL_CLEAR_SCREEN:
             terminal_initialize();
             regs->eax = 0;

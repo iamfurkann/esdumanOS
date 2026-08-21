@@ -342,6 +342,16 @@ void inherit_pcb_state(process_t *child, process_t *parent) {
     child->current_priority = parent->current_priority;
     child->auth_fail_ticks = parent->auth_fail_ticks;
 
+    /*
+     * The break comes over as it stands. create_process() cannot derive it - it
+     * never sees an ELF image - and copy_user_space() has already given the
+     * child every heap page the parent had mapped. A child that started at
+     * brk_start instead would hand the same addresses out twice, over memory it
+     * is already using.
+     */
+    child->brk_start = parent->brk_start;
+    child->brk_current = parent->brk_current;
+
     ft_memcpy(child->cmd_args, parent->cmd_args, sizeof(child->cmd_args));
     ft_memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
     child->fpu_initialized = parent->fpu_initialized;

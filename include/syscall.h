@@ -129,6 +129,32 @@
 #define SYSCALL_WAIT            54
 /** @brief Fill an esd_time_t with the current time; non-zero ecx asks for UTC */
 #define SYSCALL_TIME            55
+/**
+ * @brief Move the program break; returns the resulting break.
+ *
+ * Raw brk semantics, as the kernel call rather than the libc wrapper: the
+ * requested break goes in ebx and the *resulting* break comes back in eax. A
+ * request that cannot be satisfied returns the break unchanged rather than an
+ * errno, so the caller finds out by comparing the answer with what it asked
+ * for - and `brk(0)`, which can never be granted, is therefore how you read the
+ * current break without moving it.
+ */
+#define SYSCALL_BRK             56
+/**
+ * @brief Map anonymous, private, zero-filled pages; returns the address.
+ *
+ * ebx is the length in bytes, rounded up to a page. ecx is reserved and must be
+ * zero. Returns 0xFFFFFFFF when the mapping could not be made. The kernel picks
+ * the address; there is no MAP_FIXED and no file backing.
+ */
+#define SYSCALL_MMAP            57
+/**
+ * @brief Release pages obtained from mmap; returns 0 or a negative errno.
+ *
+ * ebx is the address and ecx the length. Both are rounded to page boundaries,
+ * and the range must lie inside the region mmap hands out.
+ */
+#define SYSCALL_MUNMAP          58
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

@@ -38,6 +38,7 @@ CORE_SRCS = kernel/core/kernel.c \
             kernel/syscall/syscall.c \
 			kernel/syscall/sys_fs.c \
 			kernel/syscall/sys_ipc.c \
+			kernel/syscall/sys_mem.c \
 			kernel/syscall/sys_process.c \
 			kernel/syscall/sys_sec.c \
 			kernel/syscall/sys_utils.c \
@@ -99,6 +100,7 @@ TEST_SRCS = tests/kernel/selftest.c \
 			tests/kernel/test_lifecycle.c \
 			tests/kernel/test_fork.c \
 			tests/kernel/test_cow.c \
+			tests/kernel/test_umem.c \
 			tests/kernel/test_fault.c \
             tests/kernel/test_syscall.c \
             tests/kernel/test_process.c \

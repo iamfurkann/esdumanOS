@@ -86,4 +86,30 @@ extern int dev_random_read(uint8_t *buf, int size);
  */
 extern int dev_urandom_read(uint8_t *buf, int size);
 
+/**
+ * @brief Reads the next kernel log record for the calling process.
+ *
+ * One record per call, in the structured form. The cursor is per process rather
+ * than per open descriptor - the device interface has no per-descriptor state -
+ * so two descriptors in one program share a position.
+ *
+ * @param buf Buffer receiving the rendered record.
+ * @param size Capacity of @p buf.
+ * @return Bytes written, 0 once the reader has caught up, or a negative errno.
+ */
+extern int dev_kmsg_read(uint8_t *buf, int size);
+
+/**
+ * @brief Records a message a program wrote to /dev/kmsg.
+ *
+ * Root only, rate limited, and marked as having come from user space so that
+ * nothing a program writes can be mistaken for something the kernel said. An
+ * optional `<N>` prefix sets the severity.
+ *
+ * @param buf Buffer holding the message.
+ * @param size Bytes in @p buf.
+ * @return Bytes accepted, or a negative errno.
+ */
+extern int dev_kmsg_write(const uint8_t *buf, int size);
+
 #endif // DEVFS_H

@@ -208,6 +208,20 @@ typedef struct process_s {
     uint32_t brk_start;
     uint32_t brk_current;
 
+    /*
+     * Where this process has read up to in the kernel log through /dev/kmsg.
+     *
+     * Per process rather than per open descriptor, because the device interface
+     * has no per-descriptor state to hang a cursor on and a single global one
+     * would have two readers stealing records from each other. Linux keeps one
+     * per open; two descriptors in the same program share a position here.
+     *
+     * Zero means "start at the oldest record still held", which is where a fresh
+     * process and a process whose cursor has fallen off the back of the ring
+     * both end up.
+     */
+    uint32_t kmsg_seq;
+
     uint8_t fpu_state[512] __attribute__((aligned(16)));
     int fpu_initialized;
     uint32_t auth_fail_ticks;

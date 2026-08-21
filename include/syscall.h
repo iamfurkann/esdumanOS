@@ -155,6 +155,27 @@
  * and the range must lie inside the region mmap hands out.
  */
 #define SYSCALL_MUNMAP          58
+/**
+ * @brief Inspect and control the kernel log; ebx selects the operation.
+ *
+ * The read side of the log has been reachable since v0.4.x through DMESG. What
+ * has never been reachable is everything around it: the severity threshold has
+ * sat at INFO since boot with no way to move it, so every DEBUG record the
+ * kernel composes has been discarded unseen, and there has been no way to clear
+ * the ring or to ask how much of it was lost when it wrapped.
+ */
+#define SYSCALL_KLOG_CTL        59
+
+/** @brief Discard every held record. Root only. */
+#define KLOG_CTL_CLEAR          0
+/** @brief Set the severity threshold from ecx. Root only. */
+#define KLOG_CTL_SET_LEVEL      1
+/** @brief Return the current severity threshold. */
+#define KLOG_CTL_GET_LEVEL      2
+/** @brief Return how many records are currently held. */
+#define KLOG_CTL_HELD           3
+/** @brief Return how many records the ring has overwritten since boot. */
+#define KLOG_CTL_DROPPED        4
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

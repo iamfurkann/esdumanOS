@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.7.1-alpha
+**Version:** 0.7.2-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -219,6 +219,21 @@ allocator has just handed out holds whatever its last owner left in it. `ls` is 
 first user: its listing buffer moved off the stack and grew to the 4 KB the kernel was
 always willing to return, four times what it had been reading.
 
+v0.7.2 makes a log record a record. v0.6.1 made the ring wrap and stopped `printk()`
+feeding it, so it stopped being a transcript of the screen — but a record was still
+just a line of text, and every question about one was a question about parsing.
+When did this happen, how many did we lose when it wrapped, show me only the
+errors: none could be answered, so none were asked. The ring holds structured
+records now, 512 of them against the 8 KB of flat text that held roughly 130
+lines, and each carries its own level, module, monotonic timestamp and sequence
+number. The sequence numbers are what make a gap visible: `dmesg` reports how many
+records went when the ring wrapped, which nothing could ask before. `KLOG_CTL`
+gives user space the rest — the severity threshold had sat at INFO since boot with
+nothing able to move it, so every DEBUG record the kernel composed was discarded
+unseen. `dmesg` grew `-c`, `-n` and `-l` to reach it, and `/dev/kmsg` streams the
+records in a machine-readable form, writable by root so that a program's words are
+recorded as a program's rather than as the kernel's.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -228,7 +243,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 16 user-space programs and 28 shell builtins
-- 28 kernel self-test modules and CI pipeline
+- 29 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -247,7 +262,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
 | **Syscall Interface** | 55 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
-| **Kernel Logging** | 8 KB in-memory ring buffer (dmesg equivalent), readable through the `dmesg` syscall and written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
+| **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
 ### Memory Management
@@ -277,7 +292,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
 | **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()` |
-| **DevFS** | `/dev/null`, `/dev/random` and `/dev/urandom` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically |
+| **DevFS** | `/dev/null`, `/dev/random`, `/dev/urandom` and `/dev/kmsg` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically, and `/dev/kmsg` streams log records with a per-process cursor |
 
 ### Drivers
 
@@ -710,7 +725,7 @@ make test
 # Run parser fuzzing with 54 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 28 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 29 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -869,7 +884,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      28 kernel-mode test modules + framework
+|   |-- kernel/                      29 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (54 corpus files)
 |
@@ -906,6 +921,7 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | 56 | `BRK` | Move the program break; returns the resulting break, so a refusal is the break unmoved |
 | 57 | `MMAP` | Map anonymous, private, zeroed pages; returns the address or `0xFFFFFFFF` |
 | 58 | `MUNMAP` | Release pages obtained from `MMAP`; refuses any range outside that region |
+| 59 | `KLOG_CTL` | Inspect and control the kernel log: clear it, move the severity threshold, read the held and dropped counts |
 | 99 | `YIELD` | Voluntarily yield the CPU |
 
 `TIME` fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space the
@@ -1131,7 +1147,7 @@ The following are known constraints of the current implementation. These are doc
 | Pipes, system-wide | 16 (`MAX_SYSTEM_PIPES`, shared by named and anonymous) |
 | Per-process kernel stack | 8 KB (`KERNEL_STACK_SIZE`) |
 | Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
-| Kernel log buffer | 8 KB (`KLOG_BUF_SIZE`) |
+| Kernel log ring | 512 records, ~88 KB (`KLOG_RECORDS`) |
 
 ### Architectural
 
@@ -1191,6 +1207,14 @@ The following are known constraints of the current implementation. These are doc
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.
 - **No dynamic linking.** All user-space programs are statically linked.
+- **The log is written at checkpoints, not continuously.** `sync`, `halt` and
+  `reboot` write `/var/log/kern.log`; a machine that loses power between them
+  loses whatever was recorded since the last one. Appending is not possible in
+  the current on-disk format — a file is one AES-CBC blob authenticated over its
+  whole plaintext — so continuous writing and rotation wait on the format change.
+- **`/dev/kmsg` keeps one cursor per process, not per open descriptor.** The
+  device interface has no per-descriptor state to hang one on, so two descriptors
+  in the same program share a read position. Linux keeps one per open.
 - **No ACPI.** Shutdown and reboot use legacy keyboard controller reset.
 - **VGA text mode only.** No framebuffer or graphical output.
 

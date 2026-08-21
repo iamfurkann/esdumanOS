@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2-alpha] - 2026-08-21
+
+A log record becomes a record. v0.6.1 made the ring wrap and stopped `printk()` feeding
+it, so it stopped being a transcript of the screen — but a record was still just a line
+of text, and every question about one was a question about parsing. When did this
+happen. How many did we lose when it wrapped. Show me only the errors. None of them
+could be answered, so none of them were asked.
+
+### Added
+
+- **A record ring.** 512 structured records against the 8 KB of flat text that held
+  roughly 130 lines, and each carries its own level, module, monotonic timestamp and
+  sequence number rather than a seven-character prefix on a string. About 88 KB of
+  kernel data, which on a 128 MB machine buys a great deal for very little.
+
+  The timestamp is a tick count, not a wall-clock time. It is monotonic and stays
+  correct when the RTC is not, which is the property a log needs, and it is rendered to
+  hundredths because `TIMER_HZ` is 100 — printing the six decimals Linux does would be
+  printing precision this clock does not have.
+
+- **Sequence numbers, and the count of what was dropped.** The byte ring wrapped
+  mid-line and counted nothing, so a gap in the log looked like a quiet period. `dmesg`
+  reports the count on descriptor 2, not 1: it is a note about the log rather than part
+  of it, and putting it on stdout would drop it into the middle of `dmesg > boot.log`.
+
+- **`KLOG_CTL` (59).** The severity threshold had sat at INFO since boot with nothing
+  able to move it, so every DEBUG record the kernel composed was discarded unseen — a
+  filter nobody can adjust is a filter that only ever removes. Clearing the log and
+  moving the threshold change what everyone else sees and are root's; reading the
+  threshold and the counters change nothing and are anyone's, which is what lets an
+  ordinary program notice records went missing between two reads.
+
+- **`dmesg -c`, `-n` and `-l`.** `-n` sets the kernel's threshold and prints nothing;
+  `-l` chooses what to show out of what was already recorded. Deliberately not the same
+  flag: running them together would make `dmesg -n debug` look as though it had lost
+  the log. `-l` filters in the shell, as it does on Linux, so the syscall surface stays
+  as small as it was.
+
+- **`/dev/kmsg`.** Records in the structured form — `level,seq,ticks,flag;module: text`
+  — so a reader wanting only errors reads the first field instead of parsing a prefix
+  out of a line.
+
+  Writable by root, which is what Linux's permissions on this device amount to, and
+  rate limited. A record a program wrote is marked as one and carries its author's uid,
+  so nothing a program writes can be mistaken for something the kernel said. Kernel
+  records are deliberately *not* rate limited: a storm of errors is exactly when they
+  matter, and suppressing them to protect the ring would throw away the evidence to
+  preserve the container.
+
+### Changed
+
+- **The `DMESG` index counts records, not bytes.** A byte position cannot survive a
+  record being dropped between two reads — every byte after the gap shifts and the
+  reader is handed a torn line. Index 0 is the oldest record still held.
+
+- **`klog_write_char()` is gone.** Feeding the ring one character at a time is how the
+  old log came to hold the boot banner, and a ring of records has no meaning for half a
+  record. The test that used it to force a wrap emits records instead, which is a
+  better test of the same thing.
+
+- **A log record's uid is as wide as a process's.** It was written as a `uint8_t`,
+  which looked like plenty next to a handful of accounts and would have recorded this
+  system's own `esduman`, uid 1000, as uid 232 — a record attributing itself to a user
+  who does not exist. Caught by a compiler warning before it ever ran.
+
 ## [0.7.1-alpha] - 2026-08-21
 
 Programs can ask for memory. Until now one had its ELF segments and a fixed 32-page

@@ -1279,6 +1279,103 @@ void main(void) {
         KT_ASSERT(heap_status == 0, "[UMEM] the child could write to its copy of the heap");
         KT_ASSERT(shared[0] == 'P',
                   "[STRICT] [UMEM] the child's heap write did not reach the parent");
+
+    /* ------------------------------------------------------------------
+     * The kernel log, from a program's side of the boundary.
+     *
+     * The read side has been reachable since v0.4.x. Everything around it has
+     * not: the severity threshold sat at INFO since boot with nothing able to
+     * move it, so every DEBUG record the kernel composed was discarded unseen,
+     * and there was no way to ask what the ring lost when it wrapped.
+     * ------------------------------------------------------------------ */
+    int log_level = syscall(59, KLOG_CTL_GET_LEVEL, 0, 0);
+    KT_ASSERT(log_level >= 0 && log_level <= 4,
+              "[KLOG] a program can read the severity threshold");
+
+    int log_held = syscall(59, KLOG_CTL_HELD, 0, 0);
+    KT_ASSERT(log_held > 0, "[KLOG] and how many records are held");
+
+    KT_ASSERT(syscall(59, KLOG_CTL_DROPPED, 0, 0) >= 0,
+              "[KLOG] and how many the ring has overwritten");
+
+    KT_ASSERT(syscall(59, 99, 0, 0) == E_INVAL,
+              "[STRICT] [KLOG] an operation that does not exist is refused");
+
+    /*
+     * Reading the log, one record per call.
+     *
+     * The index counts records. It counted bytes until this release, and a byte
+     * position cannot survive a record being dropped between two reads: every
+     * byte after the gap shifts and the reader is handed a torn line.
+     */
+    char log_line[256];
+    int first_rec = syscall(SYSCALL_DMESG, (int)log_line, 256, 0);
+    KT_ASSERT(first_rec > 0, "[KLOG] the first record reads back");
+    KT_ASSERT(log_line[0] == '[',
+              "[STRICT] [KLOG] and opens with the timestamp a record now carries");
+
+    int second_rec = syscall(SYSCALL_DMESG, (int)log_line, 256, 1);
+    KT_ASSERT(second_rec > 0, "[KLOG] and so does the one after it");
+
+    KT_ASSERT(syscall(SYSCALL_DMESG, (int)log_line, 256, 1 << 20) == 0,
+              "[STRICT] [KLOG] an index past the last record reads 0, not an error");
+
+    /*
+     * /dev/kmsg: the round trip.
+     *
+     * This is why the device is writable rather than read-only. A read-only
+     * kmsg could only ever be checked against whatever the kernel happened to
+     * log; writing a known marker and reading it back exercises the ring, the
+     * record format and the per-process cursor in one go, from the only side
+     * that has all three.
+     */
+    int kfd = syscall(SYSCALL_OPEN, (int)"/dev/kmsg", 0, 0);
+    KT_ASSERT(kfd >= 0, "[KMSG] /dev/kmsg opens");
+
+    if (kfd >= 0) {
+        char kline[256];
+
+        int kread = syscall(SYSCALL_READ, kfd, (int)kline, 256);
+        KT_ASSERT(kread > 0, "[KMSG] reading it returns a record");
+        KT_ASSERT(kline[0] >= '0' && kline[0] <= '4',
+                  "[STRICT] [KMSG] in the structured form, level first");
+
+        int semi = -1;
+        for (int i = 0; i < kread; i++) if (kline[i] == ';') { semi = i; break; }
+        KT_ASSERT(semi > 0, "[KMSG] with the machine-readable fields split from the text");
+
+        /* Drain to the end, so the marker written next is what comes back. A
+         * reader that never caught up would hang rather than fail. */
+        int drained = 0;
+        while (syscall(SYSCALL_READ, kfd, (int)kline, 256) > 0) {
+            if (++drained > 2048) break;
+        }
+        KT_ASSERT(drained <= 2048, "[KMSG] a reader catches up rather than looping forever");
+
+        const char *marker = "<3>ring3marker";
+        int kw = syscall(SYSCALL_WRITE, kfd, (int)marker, kt_strlen(marker));
+
+        if (uid == 0) {
+            KT_ASSERT(kw > 0, "[KMSG] root can write a record");
+
+            int back = syscall(SYSCALL_READ, kfd, (int)kline, 256);
+            KT_ASSERT(back > 0, "[STRICT] [KMSG] and reads back the record it just wrote");
+
+            int found = 0;
+            for (int i = 0; i + 11 <= back; i++) {
+                int m = 1;
+                for (int j = 0; j < 11; j++) if (kline[i + j] != "ring3marker"[j]) { m = 0; break; }
+                if (m) { found = 1; break; }
+            }
+            KT_ASSERT(found, "[STRICT] [KMSG] with the text it was given");
+            KT_ASSERT(kline[0] == '3', "[KMSG] and the level its <N> prefix asked for");
+        } else {
+            KT_ASSERT(kw < 0,
+                      "[STRICT] [KMSG] a program that is not root cannot write to the log");
+        }
+
+        syscall(SYSCALL_CLOSE, kfd, 0, 0);
+    }
         ufree(shared);
     }
 

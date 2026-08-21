@@ -161,6 +161,8 @@ void run_pmm_tests(void);
 void run_lifecycle_tests(void);
 void run_fault_tests(void);
 void run_syscall_tests(void);
+/** @brief Kernel log: the record ring, its counters, and /dev/kmsg. */
+void run_klog_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
 void run_reap_tests(void);

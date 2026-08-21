@@ -66,6 +66,7 @@ static const ktest_module_t kernel_modules[] = {
     { "umem",        run_umem_tests },
     { "fault",       run_fault_tests },
     { "syscall",     run_syscall_tests },
+    { "klog",        run_klog_tests },
     { "process",     run_process_tests },
     { "signal",      run_signal_tests },
     { "reap",        run_reap_tests },

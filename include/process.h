@@ -193,6 +193,21 @@ typedef struct process_s {
 
     char cmd_args[128];
 
+    /*
+     * The program break: where this task's heap starts, and where it currently
+     * ends. Both are page-aligned, and both are zero for a task that was not
+     * built from an ELF image - the idle task, and anything the test suite
+     * creates by hand. sys_brk() refuses to move a break that was never set
+     * rather than inventing one, because a heap has to begin above the program's
+     * own data and there is no program here to be above.
+     *
+     * The loader sets these from the highest address any PT_LOAD segment
+     * reaches; fork() carries them over, since the child is the same image at
+     * the same instruction and its heap is already mapped.
+     */
+    uint32_t brk_start;
+    uint32_t brk_current;
+
     uint8_t fpu_state[512] __attribute__((aligned(16)));
     int fpu_initialized;
     uint32_t auth_fail_ticks;

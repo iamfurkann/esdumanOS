@@ -83,9 +83,16 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
         return E_NOMEM;
     }
 
+    /*
+     * Highest address any loadable segment reaches. The heap has to begin above
+     * all of them, and this is the only place that sees every segment: the
+     * program headers are gone by the time anything else could ask.
+     */
+    uint32_t highest_end = 0;
+
     uint32_t eflags;
-    asm volatile("pushfl; popl %0; cli" : "=r"(eflags)); 
-    
+    asm volatile("pushfl; popl %0; cli" : "=r"(eflags));
+
     uint32_t original_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(original_cr3) :: "memory");
     asm volatile("mov %0, %%cr3" :: "r"(new_pd) : "memory");
@@ -111,6 +118,10 @@ int load_and_exec_elf(const char *filename, uint8_t parent_id)
                 printk("[ELF SECURITY] Error: Invalid load address (0x%x). Cannot write to kernel space!\n", start_addr);
                 goto cleanup_and_fail;
             }
+
+            /* Recorded after the bounds check, so a segment that was refused
+             * cannot drag the heap's starting point up with it. */
+            if (end_addr > highest_end) highest_end = end_addr;
 
             /*
              * Load every segment writable, whatever its final permissions are.
@@ -256,9 +267,17 @@ load_success:
         }
     }
 
-    // User Stack Allocation
-    uint32_t esp_addr = 0xB0000000;
-    for (int j = 1; j <= 32; j++)
+    /*
+     * User Stack Allocation.
+     *
+     * The literals here used to be the only statement of where the stack lives.
+     * USER_STACK_TOP said 0xBFFFF000 and nothing read it, so the constant and
+     * the code disagreed and the code won by default. They are the same figure
+     * now, which matters because mmap() is laid out directly beneath the guard
+     * page and cannot be positioned from a number that is wrong.
+     */
+    uint32_t esp_addr = USER_STACK_TOP;
+    for (int j = 1; j <= USER_STACK_PAGES; j++)
     {
         uint32_t page_addr = esp_addr - (j * 4096);
         uint32_t phys = pmm_alloc_frame();
@@ -287,7 +306,7 @@ load_success:
      * allocated - in which case the address is unmapped anyway, and an overflow
      * faults there exactly as intended.
      */
-    uint32_t guard_page_addr = esp_addr - (33 * 4096);
+    uint32_t guard_page_addr = USER_STACK_GUARD;
     map_page(guard_page_addr, 0, 0); // 0 = Present Bit Cleared
 
     // Loading complete, return to Kernel's main map (CR3)
@@ -313,6 +332,21 @@ load_success:
                 new_task = p;
                 break;
             }
+        }
+
+        /*
+         * Plant the program break.
+         *
+         * Above every loadable segment and rounded up to a page, so the first
+         * heap page cannot land on top of the tail of .bss. Set before the
+         * descriptor work below rather than inside it: that block is guarded on
+         * current_task, and the very first process has no creator - it would
+         * have been the one task to start with no heap at all.
+         */
+        if (new_task != 0)
+        {
+            new_task->brk_start = (highest_end + PAGE_SIZE - 1) & 0xFFFFF000;
+            new_task->brk_current = new_task->brk_start;
         }
 
         if (new_task != 0 && current_task != 0)

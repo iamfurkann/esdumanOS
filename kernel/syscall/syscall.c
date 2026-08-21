@@ -110,6 +110,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_REBOOT:       sys_reboot(regs); break;
         case SYSCALL_HALT:         sys_halt(regs); break;
         case SYSCALL_DMESG:        sys_dmesg(regs); break;
+        case SYSCALL_KLOG_CTL:     sys_klog_ctl(regs); break;
         case SYSCALL_SYNC:         sys_sync(regs); break;
         case SYSCALL_CHDIR:        sys_chdir(regs); break;
         case SYSCALL_GETCWD:       sys_getcwd(regs); break;

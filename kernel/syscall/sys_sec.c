@@ -251,9 +251,20 @@ void sys_halt(arch_regs_t *regs) {
  * either - see klog_read() for why a kernel-side dump cannot block partway
  * through.
  *
- * @param regs ebx is a user buffer or 0, ecx its size, edx the byte offset in
- *             the log to read from. On return eax holds the bytes copied, 0 at
- *             the end of the log, or a negative errno.
+ * **edx counts records, not bytes.** It was a byte offset into a flat ring, and
+ * the ring holds records now - a position in bytes cannot survive one of them
+ * being dropped between two reads, because every byte after the gap shifts and
+ * the reader is handed a torn line. Index 0 is the oldest record still held and
+ * a caller walks forward one at a time, which is also what lets it notice a
+ * record it expected has gone.
+ *
+ * A buffer shorter than KLOG_LINE_MAX truncates the record rather than splitting
+ * it across two reads: there is no position within a record to resume from, and
+ * inventing one would put the byte offset back.
+ *
+ * @param regs ebx is a user buffer or 0, ecx its size, edx the record index to
+ *             read. On return eax holds the bytes written, 0 past the last
+ *             record, or a negative errno.
  */
 void sys_dmesg(arch_regs_t *regs) {
     if (current_task == 0 || current_task->uid != 0) {
@@ -264,7 +275,7 @@ void sys_dmesg(arch_regs_t *regs) {
 
     char *user_buf = (char *)regs->ebx;
     int size = (int)regs->ecx;
-    int offset = (int)regs->edx;
+    int index = (int)regs->edx;
 
     if (user_buf == 0) {
         dump_klog();
@@ -272,7 +283,7 @@ void sys_dmesg(arch_regs_t *regs) {
         return;
     }
 
-    if (size <= 0 || offset < 0) { regs->eax = E_INVAL; return; }
+    if (size <= 0 || index < 0) { regs->eax = E_INVAL; return; }
     if (!validate_user_writable_pointer(user_buf, (size_t)size)) {
         regs->eax = E_FAULT;
         return;
@@ -293,7 +304,7 @@ void sys_dmesg(arch_regs_t *regs) {
     char *kbuf = (char *)kmalloc((uint32_t)cap);
     if (!kbuf) { regs->eax = E_NOMEM; return; }
 
-    int n = klog_read(kbuf, cap, offset);
+    int n = klog_read(kbuf, cap, index);
     if (n > 0 && copy_to_user(user_buf, kbuf, (size_t)n) != E_OK) {
         kfree(kbuf);
         regs->eax = E_FAULT;
@@ -302,4 +313,81 @@ void sys_dmesg(arch_regs_t *regs) {
 
     kfree(kbuf);
     regs->eax = n;
+}
+
+/**
+ * @brief Inspects and controls the kernel log.
+ *
+ * The read side has been reachable since v0.4.x. Everything around it has not:
+ * current_log_level has sat at INFO since boot with nothing able to move it, so
+ * every DEBUG record the kernel composed was discarded unseen - a filter nobody
+ * could adjust is a filter that only ever removes. There has been no way to
+ * clear the ring either, and no way to ask what it lost when it wrapped.
+ *
+ * Split by consequence rather than by uniformity: clearing the log and moving
+ * the threshold change what everyone else sees afterwards, and are root's.
+ * Reading the threshold or the counters changes nothing and is anyone's, which
+ * is what lets an ordinary program notice records went missing between two
+ * reads.
+ *
+ * @param regs ebx is the operation, ecx its argument. On return eax holds the
+ *             requested value, E_OK, or a negative errno.
+ */
+void sys_klog_ctl(arch_regs_t *regs) {
+    if (current_task == 0) { regs->eax = E_SRCH; return; }
+
+    uint32_t op = regs->ebx;
+
+    switch (op) {
+        case KLOG_CTL_CLEAR:
+            if (current_task->uid != 0) {
+                klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to clear the log.");
+                regs->eax = E_PERM;
+                return;
+            }
+            klog_clear();
+            /* Recorded after the clear, so the log is never empty and can always
+             * say why it is short. */
+            klog(LOG_LEVEL_INFO, "KLOG", "Log cleared.");
+            regs->eax = E_OK;
+            return;
+
+        case KLOG_CTL_SET_LEVEL:
+            if (current_task->uid != 0) {
+                klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required to set the log level.");
+                regs->eax = E_PERM;
+                return;
+            }
+            if ((int)regs->ecx < LOG_LEVEL_DEBUG || (int)regs->ecx > LOG_LEVEL_CRITICAL) {
+                regs->eax = E_INVAL;
+                return;
+            }
+            klog_set_level((int)regs->ecx);
+            /*
+             * Recorded at CRITICAL so that it survives whatever it was just set
+             * to. Any other level would be filtered by the very change it is
+             * reporting in one direction or the other, and a log that has gone
+             * quiet without saying why is the thing this record exists to
+             * prevent someone chasing.
+             */
+            klog_int(LOG_LEVEL_CRITICAL, "KLOG", "Log level set to", (int)regs->ecx);
+            regs->eax = E_OK;
+            return;
+
+        case KLOG_CTL_GET_LEVEL:
+            regs->eax = (uint32_t)klog_get_level();
+            return;
+
+        case KLOG_CTL_HELD:
+            regs->eax = klog_held();
+            return;
+
+        case KLOG_CTL_DROPPED:
+            regs->eax = klog_dropped();
+            return;
+
+        default:
+            regs->eax = E_INVAL;
+            return;
+    }
 }

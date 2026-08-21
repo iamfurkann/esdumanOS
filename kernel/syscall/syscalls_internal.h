@@ -124,6 +124,8 @@ void sys_reboot(arch_regs_t *regs);
 void sys_halt(arch_regs_t *regs);
 /** @brief Syscall handler for displaying diagnostic messages */
 void sys_dmesg(arch_regs_t *regs);
+/** @brief Syscall handler for inspecting and controlling the kernel log */
+void sys_klog_ctl(arch_regs_t *regs);
 /** @brief Syscall handler for flushing the block cache to disk */
 void sys_sync(arch_regs_t *regs);
 /** @brief Syscall handler for changing the working directory */

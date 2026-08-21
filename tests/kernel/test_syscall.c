@@ -20,22 +20,28 @@
  * dropped something it still held.
  */
 static int klog_contains(const char *needle) {
-    char win[128];
+    char line[KLOG_LINE_MAX];
     int nlen = 0;
     while (needle[nlen]) nlen++;
-    if (nlen <= 0 || nlen > (int)sizeof(win)) return 0;
+    if (nlen <= 0) return 0;
 
-    int off = 0, got;
-    while ((got = klog_read(win, (int)sizeof(win), off)) > 0) {
+    /*
+     * One whole record per read, so there is no sliding window to keep. The byte
+     * form of this needed one: a needle straddling two chunks would have been
+     * missed, so each read had to overlap the last by nlen-1 bytes. A record
+     * cannot straddle itself.
+     */
+    for (int index = 0; ; index++) {
+        int got = klog_read(line, (int)sizeof(line), index);
+        if (got <= 0) break;
+
         for (int i = 0; i + nlen <= got; i++) {
             int match = 1;
             for (int j = 0; j < nlen; j++) {
-                if (win[i + j] != needle[j]) { match = 0; break; }
+                if (line[i + j] != needle[j]) { match = 0; break; }
             }
             if (match) return 1;
         }
-        if (got < nlen) break;
-        off += got - (nlen - 1);
     }
     return 0;
 }
@@ -143,16 +149,45 @@ void run_syscall_tests(void) {
     KTEST_ASSERT(klog_read(0, (int)sizeof(probe), 0) == 0,
                  "[KLOG] a null destination is refused");
 
-    /* Offsets address the same bytes: the tail of one read is the head of the
-     * read that starts inside it. */
-    char head_slice[16];
-    char tail_slice[16];
-    int hn = klog_read(head_slice, 16, 0);
-    int tn = klog_read(tail_slice, 16, 8);
-    if (hn == 16 && tn > 0) {
-        KTEST_ASSERT(head_slice[8] == tail_slice[0],
-                     "[STRICT] [KLOG] an offset read continues where the caller asked, not at the start");
+    /*
+     * The index addresses a record, not a byte.
+     *
+     * It used to be a byte offset into a flat ring, which a record ring cannot
+     * honour: a record dropped between two reads shifts every byte position and
+     * hands the reader a torn line. Two markers written back to back must come
+     * back as two consecutive records, in the order they were written.
+     */
+    klog_record(LOG_LEVEL_INFO, "KTEST", "indexprobe-first");
+    klog_record(LOG_LEVEL_INFO, "KTEST", "indexprobe-second");
+
+    uint32_t held_now = klog_held();
+    char rec_a[KLOG_LINE_MAX];
+    char rec_b[KLOG_LINE_MAX];
+
+    if (held_now >= 2) {
+        int an = klog_read(rec_a, (int)sizeof(rec_a), (int)held_now - 2);
+        int bn = klog_read(rec_b, (int)sizeof(rec_b), (int)held_now - 1);
+
+        KTEST_ASSERT(an > 0 && bn > 0, "[KLOG] the last two records both read back");
+
+        int differ = (an != bn);
+        for (int i = 0; !differ && i < an; i++) if (rec_a[i] != rec_b[i]) differ = 1;
+        KTEST_ASSERT(differ,
+                     "[STRICT] [KLOG] consecutive indices address different records");
+
+        /* And the same index twice is the same record, which a byte offset into
+         * a moving ring could not promise. */
+        char again[KLOG_LINE_MAX];
+        int cn = klog_read(again, (int)sizeof(again), (int)held_now - 2);
+        int same = (cn == an);
+        for (int i = 0; same && i < an; i++) if (again[i] != rec_a[i]) same = 0;
+        KTEST_ASSERT(same, "[STRICT] [KLOG] reading an index twice gives the same record");
     }
+
+    /* A record carries when it happened. The byte ring could not answer this at
+     * all - nothing in it was a time. */
+    KTEST_ASSERT(klog_read(probe, (int)sizeof(probe), 0) > 0 && probe[0] == '[',
+                 "[KLOG] a rendered record opens with its timestamp");
 
     /*
      * And through the syscall. Root only, so the uid is borrowed for the check
@@ -227,8 +262,21 @@ void run_syscall_tests(void) {
     KTEST_ASSERT(klog_contains("ringmarker-oldest"),
                  "[KLOG] a record just written is in the log");
 
-    /* Push a whole buffer through, which must evict the marker above. */
-    for (uint32_t i = 0; i < KLOG_BUF_SIZE + 256; i++) klog_write_char('.');
+    uint32_t dropped_before = klog_dropped();
+
+    /*
+     * Push a whole ring through, which must evict the marker above.
+     *
+     * klog_record() rather than klog(), because these go to the ring and have no
+     * business on the screen: five hundred filler lines would bury the suite's
+     * own output. The byte form of this fed characters straight into the buffer,
+     * which a record ring has no equivalent for - and should not, since a log
+     * that accepts half a record is how the old one came to hold the boot
+     * banner.
+     */
+    for (uint32_t i = 0; i < KLOG_RECORDS + 8; i++) {
+        klog_record(LOG_LEVEL_INFO, "KTEST", "ringfiller");
+    }
 
     klog(LOG_LEVEL_INFO, "KTEST", "ringmarker-newest");
 
@@ -238,11 +286,15 @@ void run_syscall_tests(void) {
                  "[STRICT] [KLOG] and the oldest has been overwritten, not preserved");
 
     /* Whatever is held is capped by the ring, however much was written. */
-    int total = 0, chunk2;
-    char scan[128];
-    while ((chunk2 = klog_read(scan, (int)sizeof(scan), total)) > 0) total += chunk2;
-    KTEST_ASSERT(total > 0 && total <= (int)KLOG_BUF_SIZE,
-                 "[STRICT] [KLOG] a full read never exceeds the size of the ring");
+    KTEST_ASSERT(klog_held() == KLOG_RECORDS,
+                 "[STRICT] [KLOG] a full ring holds exactly its capacity, no more");
+
+    /*
+     * And it says how many it lost. The byte ring wrapped mid-line and counted
+     * nothing, so a reader saw a gap with no way to know there had been one.
+     */
+    KTEST_ASSERT(klog_dropped() > dropped_before,
+                 "[STRICT] [KLOG] the ring counts the records it overwrote");
 
     /*
      * The value belongs on the same line as its message. klog_int() called

@@ -482,10 +482,20 @@ int sys_close(int fd) { return syscall(SYSCALL_CLOSE, fd, 0, 0); }
  *
  * @param buf Destination buffer.
  * @param size Capacity of buf.
- * @param offset Byte position in the log to read from.
- * @return Bytes read, 0 at the end of the log, or a negative errno.
+ * @param index Record position, counted from the oldest still held. It was a
+ *              byte offset; the log holds records now, and a position in bytes
+ *              cannot survive one being dropped between two reads.
+ * @return Bytes read, 0 past the last record, or a negative errno.
  */
-int sys_dmesg_read(char *buf, int size, int offset) { return syscall(SYSCALL_DMESG, (int)buf, size, offset); }
+int sys_dmesg_read(char *buf, int size, int index) { return syscall(SYSCALL_DMESG, (int)buf, size, index); }
+/**
+ * @brief Inspects or changes the kernel log.
+ *
+ * @param op One of the KLOG_CTL_* operations.
+ * @param arg Argument for the operation, where one applies.
+ * @return The requested value, 0, or a negative errno.
+ */
+int sys_klog_ctl(int op, int arg) { return syscall(59, op, arg, 0); }
 /**
  * @brief Opens a file.
  * @param name File name.
@@ -616,7 +626,7 @@ void show_help(void) {
     printk("    env               Show environment variables\n");
     printk("    export [K] [V]    Set environment variable\n");
     printk("    meminfo           Display RAM information\n");
-    printk("    dmesg             Show kernel log buffer\n");
+    printk("    dmesg [-c|-n L|-l L]  Kernel log: show, clear, set level, filter\n");
     printk("    sync              Flush the disk cache and write the log to /var/log\n");
     printk("    jobs              List background jobs started with &\n");
     printk("    wait              Block until every background job has finished\n");
@@ -787,6 +797,157 @@ int builtin_cat(char **args) {
  * @param args Array of command-line arguments; args[1] is an optional directory.
  * @return Exit status of the command.
  */
+/**
+ * @brief Parses a log level from an argument.
+ *
+ * A digit or a name, because "dmesg -n 3" and "dmesg -n error" are both things a
+ * person types and neither is more correct than the other.
+ *
+ * @param s Argument text.
+ * @return Level 0..4, or -1 when it is neither.
+ */
+static int dmesg_parse_level(const char *s) {
+    if (!s || !s[0]) return -1;
+
+    if (s[0] >= '0' && s[0] <= '4' && s[1] == '\0') return s[0] - '0';
+
+    if (ft_strcmp(s, "debug") == 0) return 0;
+    if (ft_strcmp(s, "info") == 0)  return 1;
+    if (ft_strcmp(s, "warn") == 0)  return 2;
+    if (ft_strcmp(s, "error") == 0) return 3;
+    if (ft_strcmp(s, "fatal") == 0) return 4;
+    return -1;
+}
+
+/**
+ * @brief Reads the severity out of a rendered log line.
+ *
+ * The level tag is the second bracketed field - "[   12.34] [WARN ] MM: ..." -
+ * and is found by scanning rather than at a fixed offset, because the timestamp
+ * grows a character wider every time the uptime gains a digit.
+ *
+ * The first letters happen to be unique across the five levels, which is what
+ * lets this be a switch instead of five comparisons.
+ *
+ * @param line Rendered record.
+ * @param len Bytes in @p line.
+ * @return Level 0..4, or -1 when there is no recognisable tag.
+ */
+static int dmesg_line_level(const char *line, int len) {
+    int i = 0;
+
+    while (i < len && line[i] != ']') i++;
+    while (i < len && line[i] != '[') i++;
+    if (i + 1 >= len) return -1;
+
+    switch (line[i + 1]) {
+        case 'D': return 0;
+        case 'I': return 1;
+        case 'W': return 2;
+        case 'E': return 3;
+        case 'F': return 4;
+        default:  return -1;
+    }
+}
+
+/**
+ * @brief Prints the kernel log, and the three things you do with it.
+ *
+ * `-n` sets the kernel's threshold and prints nothing. That is deliberately not
+ * the same as `-l`: one changes what gets recorded from here on, the other
+ * chooses what to show out of what already was, and running them together would
+ * make "dmesg -n debug" look as though it had lost the log.
+ *
+ * `-l` filters here rather than in the kernel. The records carry their level as
+ * a field, so the syscall surface stays as small as it was and the shell reads
+ * the field it was given - which is how Linux does it too.
+ *
+ * @param args Argument vector; args[1] is an optional flag.
+ * @return Exit status.
+ */
+int builtin_dmesg(char **args) {
+    int min_level = -1;
+    int clear_after = 0;
+
+    if (args[1] && ft_strcmp(args[1], "-n") == 0) {
+        int level = dmesg_parse_level(args[2]);
+        if (level < 0) {
+            printk("dmesg: -n needs a level: 0-4, or debug/info/warn/error/fatal\n");
+            return 1;
+        }
+        if (sys_klog_ctl(KLOG_CTL_SET_LEVEL, level) < 0) {
+            printk("dmesg: permission denied\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    if (args[1] && ft_strcmp(args[1], "-l") == 0) {
+        min_level = dmesg_parse_level(args[2]);
+        if (min_level < 0) {
+            printk("dmesg: -l needs a level: 0-4, or debug/info/warn/error/fatal\n");
+            return 1;
+        }
+    } else if (args[1] && ft_strcmp(args[1], "-c") == 0) {
+        clear_after = 1;
+    } else if (args[1]) {
+        printk("dmesg: unknown option; try -c, -n LEVEL or -l LEVEL\n");
+        return 1;
+    }
+
+    /*
+     * One record per read, written from here so it goes through this process's
+     * descriptor 1 and can be piped or redirected. The loop belongs in the shell
+     * because a write into a full pipe blocks, and a blocked syscall resumes by
+     * re-running from the trap - a kernel-side dump that blocked halfway would
+     * start over and emit everything twice.
+     *
+     * The index counts records. It counted bytes until the log started holding
+     * records, and a byte position cannot survive one of them being dropped
+     * between two reads.
+     */
+    char line[256];
+    int index = 0;
+    int got;
+
+    while ((got = sys_dmesg_read(line, sizeof(line), index)) > 0) {
+        index++;
+        if (min_level >= 0 && dmesg_line_level(line, got) < min_level) continue;
+        syscall(SYSCALL_WRITE, 1, (int)line, got);
+    }
+
+    if (got < 0) {
+        printk("dmesg: permission denied\n");
+        return 1;
+    }
+
+    if (clear_after && sys_klog_ctl(KLOG_CTL_CLEAR, 0) < 0) {
+        printk("dmesg: permission denied\n");
+        return 1;
+    }
+
+    /*
+     * How many records went when the ring wrapped. Nothing could ask this
+     * before, so a gap in the log looked like a quiet period.
+     *
+     * On descriptor 2, not 1. It is a note about the log rather than part of it,
+     * and putting it on stdout would drop it into the middle of "dmesg > boot.log"
+     * and every pipeline that reads the log.
+     */
+    int dropped = sys_klog_ctl(KLOG_CTL_DROPPED, 0);
+    if (dropped > 0) {
+        char num[16];
+        const char *pre = "[dmesg] records dropped when the ring wrapped: ";
+
+        ft_itoa(dropped, num);
+        syscall(SYSCALL_WRITE, 2, (int)pre, ft_strlen(pre));
+        syscall(SYSCALL_WRITE, 2, (int)num, ft_strlen(num));
+        syscall(SYSCALL_WRITE, 2, (int)"\n", 1);
+    }
+
+    return 0;
+}
+
 int builtin_ls(char **args) {
     int dir_id;
 
@@ -1107,21 +1268,7 @@ void execute_command(char **args) {
          * everything twice; this keeps the offset in a variable no restart
          * touches, and each write blocks and restarts on its own.
          */
-        char klog_chunk[256];
-        int klog_off = 0;
-        int got;
-
-        while ((got = sys_dmesg_read(klog_chunk, sizeof(klog_chunk), klog_off)) > 0) {
-            syscall(SYSCALL_WRITE, 1, (int)klog_chunk, got);
-            klog_off += got;
-        }
-
-        if (got < 0) {
-            printk("dmesg: permission denied\n");
-            last_exit_status = 1;
-        } else {
-            last_exit_status = 0;
-        }
+        last_exit_status = builtin_dmesg(args);
     }
     else if (ft_strcmp(args[0], "wait") == 0) {
         /*

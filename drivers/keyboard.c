@@ -191,6 +191,26 @@ void keyboard_interrupt_handler(void) {
         return;
     }
 
+    /*
+     * Ctrl-Z, and it is consumed the same way and for the same reasons.
+     *
+     * The difference is what the signal means rather than how it gets there: the
+     * foreground group is parked instead of killed, keeping its memory, its
+     * descriptors and the instruction it was on, and the shell it belongs to
+     * gets the terminal back and prints a prompt. Which is only useful because
+     * the shell can put it back - a stop with no fg to undo it would be a way to
+     * lose work, not a way to set it aside.
+     *
+     * The 0x1A has been arriving in the input ring since v0.5.3 exactly as the
+     * 0x03 was, and was handed to whatever happened to be reading as data.
+     */
+    if (c == 0x1A) {
+        terminal_writestring("^Z\n");
+
+        send_signal_to_group(foreground_pgid, SIG_TSTP);
+        return;
+    }
+
     if (c != 0) {
         int next_head = (kbd_head + 1) % KBD_BUFFER_SIZE;
         if (next_head != kbd_tail) {

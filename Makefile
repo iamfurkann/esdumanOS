@@ -105,6 +105,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_syscall.c \
             tests/kernel/test_klog.c \
             tests/kernel/test_tty.c \
+            tests/kernel/test_jobctl.c \
             tests/kernel/test_process.c \
 			tests/kernel/test_signal.c \
 			tests/kernel/test_reap.c \

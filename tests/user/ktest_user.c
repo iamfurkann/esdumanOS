@@ -166,6 +166,8 @@ static int kt_strlen(const char *s) {
  * the kernel's signal.h reaches into kernel types. They have to agree with it.
  */
 #define SIG_PIPE   13
+#define SIG_TSTP   20   /* stops the target by default, rather than ending it */
+#define SIG_CONT   18   /* puts a stopped process back to work */
 #define SIG_DFL_U   0   /* default action */
 #define SIG_IGN_U   1   /* discard the signal */
 
@@ -1466,6 +1468,94 @@ void main(void) {
         kt_child_exit(0);
     }
     syscall(SYSCALL_WAIT, 0, 0, 0);
+
+    /* ------------------------------------------------------------------
+     * 10c. Stopping a child and bringing it back.
+     *
+     * The whole of job control from the side a program can see: the child parks
+     * itself, the parent is told that it stopped rather than that it finished,
+     * and a continue takes it on from the instruction it was on. The kernel-mode
+     * module drives stop_task() directly; this is the same thing through the
+     * trap gate, with a real address space that has to survive being set aside.
+     *
+     * The child stops itself rather than being stopped from here because a
+     * self-signalled stop is the harder path: the signal cannot take the task
+     * out of the scheduler where it is raised - that code is running inside the
+     * target's own syscall, on its kernel stack - so it is left pending and
+     * applied on the way back out to user mode.
+     * ------------------------------------------------------------------ */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        syscall(SYSCALL_KILL, syscall(SYSCALL_GETPID, 0, 0, 0), SIG_TSTP, 0);
+
+        /* Only reached once somebody continues it. A stop that did not stop
+         * would exit here immediately and the parent would collect 21 from the
+         * wait below that is supposed to report a stop. */
+        kt_child_exit(21);
+    }
+
+    if (child > 0) {
+        int st = -1;
+        int who = 0;
+        int spins = 0;
+
+        /*
+         * Polled with a bound rather than blocked on. Every other wait in this
+         * file can afford to block because a child that never reports is a child
+         * that never ran; here the thing being tested is the notification
+         * itself, and a blocking wait for a notification that is never sent is a
+         * hung run rather than a failed assertion.
+         */
+        while (spins++ < 200) {
+            who = syscall(SYSCALL_WAIT, (int)&st, WNOHANG | WUNTRACED, 0);
+            if (who == child) break;
+            syscall(SYSCALL_SLEEP, 10, 0, 0);
+        }
+
+        KT_ASSERT(who == child,
+                  "[JOBCTL] a child that stopped itself is reported to wait()");
+        KT_ASSERT((st & WSTATUS_STOPPED) != 0,
+                  "[STRICT] [JOBCTL] as stopped rather than as an exit status");
+        KT_ASSERT((st & 0xFF) == SIG_TSTP,
+                  "[STRICT] [JOBCTL] naming the signal that stopped it");
+
+        /*
+         * And a caller that did not ask for stops does not get one. A program
+         * that knows nothing about job control would otherwise be handed a pid
+         * it would treat as finished, for a process still very much alive.
+         */
+        KT_ASSERT(syscall(SYSCALL_WAIT, 0, WNOHANG, 0) == 0,
+                  "[STRICT] [JOBCTL] a wait without WUNTRACED reports neither the stop nor an exit");
+
+        KT_ASSERT(syscall(SYSCALL_KILL, child, SIG_CONT, 0) >= 0,
+                  "[JOBCTL] SIG_CONT can be sent to a stopped child");
+
+        st = -1;
+        who = syscall(SYSCALL_WAIT, (int)&st, 0, 0);
+        KT_ASSERT(who == child && st == 21,
+                  "[JOBCTL] and it carries on from the instruction it stopped on");
+    }
+
+    /* ------------------------------------------------------------------
+     * 10d. exec() that hands back a pid instead of the outcome.
+     *
+     * The form a shell needs. With the blocking one it never learns the pid, so
+     * it cannot put the program in a group of its own, cannot hand it the
+     * terminal, and has no way to name a job the user has stopped.
+     * ------------------------------------------------------------------ */
+    int spawned = syscall(SYSCALL_EXEC, (int)"/bin/hello", EXEC_NOWAIT, 0);
+    KT_ASSERT(spawned > 0, "[EXEC] EXEC_NOWAIT returns the pid of the new process");
+
+    if (spawned > 0) {
+        int st = -1;
+        int who = syscall(SYSCALL_WAIT, (int)&st, 0, 0);
+        KT_ASSERT(who == spawned && st == 0,
+                  "[EXEC] and the program it started is a child this task collects with wait()");
+    }
+
+    /* The blocking form is unchanged, which is what init still uses. */
+    KT_ASSERT(syscall(SYSCALL_EXEC, (int)"/bin/hello", EXEC_WAIT, 0) == 0,
+              "[EXEC] the waiting form still answers with the program's exit status");
         ufree(shared);
     }
 

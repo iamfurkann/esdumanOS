@@ -12,11 +12,46 @@
 #define MAX_SCROLL 100
 #define NUM_TERMINALS 3
 
+/**
+ * @brief Rows of text the screen actually shows.
+ *
+ * VGA row 0 is the status bar; update_screen() draws the buffer from row 1 down.
+ * Every escape sequence that names a row counts in this space, not in the 25 the
+ * hardware has and not in the 100 the scrollback buffer holds - get that wrong
+ * and a full-screen program draws a line off, or over the status bar.
+ */
+#define TERM_ROWS (VGA_HEIGHT - 1)
+
+/** Escape parser states. */
+#define ESC_GROUND 0   /**< Ordinary text. */
+#define ESC_ESC    1   /**< Saw 0x1B, waiting for '['. */
+#define ESC_CSI    2   /**< Inside a control sequence, collecting parameters. */
+
+/** Parameters a single sequence may carry. */
+#define ESC_MAX_PARAMS 8
+
 typedef struct {
 	size_t cursor_x;
 	size_t cursor_y;
 	int view_offset;
 	uint8_t color;
+
+	/*
+	 * Escape parser state, per terminal rather than global: there are three of
+	 * them and the user can switch away in the middle of a sequence.
+	 */
+	int esc_state;
+	uint32_t esc_params[ESC_MAX_PARAMS];
+	int esc_param_count;
+
+	/* Cursor save/restore, in buffer coordinates. */
+	size_t saved_x;
+	size_t saved_y;
+
+	/* Scroll region, 1-based and view-relative; the full screen by default. */
+	uint32_t scroll_top;
+	uint32_t scroll_bottom;
+
 	uint16_t buffer[MAX_SCROLL][VGA_WIDTH];
 } terminal_state_t;
 
@@ -132,6 +167,13 @@ void	terminal_initialize(void) {
 		terminals[i].view_offset = 0;
 		terminals[i].color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
+		terminals[i].esc_state = ESC_GROUND;
+		terminals[i].esc_param_count = 0;
+		terminals[i].saved_x = 0;
+		terminals[i].saved_y = 0;
+		terminals[i].scroll_top = 1;
+		terminals[i].scroll_bottom = TERM_ROWS;
+
 		for (size_t y = 0; y < MAX_SCROLL; y++) {
 			for (size_t x = 0; x < VGA_WIDTH; x++) {
 				terminals[i].buffer[y][x] = vga_entry(' ', terminals[i].color);
@@ -141,14 +183,342 @@ void	terminal_initialize(void) {
 	terminal_switch(0);
 }
 
+/*
+ * ── ANSI escape sequences ───────────────────────────────────────────────
+ *
+ * Enough of the repertoire for a full-screen program to draw: absolute and
+ * relative cursor motion, erasing, colour, a saved cursor, a scroll region and
+ * line insertion. Everything else is swallowed rather than printed - a sequence
+ * this does not implement should leave no trace, not spray its parameters across
+ * the screen.
+ *
+ * Every row an escape names is counted in the 24 rows the screen shows, and
+ * translated to the scrollback buffer through view_offset. The three coordinate
+ * spaces in this file - hardware rows including the status bar, visible text
+ * rows, and buffer rows - are the easiest thing here to get wrong.
+ */
+
+/**
+ * @brief ANSI colour number to VGA colour.
+ *
+ * The two orders are not the same: ANSI counts black, red, green, yellow, blue,
+ * magenta, cyan, white, while VGA puts blue at 1 and red at 4. ANSI's yellow is
+ * VGA's brown, which becomes yellow once the bright bit is on.
+ */
+static const uint8_t ansi_to_vga[8] = {
+	VGA_COLOR_BLACK, VGA_COLOR_RED,     VGA_COLOR_GREEN, VGA_COLOR_BROWN,
+	VGA_COLOR_BLUE,  VGA_COLOR_MAGENTA, VGA_COLOR_CYAN,  VGA_COLOR_LIGHT_GREY
+};
+
+/**
+ * @brief Buffer row for a 1-based screen row.
+ */
+static size_t term_row_to_buffer(terminal_state_t *term, uint32_t row) {
+	if (row < 1) row = 1;
+	if (row > TERM_ROWS) row = TERM_ROWS;
+	return (size_t)term->view_offset + (size_t)(row - 1);
+}
+
+/** @brief Topmost buffer row of the scroll region. */
+static size_t term_region_top(terminal_state_t *term) {
+	return term_row_to_buffer(term, term->scroll_top);
+}
+
+/** @brief Bottommost buffer row of the scroll region. */
+static size_t term_region_bottom(terminal_state_t *term) {
+	return term_row_to_buffer(term, term->scroll_bottom);
+}
+
+/**
+ * @brief Blanks a span of cells, inclusive at both ends.
+ */
+static void term_clear_span(terminal_state_t *term, size_t from_y, size_t from_x,
+                            size_t to_y, size_t to_x) {
+	for (size_t y = from_y; y <= to_y && y < MAX_SCROLL; y++) {
+		size_t x0 = (y == from_y) ? from_x : 0;
+		size_t x1 = (y == to_y) ? to_x : (VGA_WIDTH - 1);
+
+		for (size_t x = x0; x <= x1 && x < VGA_WIDTH; x++) {
+			term->buffer[y][x] = vga_entry(' ', term->color);
+		}
+	}
+}
+
+/**
+ * @brief Opens n blank lines at the cursor, pushing the rest of the region down.
+ *
+ * Lines pushed past the bottom of the scroll region are lost, which is what a
+ * scroll region is for.
+ */
+static void term_insert_lines(terminal_state_t *term, uint32_t n) {
+	size_t top = term->cursor_y;
+	size_t bot = term_region_bottom(term);
+
+	if (n == 0) n = 1;
+	/* Outside the scroll region there is nothing to open or close, which is what
+	 * a real terminal does and what keeps a stale region from letting a program
+	 * shift rows it no longer owns. */
+	if (top < term_region_top(term) || top > bot) return;
+	if (n > (uint32_t)(bot - top + 1)) n = (uint32_t)(bot - top + 1);
+
+	/* From the bottom up, so a row is copied before it is overwritten. */
+	for (size_t y = bot + 1; y-- > top + n; ) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) term->buffer[y][x] = term->buffer[y - n][x];
+	}
+	term_clear_span(term, top, 0, top + n - 1, VGA_WIDTH - 1);
+}
+
+/**
+ * @brief Removes n lines at the cursor, pulling the rest of the region up.
+ */
+static void term_delete_lines(terminal_state_t *term, uint32_t n) {
+	size_t top = term->cursor_y;
+	size_t bot = term_region_bottom(term);
+
+	if (n == 0) n = 1;
+	/* Same bound as insertion, for the same reason. */
+	if (top < term_region_top(term) || top > bot) return;
+	if (n > (uint32_t)(bot - top + 1)) n = (uint32_t)(bot - top + 1);
+
+	for (size_t y = top; y + n <= bot; y++) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) term->buffer[y][x] = term->buffer[y + n][x];
+	}
+	term_clear_span(term, bot - n + 1, 0, bot, VGA_WIDTH - 1);
+}
+
+/**
+ * @brief Applies a colour and attribute sequence.
+ */
+static void term_apply_sgr(terminal_state_t *term) {
+	uint8_t fg = term->color & 0x0F;
+	uint8_t bg = (term->color >> 4) & 0x0F;
+	int count = term->esc_param_count ? term->esc_param_count : 1;
+
+	for (int i = 0; i < count; i++) {
+		uint32_t p = term->esc_params[i];
+
+		if (p == 0) {
+			fg = VGA_COLOR_LIGHT_GREY;
+			bg = VGA_COLOR_BLACK;
+		} else if (p == 1) {
+			fg |= 0x08;                       /* bright */
+		} else if (p == 22) {
+			fg &= (uint8_t)~0x08;
+		} else if (p >= 30 && p <= 37) {
+			fg = (uint8_t)((fg & 0x08) | ansi_to_vga[p - 30]);
+		} else if (p >= 40 && p <= 47) {
+			bg = ansi_to_vga[p - 40];
+		} else if (p >= 90 && p <= 97) {
+			fg = (uint8_t)(ansi_to_vga[p - 90] | 0x08);
+		}
+	}
+
+	term->color = vga_entry_color(fg, bg);
+}
+
+/**
+ * @brief Carries out a completed control sequence.
+ *
+ * @param term  Terminal the sequence arrived on.
+ * @param final The byte that ended it, which is what selects the operation.
+ */
+static void terminal_csi_dispatch(terminal_state_t *term, unsigned char final) {
+	uint32_t p0 = (term->esc_param_count > 0) ? term->esc_params[0] : 0;
+	uint32_t p1 = (term->esc_param_count > 1) ? term->esc_params[1] : 0;
+	size_t top = (size_t)term->view_offset;
+	size_t bottom = top + TERM_ROWS - 1;
+
+	switch (final) {
+		case 'H':                                /* CUP */
+		case 'f':
+			term->cursor_y = term_row_to_buffer(term, p0 ? p0 : 1);
+			term->cursor_x = (p1 ? p1 : 1) - 1;
+			if (term->cursor_x >= VGA_WIDTH) term->cursor_x = VGA_WIDTH - 1;
+			break;
+
+		case 'A': {                              /* CUU */
+			size_t n = p0 ? p0 : 1;
+			term->cursor_y = (term->cursor_y > top + n) ? term->cursor_y - n : top;
+			break;
+		}
+		case 'B': {                              /* CUD */
+			size_t n = p0 ? p0 : 1;
+			term->cursor_y = (term->cursor_y + n < bottom) ? term->cursor_y + n : bottom;
+			break;
+		}
+		case 'C': {                              /* CUF */
+			size_t n = p0 ? p0 : 1;
+			term->cursor_x = (term->cursor_x + n < VGA_WIDTH) ? term->cursor_x + n : VGA_WIDTH - 1;
+			break;
+		}
+		case 'D': {                              /* CUB */
+			size_t n = p0 ? p0 : 1;
+			term->cursor_x = (term->cursor_x > n) ? term->cursor_x - n : 0;
+			break;
+		}
+
+		case 'J':                                /* ED */
+			/* The cursor deliberately does not move; a program that wants it at
+			 * the origin sends ESC[H itself, as xterm requires. */
+			if (p0 == 1)      term_clear_span(term, top, 0, term->cursor_y, term->cursor_x);
+			else if (p0 == 2) term_clear_span(term, top, 0, bottom, VGA_WIDTH - 1);
+			else              term_clear_span(term, term->cursor_y, term->cursor_x, bottom, VGA_WIDTH - 1);
+			break;
+
+		case 'K':                                /* EL */
+			if (p0 == 1)      term_clear_span(term, term->cursor_y, 0, term->cursor_y, term->cursor_x);
+			else if (p0 == 2) term_clear_span(term, term->cursor_y, 0, term->cursor_y, VGA_WIDTH - 1);
+			else              term_clear_span(term, term->cursor_y, term->cursor_x, term->cursor_y, VGA_WIDTH - 1);
+			break;
+
+		case 'm':                                /* SGR */
+			term_apply_sgr(term);
+			break;
+
+		case 's':                                /* Save cursor */
+			term->saved_x = term->cursor_x;
+			term->saved_y = term->cursor_y;
+			break;
+
+		case 'u':                                /* Restore cursor */
+			term->cursor_x = term->saved_x;
+			term->cursor_y = term->saved_y;
+			break;
+
+		case 'r': {                              /* DECSTBM */
+			uint32_t t = p0 ? p0 : 1;
+			uint32_t b = p1 ? p1 : TERM_ROWS;
+
+			if (t < 1) t = 1;
+			if (b > TERM_ROWS) b = TERM_ROWS;
+			if (t >= b) { t = 1; b = TERM_ROWS; }
+
+			term->scroll_top = t;
+			term->scroll_bottom = b;
+			/* Setting the region homes the cursor, which is what DECSTBM does. */
+			term->cursor_y = term_row_to_buffer(term, t);
+			term->cursor_x = 0;
+			break;
+		}
+
+		case 'L':                                /* IL */
+			term_insert_lines(term, p0);
+			break;
+
+		case 'M':                                /* DL */
+			term_delete_lines(term, p0);
+			break;
+
+		default:
+			/* Not implemented: swallowed, deliberately. */
+			break;
+	}
+}
+
+/**
+ * @brief Feeds one byte to the escape parser.
+ *
+ * @param term Terminal the byte arrived on.
+ * @param c    The byte.
+ * @return 0 when the caller should handle the byte as ordinary output, 1 when it
+ *         was consumed mid-sequence, and 2 when it completed one - which is the
+ *         only point at which the screen can have changed.
+ */
+static int terminal_escape_feed(terminal_state_t *term, unsigned char c) {
+	/*
+	 * A C0 control aborts whatever was in progress and is then handled normally.
+	 * Without this a program that emits half a sequence and stops - or crashes
+	 * between the '[' and the final byte - would swallow everything printed
+	 * afterwards, and the console would go silent with nothing to show why.
+	 */
+	if (c < 0x20) {
+		term->esc_state = ESC_GROUND;
+		return 0;
+	}
+
+	if (term->esc_state == ESC_ESC) {
+		if (c == '[') {
+			term->esc_state = ESC_CSI;
+			term->esc_param_count = 0;
+			/*
+			 * The first slot is cleared here and not where the first digit
+			 * arrives. Clearing only the count left the value behind, so the
+			 * opening parameter of every sequence accumulated on top of whatever
+			 * the last one had put there - "\033[7m" followed by "\033[5;10H"
+			 * asked for row 75. Sequences with no parameters at all were the only
+			 * ones unaffected, which is exactly which of them worked.
+			 */
+			term->esc_params[0] = 0;
+			return 1;
+		}
+		/* Two-character sequences are not implemented; drop it and carry on. */
+		term->esc_state = ESC_GROUND;
+		return 1;
+	}
+
+	/* ESC_CSI */
+	if (c >= '0' && c <= '9') {
+		if (term->esc_param_count == 0) term->esc_param_count = 1;
+		if (term->esc_param_count <= ESC_MAX_PARAMS) {
+			uint32_t *slot = &term->esc_params[term->esc_param_count - 1];
+			*slot = (*slot * 10u) + (uint32_t)(c - '0');
+		}
+		return 1;
+	}
+
+	if (c == ';') {
+		if (term->esc_param_count == 0) term->esc_param_count = 1;
+		if (term->esc_param_count < ESC_MAX_PARAMS) {
+			term->esc_param_count++;
+			term->esc_params[term->esc_param_count - 1] = 0;
+		}
+		return 1;
+	}
+
+	/* Anything else ends the sequence, implemented or not. */
+	terminal_csi_dispatch(term, c);
+	term->esc_state = ESC_GROUND;
+	return 2;
+}
+
 /**
  * @brief Outputs a single character to the current terminal.
  * @param c The character to output.
  */
-void	terminal_putchar(char c) {
-	terminal_state_t *term = &terminals[current_terminal];
+/**
+ * @brief Writes one character to a named terminal.
+ *
+ * The body of terminal_putchar(), with the terminal passed in rather than taken
+ * from current_terminal, and every write to the hardware guarded on that
+ * terminal being the one on screen.
+ *
+ * Split out so the escape parser can be driven against a terminal nobody is
+ * looking at. Testing it on the visible one is not possible in any useful sense:
+ * the suite reports its own results through this same function, so the assertions
+ * would scroll and move the very cursor they were about to check.
+ *
+ * @param term Terminal to write to.
+ * @param c The character.
+ */
+static void terminal_putchar_on(terminal_state_t *term, char c) {
+	int visible = (term == &terminals[current_terminal]);
 	int old_view_offset = term->view_offset;
 	int needs_full_redraw = 0;
+	unsigned char uc = (unsigned char)c;
+
+	if (uc == 0x1B) {
+		term->esc_state = ESC_ESC;
+		return;
+	}
+
+	if (term->esc_state != ESC_GROUND) {
+		int taken = terminal_escape_feed(term, uc);
+
+		/* Redrawn once the sequence is complete, not once per parameter digit:
+		 * a full repaint is 80 by 24 cells and a cursor move is three bytes. */
+		if (taken == 2 && visible) update_screen();
+		if (taken) return;
+	}
 
 	if (c == '\b') {
 		if (term->cursor_x > 0)
@@ -159,7 +529,7 @@ void	terminal_putchar(char c) {
 		}
 		term->buffer[term->cursor_y][term->cursor_x] = vga_entry(' ', term->color);
 
-		if (term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
+		if (visible && term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
 			size_t screen_y = term->cursor_y - term->view_offset + 1;
 			vga_memory[screen_y * VGA_WIDTH + term->cursor_x] = term->buffer[term->cursor_y][term->cursor_x];
 			update_cursor(term->cursor_x, screen_y);
@@ -174,7 +544,7 @@ void	terminal_putchar(char c) {
 	else {
 		term->buffer[term->cursor_y][term->cursor_x] = vga_entry(c, term->color);
 		
-		if (term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
+		if (visible && term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
             size_t screen_y = term->cursor_y - term->view_offset + 1;
             vga_memory[screen_y * VGA_WIDTH + term->cursor_x] = term->buffer[term->cursor_y][term->cursor_x];
         }
@@ -199,13 +569,29 @@ void	terminal_putchar(char c) {
 		needs_full_redraw = 1;
 	}
 
-	if (term->cursor_y >= (VGA_HEIGHT - 1))
-		term->view_offset = term->cursor_y - 23;
-	else
-		term->view_offset = 0;
+	/*
+	 * The view follows the cursor only when the cursor leaves it.
+	 *
+	 * This used to recompute view_offset from cursor_y on every character, which
+	 * works while the cursor can only move forward and becomes impossible once an
+	 * escape sequence can put it anywhere: positioning to the top of the screen
+	 * and printing a single character would have snapped the view down by
+	 * twenty-three rows, so absolute addressing could never have worked at all.
+	 *
+	 * Sequential output is unchanged. The cursor steps past the bottom and the
+	 * view follows by exactly what it followed by before, and scrolling back by
+	 * hand still snaps to the cursor the moment anything is printed.
+	 */
+	if (term->cursor_y > (size_t)term->view_offset + (TERM_ROWS - 1))
+		term->view_offset = (int)term->cursor_y - (TERM_ROWS - 1);
+	else if (term->cursor_y < (size_t)term->view_offset)
+		term->view_offset = (int)term->cursor_y;
 
 	if (term->view_offset != old_view_offset)
 		needs_full_redraw = 1;
+
+	if (!visible)
+		return;
 
 	if (needs_full_redraw)
 		update_screen();
@@ -215,6 +601,110 @@ void	terminal_putchar(char c) {
 		}
 		else
 			update_cursor(80, 25);
+	}
+}
+
+/**
+ * @brief Outputs a single character to the current terminal.
+ * @param c The character to output.
+ */
+void	terminal_putchar(char c) {
+	terminal_putchar_on(&terminals[current_terminal], c);
+}
+
+/**
+ * @brief Writes a string to a named terminal, which may not be the visible one.
+ *
+ * Exists for the escape-sequence tests; see terminal_putchar_on().
+ *
+ * @param term_no Terminal index.
+ * @param data Null-terminated string.
+ */
+void terminal_write_to(size_t term_no, const char *data) {
+	if (term_no >= NUM_TERMINALS || data == 0) return;
+	for (size_t i = 0; data[i] != '\0'; i++) terminal_putchar_on(&terminals[term_no], data[i]);
+}
+
+/**
+ * @brief Reads a terminal's cursor position, in screen coordinates.
+ *
+ * Screen rather than buffer coordinates - 1-based row, 1-based column - because
+ * that is the space escape sequences name, and the point of asking is to check
+ * that a sequence put the cursor where it said.
+ *
+ * @param term_no Terminal index.
+ * @param row Receives the row; may be null.
+ * @param col Receives the column; may be null.
+ */
+void terminal_cursor_at(size_t term_no, size_t *row, size_t *col) {
+	if (term_no >= NUM_TERMINALS) return;
+
+	terminal_state_t *term = &terminals[term_no];
+	if (row) *row = (term->cursor_y >= (size_t)term->view_offset)
+	              ? (term->cursor_y - (size_t)term->view_offset + 1) : 0;
+	if (col) *col = term->cursor_x + 1;
+}
+
+/**
+ * @brief Reads one character off a terminal, in screen coordinates.
+ *
+ * @param term_no Terminal index.
+ * @param row 1-based screen row.
+ * @param col 1-based screen column.
+ * @return The character, or 0 when the position is off the screen.
+ */
+char terminal_char_at(size_t term_no, size_t row, size_t col) {
+	if (term_no >= NUM_TERMINALS) return 0;
+	if (row < 1 || row > TERM_ROWS || col < 1 || col > VGA_WIDTH) return 0;
+
+	terminal_state_t *term = &terminals[term_no];
+	size_t y = (size_t)term->view_offset + (row - 1);
+	if (y >= MAX_SCROLL) return 0;
+
+	return (char)(term->buffer[y][col - 1] & 0xFF);
+}
+
+/**
+ * @brief Reads the colour byte at a screen position.
+ *
+ * @param term_no Terminal index.
+ * @param row 1-based screen row.
+ * @param col 1-based screen column.
+ * @return The VGA colour byte, or 0 when the position is off the screen.
+ */
+uint8_t terminal_color_at(size_t term_no, size_t row, size_t col) {
+	if (term_no >= NUM_TERMINALS) return 0;
+	if (row < 1 || row > TERM_ROWS || col < 1 || col > VGA_WIDTH) return 0;
+
+	terminal_state_t *term = &terminals[term_no];
+	size_t y = (size_t)term->view_offset + (row - 1);
+	if (y >= MAX_SCROLL) return 0;
+
+	return (uint8_t)((term->buffer[y][col - 1] >> 8) & 0xFF);
+}
+
+/**
+ * @brief Resets a terminal to a known state, for tests.
+ *
+ * @param term_no Terminal index.
+ */
+void terminal_reset(size_t term_no) {
+	if (term_no >= NUM_TERMINALS) return;
+
+	terminal_state_t *term = &terminals[term_no];
+	term->cursor_x = 0;
+	term->cursor_y = 0;
+	term->view_offset = 0;
+	term->color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+	term->esc_state = ESC_GROUND;
+	term->esc_param_count = 0;
+	term->saved_x = 0;
+	term->saved_y = 0;
+	term->scroll_top = 1;
+	term->scroll_bottom = TERM_ROWS;
+
+	for (size_t y = 0; y < MAX_SCROLL; y++) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) term->buffer[y][x] = vga_entry(' ', term->color);
 	}
 }
 

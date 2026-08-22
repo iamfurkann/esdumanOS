@@ -138,6 +138,21 @@ void main(void) {
     int current_uid = -1;
     char current_username[32];
 
+    /*
+     * Ignore Ctrl-C, for the same reason the shell does and with more at stake.
+     *
+     * init execs the shell and then waits, which leaves it in the shell's process
+     * group - so a Ctrl-C at an idle prompt went to both of them. The shell
+     * survived because it had asked to; init had not, took the default action and
+     * died, and the first interrupt of the session quietly removed the process
+     * the session is supposed to return to.
+     *
+     * 24 is SYSCALL_SIGNAL_REG, 2 is SIG_INT and 1 is SIG_IGN. Spelled out here
+     * because this program is a freestanding translation unit and signal.h
+     * reaches into kernel types.
+     */
+    syscall(24, 2, 1, 0);
+
     syscall(10, 0, 0, 0);
     printk("======================================\n");
     printk("         Welcome to esdumanOS         \n");

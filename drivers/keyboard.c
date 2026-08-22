@@ -8,6 +8,7 @@
 #include "io.h"
 #include "tty.h"
 #include "process.h"
+#include "signal.h"
 #include "entropy.h"
 
 // 0: US layout, 1: TR layout
@@ -159,6 +160,35 @@ void keyboard_interrupt_handler(void) {
      */
     if (ctrl_pressed && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
         c &= 0x1F;
+    }
+
+    /*
+     * Ctrl-C never reaches the input ring.
+     *
+     * The fold above has been turning it into a 0x03 since v0.5.3, and that byte
+     * went into the buffer like any other - so whatever happened to be reading
+     * received it as data, and a program that was not reading was not
+     * interrupted at all. What was missing was never the key. It was somebody to
+     * send it to: interrupting one process is not what Ctrl-C means, and until a
+     * process could belong to a group there was no way to name everything the
+     * user had started with a single command.
+     *
+     * Consumed rather than delivered, which is why this returns instead of
+     * falling through. A program that wants the byte itself asks for it by
+     * catching SIG_INT; leaving it in the ring as well would hand every reader a
+     * stray control character after every interrupt.
+     */
+    if (c == 0x03) {
+        /*
+         * Echoed the way a terminal echoes it, so that pressing the key leaves a
+         * mark whether or not anything was listening. A Ctrl-C that produced no
+         * output at all was indistinguishable from a keyboard that had stopped
+         * working.
+         */
+        terminal_writestring("^C\n");
+
+        send_signal_to_group(foreground_pgid, SIG_INT);
+        return;
     }
 
     if (c != 0) {

@@ -38,6 +38,12 @@ void sys_set_priority(arch_regs_t *regs);
 void sys_yield(arch_regs_t *regs);
 /** @brief Syscall handler for getting the current user ID */
 void sys_getuid(arch_regs_t *regs);
+/** @brief Syscall handler for placing a process in a process group */
+void sys_setpgid(arch_regs_t *regs);
+/** @brief Syscall handler for handing the terminal to a process group */
+void sys_tcsetpgrp(arch_regs_t *regs);
+/** @brief Syscall handler for reading a process's group */
+void sys_getpgid(arch_regs_t *regs);
 /** @brief Syscall handler for getting the current process ID */
 void sys_getpid(arch_regs_t *regs);
 /** @brief Syscall handler for blocking the caller for a number of milliseconds */

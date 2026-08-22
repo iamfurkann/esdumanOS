@@ -21,6 +21,21 @@
 #define SIG_TERM 15
 
 /*
+ * Sent to every process in the foreground group when the user presses Ctrl-C.
+ *
+ * The keyboard has folded Ctrl-letter combinations into control bytes since
+ * v0.5.3, so Ctrl-C has been arriving as a 0x03 in the input ring all along and
+ * being handed to whatever happened to be reading as ordinary data. What was
+ * missing was not the key but somebody to send it to: interrupting one process
+ * is not what Ctrl-C means, and until a process could belong to a group there
+ * was no way to name everything the user had started with one command.
+ *
+ * Terminates by default, and catchable - a program with unsaved work is exactly
+ * the kind that wants to hear about this rather than be stopped by it.
+ */
+#define SIG_INT   2
+
+/*
  * Sent to a process that writes to a pipe no longer being read.
  *
  * pipe_write() has refused such a write since v0.5.2, but refusing it only

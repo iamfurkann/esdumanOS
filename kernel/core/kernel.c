@@ -766,7 +766,8 @@ static int init_userspace(void) {
     asm volatile("sti");
     int shell_idx = load_and_exec_elf("init.elf", 0); 
     if (shell_idx > 0) {
-        foreground_task = shell_idx; 
+        /* The first task founds its own group, so the shell's pgid is its pid. */
+        foreground_pgid = (uint32_t)shell_idx;
     }
     start_first_task();
     return 0;

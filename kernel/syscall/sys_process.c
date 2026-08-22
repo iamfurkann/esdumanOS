@@ -287,7 +287,22 @@ void sys_exec(arch_regs_t *regs) {
 
     int child_idx = load_and_exec_elf(basename, parent_id); 
     if (child_idx >= 0) {
-        foreground_task = child_idx;
+        /*
+         * The terminal is deliberately not touched here.
+         *
+         * This used to hand it to the new task's group, which looked right for
+         * the one case it was written against - a command typed at the prompt -
+         * and was wrong for every other. A background job forks, founds a group
+         * of its own and then execs, so exec taking the terminal moved the job
+         * into the foreground behind the shell's back: "grep foo &" followed by
+         * Ctrl-C killed the job that was supposed to be out of reach.
+         *
+         * Nothing needs to happen instead. The new task inherits the caller's
+         * group, so a program started by a task that already holds the terminal
+         * holds it too, and one started by a background job does not. Which
+         * group is in the foreground is the shell's decision and it makes it
+         * with tcsetpgrp().
+         */
         process_t *child_process = 0;
         for (process_t *p = task_list_head; p != 0; p = p->next) {
             if (p->pid == child_idx) { child_process = p; break; }
@@ -579,4 +594,141 @@ void sys_hexdump(arch_regs_t *regs) {
     }
     print_hexdump((uint32_t)data, sizeof(data));
     regs->eax = E_OK;
+}
+
+/**
+ * @brief Finds a live task by pid.
+ *
+ * @param pid Process to look for.
+ * @return The task, or 0 when no live task has that pid.
+ */
+static process_t *find_task_by_pid(int pid) {
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->pid == pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) return p;
+    }
+    return 0;
+}
+
+/**
+ * @brief Places a process in a process group.
+ *
+ * A caller may move itself or one of its children, and nothing else. That is
+ * narrow on purpose: a group is what the terminal talks to and what Ctrl-C
+ * reaches, so a program able to move an unrelated process into or out of a group
+ * could take a shell's job away from it, or arrange to be interrupted in its
+ * place.
+ *
+ * The shell and the child it has just forked both call this with the same
+ * arguments, which is the ordinary answer to a race neither of them can win: the
+ * child may run before the parent gets back from fork(), or the other way about,
+ * and either order leaves the group set before anything can be signalled.
+ *
+ * @param regs ebx is the pid (0 for the caller), ecx the group (0 to found a new
+ *             one named by that pid). On return eax is E_OK or a negative errno.
+ */
+void sys_setpgid(arch_regs_t *regs) {
+    if (current_task == 0) { regs->eax = E_SRCH; return; }
+
+    int pid = (int)regs->ebx;
+    uint32_t pgid = regs->ecx;
+
+    if (pid == 0) pid = current_task->pid;
+
+    process_t *target = find_task_by_pid(pid);
+    if (target == 0) { regs->eax = E_SRCH; return; }
+
+    /* Itself, or one of its children. Root is not exempt: this is about which
+     * process owns a job, not about privilege. */
+    if (target != current_task && target->parent_pid != current_task->pid) {
+        klog_int(LOG_LEVEL_WARN, "PROCESS",
+                 "setpgid: refused, target is neither the caller nor its child. PID", pid);
+        regs->eax = E_PERM;
+        return;
+    }
+
+    if (pgid == 0) pgid = (uint32_t)pid;
+
+    /*
+     * A group has to be one that exists or one the target is founding. Naming an
+     * arbitrary number would create a group with a single member that nothing
+     * else could ever join, and - if the terminal were then handed to it - a
+     * foreground group whose only member is not the process the user is looking
+     * at.
+     *
+     * "Exists" means some live task is already in it, not that its founder is
+     * still alive. A group outlives the process it is named after: the first
+     * stage of a pipeline can finish while the rest are still running, and a
+     * later stage must still be able to join the group it belongs to.
+     */
+    if (pgid != (uint32_t)pid) {
+        int members = 0;
+        for (process_t *p = task_list_head; p != 0; p = p->next) {
+            if (p->state == TASK_EMPTY || p->state == TASK_DEAD) continue;
+            if (p->pgid == pgid) { members = 1; break; }
+        }
+        if (!members) { regs->eax = E_SRCH; return; }
+    }
+
+    target->pgid = pgid;
+    regs->eax = E_OK;
+}
+
+/**
+ * @brief Hands the terminal to a process group.
+ *
+ * Restricted to the caller's own group, or a group holding one of its children.
+ * Without that a background job could take the terminal from the shell that
+ * started it, and the next Ctrl-C would interrupt something the user was not
+ * looking at while the thing they were looking at carried on.
+ *
+ * @param regs ebx is the group. On return eax is E_OK or a negative errno.
+ */
+void sys_tcsetpgrp(arch_regs_t *regs) {
+    if (current_task == 0) { regs->eax = E_SRCH; return; }
+
+    uint32_t pgid = regs->ebx;
+    if (pgid == 0) { regs->eax = E_INVAL; return; }
+
+    int allowed = (current_task->pgid == pgid);
+    int exists = 0;
+
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->state == TASK_EMPTY || p->state == TASK_DEAD) continue;
+        if (p->pgid != pgid) continue;
+
+        exists = 1;
+        if (p->parent_pid == current_task->pid) allowed = 1;
+    }
+
+    /* A group with nobody in it would leave the terminal pointing at nothing,
+     * and Ctrl-C would then reach no one at all. */
+    if (!exists) { regs->eax = E_SRCH; return; }
+
+    if (!allowed) {
+        klog_int(LOG_LEVEL_WARN, "PROCESS",
+                 "tcsetpgrp: refused, the caller owns neither the group nor a member. PGID", (int)pgid);
+        regs->eax = E_PERM;
+        return;
+    }
+
+    foreground_pgid = pgid;
+    regs->eax = E_OK;
+}
+
+/**
+ * @brief Reads a process's group.
+ *
+ * @param regs ebx is the pid, or 0 for the caller. On return eax is the group or
+ *             a negative errno.
+ */
+void sys_getpgid(arch_regs_t *regs) {
+    if (current_task == 0) { regs->eax = E_SRCH; return; }
+
+    int pid = (int)regs->ebx;
+    if (pid == 0) { regs->eax = current_task->pgid; return; }
+
+    process_t *target = find_task_by_pid(pid);
+    if (target == 0) { regs->eax = E_SRCH; return; }
+
+    regs->eax = target->pgid;
 }

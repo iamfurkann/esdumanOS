@@ -209,6 +209,31 @@ typedef struct process_s {
     uint32_t brk_current;
 
     /*
+     * The process group this task belongs to, named by the pid of the task that
+     * founded it.
+     *
+     * A group is what the terminal talks to. Ctrl-C interrupts everything in the
+     * foreground group rather than one process, which is the only way a pipeline
+     * can be stopped as the single thing the user typed - "ls | grep etc" is
+     * three tasks and one intention.
+     *
+     * create_process() inherits this from the creating task, alongside uid and
+     * cwd_id, which is what keeps every stage of a pipeline and every child of a
+     * fork in the group the shell put the pipeline in.
+     */
+    uint32_t pgid;
+
+    /*
+     * Set when a signal cut a blocking read short, so the read can report it
+     * rather than simply going back to sleep.
+     *
+     * A blocked syscall here resumes by re-running from the trap instruction, so
+     * without this the read would block again and the interrupt would have no
+     * visible effect at all - which is exactly what Ctrl-C at an idle prompt did.
+     */
+    uint8_t signal_interrupted;
+
+    /*
      * Where this process has read up to in the kernel log through /dev/kmsg.
      *
      * Per process rather than per open descriptor, because the device interface
@@ -263,7 +288,25 @@ static inline int get_current_cpu_id(void) {
 extern process_t *task_list_head;
 extern process_t *task_list_tail;
 extern int multitasking_enabled;
-extern int foreground_task;
+/**
+ * @brief The process group the terminal currently belongs to.
+ *
+ * This was `foreground_task`, a single pid, which could only ever describe one
+ * process holding the terminal. A pipeline is several, and they have to lose the
+ * terminal together and be interrupted together, so what the terminal points at
+ * is a group.
+ *
+ * Zero means nobody holds it.
+ */
+extern uint32_t foreground_pgid;
+
+/**
+ * @brief Sends a signal to every task in a process group.
+ *
+ * @param pgid Group to signal; 0 signals nothing.
+ * @param sig_num Signal number.
+ */
+void send_signal_to_group(uint32_t pgid, int sig_num);
 
 /**
  * @brief The idle task: always present, always runnable.

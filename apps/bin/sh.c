@@ -326,17 +326,19 @@ void sys_exit_status(int code) { syscall(SYSCALL_EXIT, code, 0, 0); while(1); }
  */
 int sys_fork(void) { return syscall(SYSCALL_FORK, 0, 0, 0); }
 /**
- * @brief Waits for any child to finish.
- * @param status Receives the child's exit status; may be NULL.
- * @return The pid that reported, or E_CHILD when there are none left.
+ * @brief Collects whatever a child has to report.
+ *
+ * One wrapper rather than three. There used to be a blocking one and a
+ * non-blocking one, and every caller here now has to say whether it wants to
+ * hear about a child that stopped as well as one that finished - which is a
+ * third axis, and two more wrappers to hold every pairing of it.
+ *
+ * @param status Receives the status; may be NULL when only the pid is wanted.
+ * @param flags WNOHANG, WUNTRACED, both, or neither.
+ * @return The pid that reported, 0 when nothing is ready and WNOHANG was given,
+ *         or E_CHILD when there is nothing left to wait for.
  */
-int sys_wait(int *status) { return syscall(SYSCALL_WAIT, (int)status, 0, 0); }
-/**
- * @brief Asks whether a child has finished, without blocking if none has.
- * @param status Receives the child's exit status; may be NULL.
- * @return The pid that reported, 0 when none is ready, E_CHILD when there are none.
- */
-int sys_wait_nohang(int *status) { return syscall(SYSCALL_WAIT, (int)status, 1, 0); }
+int sys_wait_flags(int *status, int flags) { return syscall(SYSCALL_WAIT, (int)status, flags, 0); }
 
 /*
  * Background jobs started with '&'.
@@ -350,80 +352,314 @@ int sys_wait_nohang(int *status) { return syscall(SYSCALL_WAIT, (int)status, 1, 
 #define MAX_JOBS 8
 
 /**
- * @brief One background job.
+ * @brief One job the shell is keeping track of.
  *
  * A job is a process group rather than a process, because that is what the
  * terminal addresses: "ls | grep etc &" is three tasks and one job, and
- * interrupting it or handing it the terminal has to reach all three.
+ * interrupting it, stopping it or handing it the terminal has to reach all
+ * three.
  *
- * The number is stable for as long as the job lives. `jobs` used to print the
- * table position, which renumbers every time an earlier job is collected - so
- * the name of a job changed under the user between one listing and the next.
- * Nothing could refer to a job by name yet; something will.
+ * Every member is recorded, not just the leader. A stopped job is brought back
+ * with fg, and fg has to wait for the whole of it - a pipeline whose middle
+ * stage was still running would otherwise be left behind while the shell printed
+ * its prompt. The group would be enough to signal them, but there is no call
+ * that asks the kernel who is in a group, and the shell forked them all and
+ * therefore already knows.
+ *
+ * The number is stable for as long as the job lives, which is what makes "%1"
+ * mean something. `jobs` used to print the table position, and that renumbers
+ * every time an earlier job is collected - so the name of a job changed under
+ * the user between one listing and the next.
  */
 typedef struct {
     int id;
-    int pid;    /**< Group leader, and what wait() reports. */
     int pgid;
+    int pids[MAX_STAGES];
+    int npid;
+    int stopped;    /**< 1 once a member has reported that it stopped. */
 } job_t;
 
 static job_t jobs[MAX_JOBS];
 static int job_count = 0;
 static int next_job_id = 1;
 
+/** @brief wait_foreground() saying the job stopped rather than finished. */
+#define JOB_STOPPED (-1000)
+
 /**
- * @brief Records a background job, if there is room to.
- * @param pid Process id of the job.
+ * @brief Records a job, if there is room to.
+ *
+ * @param pgid Group the job's processes are in.
+ * @param pids Every process in it.
+ * @param npid How many, at most MAX_STAGES.
+ * @param stopped 1 when it is being recorded because it stopped.
+ * @return The job number, or 0 when the table is full.
  */
-static void job_add(int pid, int pgid) {
-    if (job_count < MAX_JOBS) {
-        jobs[job_count].id = next_job_id++;
-        jobs[job_count].pid = pid;
-        jobs[job_count].pgid = pgid;
-        job_count++;
-    } else {
+static int job_add(int pgid, const int *pids, int npid, int stopped) {
+    if (job_count >= MAX_JOBS) {
         /* Said out loud rather than dropped. The job still runs and is still
-         * reaped by the sweep below - it just cannot be listed. */
-        printk("sh: too many background jobs to track\n");
+         * reaped by the sweep below - it just cannot be named. */
+        printk("sh: too many jobs to track\n");
+        return 0;
     }
+
+    if (npid > MAX_STAGES) npid = MAX_STAGES;
+
+    jobs[job_count].id = next_job_id++;
+    jobs[job_count].pgid = pgid;
+    jobs[job_count].npid = npid;
+    jobs[job_count].stopped = stopped;
+    for (int i = 0; i < npid; i++) jobs[job_count].pids[i] = pids[i];
+
+    return jobs[job_count++].id;
 }
 
 /**
- * @brief Removes a job from the table once it has been collected.
- * @param pid Process id that reported.
+ * @brief Finds the job holding a pid.
+ * @param pid Process to look for.
+ * @return Index into jobs[], or -1.
  */
-static void job_remove(int pid) {
+static int job_slot_by_pid(int pid) {
     for (int i = 0; i < job_count; i++) {
-        if (jobs[i].pid == pid) {
-            for (int j = i; j < job_count - 1; j++) jobs[j] = jobs[j + 1];
-            job_count--;
-            return;
+        for (int k = 0; k < jobs[i].npid; k++) {
+            if (jobs[i].pids[k] == pid) return i;
         }
     }
+    return -1;
 }
 
 /**
- * @brief Collects any background job that has finished, without waiting.
+ * @brief Finds a job by its number.
+ * @param id Job number as `jobs` prints it.
+ * @return Index into jobs[], or -1.
+ */
+static int job_slot_by_id(int id) {
+    for (int i = 0; i < job_count; i++) {
+        if (jobs[i].id == id) return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief Drops a job from the table.
+ * @param slot Index into jobs[].
+ */
+static void job_remove_at(int slot) {
+    if (slot < 0 || slot >= job_count) return;
+    for (int j = slot; j < job_count - 1; j++) jobs[j] = jobs[j + 1];
+    job_count--;
+}
+
+/**
+ * @brief Forgets one process of a job, and the job itself once it is empty.
  *
- * Called before each prompt. Reporting the status here rather than the moment it
- * arrives is deliberate: a job finishing in the middle of a line being typed
- * would otherwise print over it.
+ * @param pid Process that exited.
+ * @param job_id_out Receives the job number it belonged to, or 0.
+ * @return 1 when that was the job's last process.
+ */
+static int job_forget_pid(int pid, int *job_id_out) {
+    if (job_id_out) *job_id_out = 0;
+
+    int slot = job_slot_by_pid(pid);
+    if (slot < 0) return 0;
+
+    if (job_id_out) *job_id_out = jobs[slot].id;
+
+    int keep = 0;
+    for (int k = 0; k < jobs[slot].npid; k++) {
+        if (jobs[slot].pids[k] != pid) jobs[slot].pids[keep++] = jobs[slot].pids[k];
+    }
+    jobs[slot].npid = keep;
+
+    if (keep == 0) {
+        job_remove_at(slot);
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Reports a child that finished while the shell was doing something else.
+ * @param pid Process that reported.
+ * @param status Its exit status.
+ */
+static void job_report_done(int pid, int status) {
+    char num[16];
+    int job_id = 0;
+    int last = job_forget_pid(pid, &job_id);
+
+    /* A job is only done when its last process is. The stages of a pipeline
+     * finish one at a time and the user asked about the pipeline. */
+    if (job_id != 0 && !last) return;
+
+    if (job_id != 0) {
+        printk("[");
+        ft_itoa(job_id, num); printk(num);
+        printk("] done pid ");
+    } else {
+        printk("[done] pid ");
+    }
+
+    ft_itoa(pid, num);    printk(num);
+    printk(" status ");
+    ft_itoa(status, num); printk(num);
+    printk("\n");
+}
+
+/**
+ * @brief Notes that a job has stopped, and says so once.
+ * @param pid Process that reported the stop.
+ */
+static void job_report_stopped(int pid) {
+    int slot = job_slot_by_pid(pid);
+    if (slot < 0) return;
+
+    /*
+     * Every member of a stopped pipeline parks a notice of its own, so this is
+     * reached once per stage for one Ctrl-Z. The user pressed one key and is
+     * told once.
+     */
+    if (jobs[slot].stopped) return;
+
+    jobs[slot].stopped = 1;
+
+    char num[16];
+    printk("[");
+    ft_itoa(jobs[slot].id, num); printk(num);
+    printk("] stopped\n");
+}
+
+/**
+ * @brief Collects anything a job has to report, without waiting.
+ *
+ * Called before each prompt. Reporting here rather than the moment it arrives is
+ * deliberate: a job finishing in the middle of a line being typed would
+ * otherwise print over it.
  */
 static void jobs_reap(void) {
     for (;;) {
         int status = 0;
-        int pid = sys_wait_nohang(&status);
+        int pid = sys_wait_flags(&status, WNOHANG | WUNTRACED);
         if (pid <= 0) return;   /* 0: nothing ready. negative: no children. */
 
-        job_remove(pid);
+        if (status & WSTATUS_STOPPED) {
+            job_report_stopped(pid);
+            continue;
+        }
 
-        char num[16];
-        printk("[done] pid ");
-        ft_itoa(pid, num);    printk(num);
-        printk(" status ");
-        ft_itoa(status, num); printk(num);
-        printk("\n");
+        job_report_done(pid, status);
     }
+}
+
+/**
+ * @brief Resolves a job reference typed by the user.
+ *
+ * "%2" and a bare "2" both name job 2, and nothing at all names the most recent
+ * job - which is what "fg" on its own has meant in every shell since the idea
+ * existed. The newest is the highest number rather than the last table entry:
+ * entries move when an earlier job is collected.
+ *
+ * @param word The argument, or NULL.
+ * @return Index into jobs[], or -1 when it names nothing.
+ */
+static int job_resolve(const char *word) {
+    if (job_count == 0) return -1;
+
+    if (word == 0 || word[0] == '\0') {
+        int best = 0;
+        for (int i = 1; i < job_count; i++) {
+            if (jobs[i].id > jobs[best].id) best = i;
+        }
+        return best;
+    }
+
+    if (word[0] == '%') word++;
+    if (word[0] == '\0') return -1;
+
+    for (int i = 0; word[i] != '\0'; i++) {
+        if (word[i] < '0' || word[i] > '9') return -1;
+    }
+
+    return job_slot_by_id(dec_to_int(word));
+}
+
+/*
+ * Whether this process is the shell at the prompt rather than something it
+ * forked.
+ *
+ * A pipeline stage and a background job both go on running this same image after
+ * fork(), and both start programs of their own through run_external(). Neither
+ * may put those programs in a group of its own or touch the terminal: a stage
+ * belongs to the pipeline it is part of, and a background job has deliberately
+ * been kept out of the foreground. Only the shell the user is typing at owns
+ * what the terminal points to.
+ */
+static int shell_owns_terminal = 1;
+
+/**
+ * @brief Waits for a foreground job until it finishes or stops.
+ *
+ * Anything else that reports along the way is dealt with rather than dropped: a
+ * background job finishing while a foreground command runs would otherwise leave
+ * a status parked in a table the kernel only has sixteen slots of, and the job
+ * itself listed forever.
+ *
+ * @param pids   Every process in the job.
+ * @param npid   How many.
+ * @param pgid   The job's group, needed if it has to become a table entry.
+ * @param lead   The process whose exit status is the job's - the last stage of a
+ *               pipeline, which is what a shell reports for one.
+ * @param job_id Existing job number when the job is already tracked (fg), 0 when
+ *               it is a fresh foreground command that is not in the table.
+ * @return The job's exit status, or JOB_STOPPED.
+ */
+static int wait_foreground(const int *pids, int npid, int pgid, int lead, int job_id) {
+    int status = 0;
+    int live = npid;
+
+    while (live > 0) {
+        int st = 0;
+        int who = sys_wait_flags(&st, WUNTRACED);
+
+        /* E_CHILD says the kernel has nothing left to report to us at all, which
+         * is the only answer that ends this loop other than the job finishing. */
+        if (who <= 0) break;
+
+        int mine = 0;
+        for (int i = 0; i < npid; i++) {
+            if (pids[i] == who) { mine = 1; break; }
+        }
+
+        if (st & WSTATUS_STOPPED) {
+            /*
+             * One member reporting is the whole job stopping as far as the table
+             * is concerned. Ctrl-Z went to the group, and the rest are parking
+             * notices of their own behind this one; those are collected at the
+             * next prompt and say nothing new, and the kernel withdraws whatever
+             * is left of them when the job is continued.
+             */
+            if (mine && job_id == 0) job_add(pgid, pids, npid, 0);
+
+            job_report_stopped(who);
+            if (mine) return JOB_STOPPED;
+            continue;
+        }
+
+        if (mine) {
+            if (who == lead) status = st;
+            /* Keep the table honest while the job is still in it: a later fg
+             * must not wait for a stage that has already finished. */
+            if (job_id != 0) job_forget_pid(who, 0);
+            live--;
+            continue;
+        }
+
+        /* Somebody else's job finished while this one held the terminal. */
+        job_report_done(who, st);
+    }
+
+    if (job_id != 0) job_remove_at(job_slot_by_id(job_id));
+    return status;
 }
 /*
  * Spelled out here rather than included from the kernel's signal.h, which is the
@@ -433,7 +669,9 @@ static void jobs_reap(void) {
  */
 #define SIG_PIPE 13
 #define SIG_INT   2   /* Ctrl-C, sent to the whole foreground group */
-#define SIG_DFL   0   /* default action: terminate, for the signals that have one */
+#define SIG_TSTP 20   /* Ctrl-Z, which stops the foreground group instead */
+#define SIG_CONT 18   /* puts a stopped group back to work */
+#define SIG_DFL   0   /* default action: terminate or stop, for the signals that have one */
 #define SIG_IGN   1   /* discard the signal */
 
 /**
@@ -702,7 +940,9 @@ void show_help(void) {
     printk("    meminfo           Display RAM information\n");
     printk("    dmesg [-c|-n L|-l L]  Kernel log: show, clear, set level, filter\n");
     printk("    sync              Flush the disk cache and write the log to /var/log\n");
-    printk("    jobs              List background jobs started with &\n");
+    printk("    jobs              List jobs this shell started and still tracks\n");
+    printk("    fg [%n]           Bring a job to the foreground and wait for it\n");
+    printk("    bg [%n]           Continue a stopped job in the background\n");
     printk("    wait              Block until every background job has finished\n");
     printk("    hexdump [addr]    Show memory dump at address\n");
     printk("    help              Show this help menu\n");
@@ -1287,7 +1527,15 @@ void execute_command(char **args) {
     else if (ft_strcmp(args[0], "reboot") == 0) { last_exit_status = syscall(20, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "halt") == 0) { last_exit_status = syscall(21, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "exec") == 0) {
-        if (args[1]) last_exit_status = syscall(5, (int)args[1], 0, 0) < 0 ? 127 : 0;
+        /*
+         * The same path an ordinary command takes, rather than a bare exec()
+         * call of its own. It used to make that call directly and blocking,
+         * which left it as the one way to start a program the shell could not
+         * stop, could not name and did not put in a group - and it reported
+         * success for a program that had failed, because it only tested for a
+         * negative return.
+         */
+        if (args[1]) run_external(&args[1]);
         else { printk("Usage: exec <program>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "exit") == 0) { printk("exit\n"); syscall(1, 0, 0, 0); while(1); }
@@ -1354,7 +1602,7 @@ void execute_command(char **args) {
         /*
          * Block until every background job this shell started has reported.
          *
-         * The loop ends on its own: sys_wait() returns E_CHILD once there is
+         * The loop ends on its own: wait() returns E_CHILD once there is
          * nothing left to wait for, which is a negative value and not a pid. A
          * shell that tested for "no more jobs" by counting its own table instead
          * would deadlock the first time a job it had lost track of was still
@@ -1362,39 +1610,141 @@ void execute_command(char **args) {
          */
         int status = 0;
         int pid;
+        int gave_up = 0;
         char num[16];
 
-        while ((pid = sys_wait(&status)) > 0) {
-            job_remove(pid);
-            printk("[done] pid ");
-            ft_itoa(pid, num);    printk(num);
-            printk(" status ");
-            ft_itoa(status, num); printk(num);
-            printk("\n");
+        /*
+         * Refuse before blocking if a job is already stopped.
+         *
+         * A stopped job never finishes, so waiting for one is waiting for the
+         * rest of the boot - and this wait cannot be escaped. The shell ignores
+         * Ctrl-C, and a task blocked in wait() is not woken by a signal in any
+         * case, so the session would simply be over.
+         *
+         * The check is against the shell's own table rather than against the
+         * kernel's answer, which is the one place that is right: the kernel says
+         * only that a child exists, and a stop it has already reported is not
+         * reported twice - so by the time the user types this, there is nothing
+         * left for wait() to tell us and it would block on a child that has
+         * nothing more to say.
+         */
+        int stopped_slot = -1;
+        for (int i = 0; i < job_count; i++) {
+            if (jobs[i].stopped) { stopped_slot = i; break; }
         }
-        last_exit_status = 0;
+
+        if (stopped_slot >= 0) {
+            printk("sh: job [");
+            ft_itoa(jobs[stopped_slot].id, num); printk(num);
+            printk("] is stopped and will never finish; use fg or bg first\n");
+            last_exit_status = 1;
+        } else {
+            while ((pid = sys_wait_flags(&status, WUNTRACED)) > 0) {
+                /* And one that stops while this is waiting, which is the same
+                 * dead end reached from the other direction. */
+                if (status & WSTATUS_STOPPED) {
+                    job_report_stopped(pid);
+                    printk("sh: a stopped job cannot be waited for; use fg or bg\n");
+                    gave_up = 1;
+                    break;
+                }
+                job_report_done(pid, status);
+            }
+            last_exit_status = gave_up ? 1 : 0;
+        }
     }
     else if (ft_strcmp(args[0], "jobs") == 0) {
         /*
-         * Only what this shell started with '&' and has not yet collected. It is
-         * not a process list: the kernel has no call that enumerates tasks, and
-         * a shell has no business reading one if it did.
+         * Only what this shell started and has not yet collected. It is not a
+         * process list: the kernel has no call that enumerates tasks, and a
+         * shell has no business reading one if it did.
          */
         if (job_count == 0) {
-            printk("sh: no background jobs\n");
+            printk("sh: no jobs\n");
         } else {
             char num[16];
             for (int i = 0; i < job_count; i++) {
                 printk("[");
                 ft_itoa(jobs[i].id, num); printk(num);
-                printk("] pid ");
-                ft_itoa(jobs[i].pid, num); printk(num);
-                printk(" pgid ");
+                printk("] ");
+                printk(jobs[i].stopped ? "Stopped" : "Running");
+                printk("  pgid ");
                 ft_itoa(jobs[i].pgid, num); printk(num);
+                printk("  pid");
+                for (int k = 0; k < jobs[i].npid; k++) {
+                    printk(" ");
+                    ft_itoa(jobs[i].pids[k], num); printk(num);
+                }
                 printk("\n");
             }
         }
         last_exit_status = 0;
+    }
+    else if (ft_strcmp(args[0], "fg") == 0) {
+        /*
+         * Bring a job back to the foreground: give it the terminal, continue it,
+         * and wait for it as though it had just been typed.
+         *
+         * The terminal is handed over before the signal rather than after. A job
+         * that resumes and immediately reads the keyboard would otherwise do so
+         * while the shell still held the terminal, and the first thing the user
+         * typed would go to whichever of them the kernel woke first.
+         */
+        int slot = job_resolve(args[1]);
+        if (slot < 0 || jobs[slot].npid <= 0) {
+            printk("sh: fg: no such job\n");
+            last_exit_status = 1;
+        } else {
+            int pids[MAX_STAGES];
+            int npid = jobs[slot].npid;
+            int pgid = jobs[slot].pgid;
+            int id = jobs[slot].id;
+            char num[16];
+
+            for (int k = 0; k < npid; k++) pids[k] = jobs[slot].pids[k];
+            jobs[slot].stopped = 0;
+
+            printk("[");
+            ft_itoa(id, num); printk(num);
+            printk("] continued\n");
+
+            sys_tcsetpgrp(pgid);
+            sys_kill(-pgid, SIG_CONT);
+
+            int status = wait_foreground(pids, npid, pgid, pids[npid - 1], id);
+
+            sys_tcsetpgrp(sys_getpgid(0));
+            last_exit_status = (status == JOB_STOPPED) ? 148 : status;
+        }
+    }
+    else if (ft_strcmp(args[0], "bg") == 0) {
+        /*
+         * Continue a job without giving it the terminal, which is the whole of
+         * the difference from fg. It keeps running while the prompt comes back,
+         * and it is collected by the sweep before some later prompt.
+         *
+         * The signal goes to the group rather than to the pid the shell forked.
+         * That process may itself have started the program the user is looking
+         * at, and Ctrl-Z stopped both of them; continuing only the one the shell
+         * knows about would leave it blocked waiting for a task still stopped.
+         */
+        int slot = job_resolve(args[1]);
+        if (slot < 0) {
+            printk("sh: bg: no such job\n");
+            last_exit_status = 1;
+        } else if (!jobs[slot].stopped) {
+            printk("sh: bg: job is already running\n");
+            last_exit_status = 1;
+        } else {
+            char num[16];
+            jobs[slot].stopped = 0;
+
+            printk("[");
+            ft_itoa(jobs[slot].id, num); printk(num);
+            printk("] continued in the background\n");
+
+            last_exit_status = (sys_kill(-jobs[slot].pgid, SIG_CONT) < 0) ? 1 : 0;
+        }
     }
     else if (ft_strcmp(args[0], "sleep") == 0) {
         /*
@@ -1486,23 +1836,63 @@ void run_external(char **args) {
         }
         arg_str[arg_len] = '\0';
 
-        int exec_res = syscall(5, (int)exec_path, 0, (int)arg_str); // SYSCALL_EXEC
-        if (exec_res < 0) {
+        /*
+         * Started, not run.
+         *
+         * exec() used to block here and hand back the exit status, and that is
+         * still what it does for a caller that asks - but a shell cannot own a
+         * job it never learns the pid of. It could not put the program in a group
+         * of its own, so a foreground command lived in the shell's own group; it
+         * could not hand it the terminal, so which group was in the foreground
+         * was decided by whatever the kernel happened to do; and once a program
+         * can be stopped rather than finished, it had no way to name the thing
+         * the user would want back.
+         *
+         * With the pid in hand a foreground command is exactly what a pipeline
+         * already was: a group the shell placed, gave the terminal to, and waits
+         * for with wait().
+         */
+        int pid = syscall(5, (int)exec_path, EXEC_NOWAIT, (int)arg_str); // SYSCALL_EXEC
+        if (pid < 0) {
             printk("sh: command not found: "); printk(args[0]); printk("\n");
             last_exit_status = 127;
-        } else {
-            /*
-             * The child's own exit status, which exec() now returns once the
-             * child has finished. This used to be a hardcoded 0, so every
-             * program that started at all counted as having succeeded and the
-             * && and || below could not tell one outcome from the other:
-             * "stat /no_such_file && echo CHAINED" printed CHAINED.
-             *
-             * Negative already means the program could not be started, and an
-             * exit status is 0-255, so the two never collide.
-             */
-            last_exit_status = exec_res;
+            return;
         }
+
+        /*
+         * A group of its own, and the terminal with it - but only when this is
+         * the shell at the prompt. A pipeline stage runs this same code after
+         * fork() and its program belongs to the pipeline's group, not to a new
+         * one, or Ctrl-C would reach half of what the user typed.
+         */
+        int job_pgid = pid;
+        if (shell_owns_terminal) {
+            sys_setpgid(pid, pid);
+            sys_tcsetpgrp(pid);
+        } else {
+            job_pgid = sys_getpgid(0);
+        }
+
+        int status = wait_foreground(&pid, 1, job_pgid, pid, 0);
+
+        /*
+         * Take the terminal back. The kernel already hands it to a woken parent
+         * when the foreground group empties or stops, so this is belt and braces
+         * - but the prompt has to be the shell's either way.
+         */
+        if (shell_owns_terminal) sys_tcsetpgrp(sys_getpgid(0));
+
+        /*
+         * The child's own exit status. This used to be a hardcoded 0, so every
+         * program that started at all counted as having succeeded and the && and
+         * || below could not tell one outcome from the other: "stat
+         * /no_such_file && echo CHAINED" printed CHAINED.
+         *
+         * 148 is 128 + SIG_TSTP, which is what a shell reports for a command the
+         * user stopped - it did not finish, and calling that success would let an
+         * && chain run on as though it had.
+         */
+        last_exit_status = (status == JOB_STOPPED) ? 148 : status;
 }
 
 /**
@@ -1562,7 +1952,7 @@ void run_with_redirect(char **args, char *redirect_file) {
 /** Built-in command names for tab completion */
 static const char *builtin_commands[] = {
     "cat", "cat_raw", "cd", "clear", "dmesg", "echo", "env", "exec",
-    "jobs", "wait",
+    "bg", "fg", "jobs", "wait",
     "exit", "export", "halt", "help", "hexdump", "kill", "layout",
     "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
     "rm", "sleep", "su", "sync", "write",
@@ -1945,6 +2335,21 @@ void main(void) {
     sys_register_signal(SIG_INT, (void *)SIG_IGN);
 
     /*
+     * And SIG_TSTP, for the same reason again.
+     *
+     * Between commands the foreground group is the shell's own, and the shell
+     * shares that group with init - so a Ctrl-Z at an idle prompt reaches both.
+     * A shell that took the default action would park the session and leave
+     * nothing running that could ever continue it, which is worse than the
+     * interrupt case: there would not even be a login screen to come back to.
+     *
+     * Every job forked below puts it back to the default, exactly as it does
+     * with SIG_PIPE and SIG_INT. A job that could not be stopped is a job the
+     * user cannot get out of the way.
+     */
+    sys_register_signal(SIG_TSTP, (void *)SIG_IGN);
+
+    /*
      * Last in the setup, so that a value exported from /etc/profile wins over
      * the ones set above rather than being overwritten by them.
      */
@@ -2226,6 +2631,10 @@ void main(void) {
                             int forked = 0;
                             int last_pid = -1;
                             int leader_pid = -1;
+                            /* Every stage, so that a pipeline the user stops can
+                             * be listed and brought back as the one thing they
+                             * typed rather than as three processes. */
+                            int stage_pids[MAX_STAGES];
 
                             for (int s = 0; s < stage_count; s++) {
                                 int pid = sys_fork();
@@ -2257,6 +2666,13 @@ void main(void) {
                                      * than one that dies. */
                                     sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
                                     sys_register_signal(SIG_INT, (void *)SIG_DFL);
+                                    sys_register_signal(SIG_TSTP, (void *)SIG_DFL);
+
+                                    /* And it is not the shell any more: a program
+                                     * this stage starts belongs to the pipeline's
+                                     * group, and the terminal is not this
+                                     * process's to hand out. */
+                                    shell_owns_terminal = 0;
 
                                     if (s > 0) dup2(pfd[s - 1][0], 0);
                                     if (s < pipes_needed) dup2(pfd[s][1], 1);
@@ -2281,6 +2697,7 @@ void main(void) {
                                 if (leader_pid < 0) leader_pid = pid;
                                 sys_setpgid(pid, leader_pid);
 
+                                stage_pids[forked] = pid;
                                 last_pid = pid;
                                 forked++;
                             }
@@ -2308,15 +2725,13 @@ void main(void) {
                              * Collect them all, and report the last stage's
                              * status as the pipeline's - which is why wait() has
                              * to say which child it is talking about. They finish
-                             * in whatever order they finish.
+                             * in whatever order they finish, and if the user
+                             * stops them the whole pipeline becomes one job.
                              */
-                            int reaped = 0;
-                            while (reaped < forked) {
-                                int st = 0;
-                                int who = sys_wait(&st);
-                                if (who < 0) break;
-                                if (who == last_pid) last_exit_status = st;
-                                reaped++;
+                            if (forked > 0) {
+                                int st = wait_foreground(stage_pids, forked,
+                                                         leader_pid, last_pid, 0);
+                                last_exit_status = (st == JOB_STOPPED) ? 148 : st;
                             }
 
                             /*
@@ -2346,9 +2761,13 @@ void main(void) {
                             sys_setpgid(0, 0);
 
                             /* Same reason as the pipeline stages: only the shell
-                             * itself gets to ignore SIG_PIPE and SIG_INT. */
+                             * itself gets to ignore these, and only the shell
+                             * hands out the terminal. */
                             sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
                             sys_register_signal(SIG_INT, (void *)SIG_DFL);
+                            sys_register_signal(SIG_TSTP, (void *)SIG_DFL);
+                            shell_owns_terminal = 0;
+
                             if (stage_redirect[0]) run_with_redirect(stage_args[0], stage_redirect[0]);
                             else execute_command(stage_args[0]);
                             sys_exit_status(last_exit_status);
@@ -2357,10 +2776,13 @@ void main(void) {
                             last_exit_status = 1;
                         } else {
                             sys_setpgid(pid, pid);
-                            job_add(pid, pid);
 
                             char num[16];
-                            printk("[bg] pid ");
+                            int id = job_add(pid, &pid, 1, 0);
+
+                            printk("[");
+                            ft_itoa(id, num); printk(num);
+                            printk("] pid ");
                             ft_itoa(pid, num); printk(num);
                             printk("\n");
                             last_exit_status = 0;

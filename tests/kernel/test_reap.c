@@ -129,7 +129,7 @@ static void drain_zombies(void) {
 void run_reap_tests(void) {
     printk("\n--- Task Reaping / Signal Default Action Tests ---\n");
 
-    int saved_fg = foreground_task;
+    uint32_t saved_fg = foreground_pgid;
 
     /* ------------------------------------------------------------------
      * A fresh PCB is zeroed.
@@ -225,7 +225,7 @@ void run_reap_tests(void) {
      * by check_and_deliver_signals() without a handler to hand it to, and the
      * target carried on running.
      * ------------------------------------------------------------------ */
-    foreground_task = current_task->pid;
+    foreground_pgid = current_task->pgid;
 
     int victim_pid = 0;
     process_t *victim = make_victim(&victim_pid);
@@ -242,7 +242,7 @@ void run_reap_tests(void) {
                      "[STRICT] [REAP] the victim's descriptor table is released");
         KTEST_ASSERT(find_live_task(victim_pid) == 0,
                      "[STRICT] [REAP] the victim is unlinked from the run list");
-        KTEST_ASSERT(foreground_task == current_task->pid,
+        KTEST_ASSERT(foreground_pgid == current_task->pgid,
                      "[STRICT] [REAP] killing a background task does not take the terminal");
     }
 
@@ -469,13 +469,45 @@ void run_reap_tests(void) {
     int fg_pid = 0;
     process_t *fg_victim = make_victim(&fg_pid);
     if (fg_victim != 0) {
-        foreground_task = fg_pid;
+        /*
+         * A group of its own. The victim inherited this task's group from
+         * create_process(), and the terminal now belongs to a group rather than
+         * to a process - so killing a member while another survives is exactly
+         * the case that must *not* hand it on, and the check below would have
+         * been testing the opposite of what it says.
+         */
+        fg_victim->pgid = (uint32_t)fg_pid;
+        foreground_pgid = (uint32_t)fg_pid;
         send_user_signal(fg_pid, SIG_KILL);
 
-        KTEST_ASSERT(foreground_task != fg_pid,
-                     "[STRICT] [REAP] killing the foreground task hands the terminal on");
-        KTEST_ASSERT(foreground_task != -1,
+        KTEST_ASSERT(foreground_pgid != (uint32_t)fg_pid,
+                     "[STRICT] [REAP] the terminal is handed on when a group's last member dies");
+        KTEST_ASSERT(foreground_pgid != 0,
                      "[REAP] a live task was found to take the terminal");
+    }
+
+    /*
+     * And the other half of the same rule: a group that still has somebody in it
+     * keeps the terminal. "ls | grep etc" is three tasks and one intention, and
+     * the first stage exiting must not take the terminal from the stage that is
+     * still running.
+     */
+    int pair_a = 0, pair_b = 0;
+    process_t *task_a = make_victim(&pair_a);
+    process_t *task_b = make_victim(&pair_b);
+
+    if (task_a != 0 && task_b != 0) {
+        task_a->pgid = (uint32_t)pair_a;
+        task_b->pgid = (uint32_t)pair_a;
+        foreground_pgid = (uint32_t)pair_a;
+
+        send_user_signal(pair_a, SIG_KILL);
+        KTEST_ASSERT(foreground_pgid == (uint32_t)pair_a,
+                     "[STRICT] [REAP] a group with a survivor keeps the terminal");
+
+        send_user_signal(pair_b, SIG_KILL);
+        KTEST_ASSERT(foreground_pgid != (uint32_t)pair_a,
+                     "[STRICT] [REAP] and gives it up once the last member goes");
     }
 
     /* ------------------------------------------------------------------
@@ -551,5 +583,5 @@ void run_reap_tests(void) {
 
     /* Leave nothing of ours in the run list or the zombie list. */
     drain_zombies();
-    foreground_task = saved_fg;
+    foreground_pgid = saved_fg;
 }

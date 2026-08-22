@@ -54,6 +54,57 @@ void terminal_putchar(char c);
 void terminal_writestring(const char* data);
 
 /**
+ * @brief Writes a string to a named terminal, which may not be the visible one.
+ *
+ * For the escape-sequence tests. Driving the parser against the terminal the
+ * suite is reporting on is not possible in any useful sense: the assertions
+ * themselves scroll it and move the cursor they are about to check.
+ *
+ * @param term_no Terminal index.
+ * @param data Null-terminated string.
+ */
+void terminal_write_to(size_t term_no, const char *data);
+
+/**
+ * @brief Reads a terminal's cursor position, in 1-based screen coordinates.
+ *
+ * Screen rather than buffer coordinates, because that is the space escape
+ * sequences name.
+ *
+ * @param term_no Terminal index.
+ * @param row Receives the row; may be null.
+ * @param col Receives the column; may be null.
+ */
+void terminal_cursor_at(size_t term_no, size_t *row, size_t *col);
+
+/**
+ * @brief Reads one character off a terminal, in 1-based screen coordinates.
+ *
+ * @param term_no Terminal index.
+ * @param row Screen row.
+ * @param col Screen column.
+ * @return The character, or 0 when the position is off the screen.
+ */
+char terminal_char_at(size_t term_no, size_t row, size_t col);
+
+/**
+ * @brief Reads the VGA colour byte at a screen position.
+ *
+ * @param term_no Terminal index.
+ * @param row Screen row.
+ * @param col Screen column.
+ * @return The colour byte, or 0 when the position is off the screen.
+ */
+uint8_t terminal_color_at(size_t term_no, size_t row, size_t col);
+
+/**
+ * @brief Resets a terminal to a known state.
+ *
+ * @param term_no Terminal index.
+ */
+void terminal_reset(size_t term_no);
+
+/**
  * @brief Updates the hardware cursor position.
  * 
  * Communicates with the VGA controller registers to visually move the blinking 

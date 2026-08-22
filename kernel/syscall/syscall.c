@@ -116,6 +116,10 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_GETCWD:       sys_getcwd(regs); break;
 
         //sys_mem.c
+        case SYSCALL_SETPGID:      sys_setpgid(regs); break;
+        case SYSCALL_TCSETPGRP:    sys_tcsetpgrp(regs); break;
+        case SYSCALL_GETPGID:      sys_getpgid(regs); break;
+
         case SYSCALL_BRK:          sys_brk(regs); break;
         case SYSCALL_MMAP:         sys_mmap(regs); break;
         case SYSCALL_MUNMAP:       sys_munmap(regs); break;

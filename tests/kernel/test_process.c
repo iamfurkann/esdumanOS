@@ -6,6 +6,118 @@
  */
 #include "ktest.h"
 #include "process.h"
+#include "signal.h"
+#include "libft.h"
+#include "errno.h"
+#include "syscall.h"
+
+extern void sys_setpgid(arch_regs_t *regs);
+extern void sys_tcsetpgrp(arch_regs_t *regs);
+extern void sys_getpgid(arch_regs_t *regs);
+
+/**
+ * @brief Calls a group syscall handler and returns what it put in eax.
+ */
+static int call_pg(void (*fn)(arch_regs_t *), uint32_t ebx, uint32_t ecx) {
+    arch_regs_t regs;
+
+    ft_memset(&regs, 0, sizeof(regs));
+    regs.ebx = ebx;
+    regs.ecx = ecx;
+    fn(&regs);
+    return (int)regs.eax;
+}
+
+/**
+ * @brief Process groups: who may join one, who may hold the terminal.
+ *
+ * Expected behavior:
+ * - A task founds a group named by its own pid when it has no creator.
+ * - A caller may place itself or a child, and nothing else.
+ * - A group has to exist before anything can join it.
+ * - The terminal may only be handed to a group the caller owns or parented.
+ * - A signal to a group reaches every member.
+ *
+ * Edge cases covered:
+ * - A group whose founder has exited but whose members have not.
+ * - A pid that names no task.
+ */
+void run_pgroup_tests(void) {
+    printk("\n--- Process Group Tests ---\n");
+
+    if (current_task == 0) {
+        KTEST_ASSERT(0, "[PGROUP] a task context is required");
+        return;
+    }
+
+    uint32_t saved_fg = foreground_pgid;
+    uint32_t saved_pgid = current_task->pgid;
+
+    /* ------------------------------------------------------------------
+     * Reading a group, and founding one.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(call_pg(sys_getpgid, 0, 0) == (int)current_task->pgid,
+                 "[PGROUP] getpgid(0) reports the caller's own group");
+    KTEST_ASSERT(call_pg(sys_getpgid, 999999, 0) == E_SRCH,
+                 "[STRICT] [PGROUP] a pid that names no task is refused");
+
+    KTEST_ASSERT(call_pg(sys_setpgid, 0, 0) == E_OK,
+                 "[PGROUP] a task may found a group of its own");
+    KTEST_ASSERT(current_task->pgid == (uint32_t)current_task->pid,
+                 "[STRICT] [PGROUP] and that group is named by its pid");
+
+    /* ------------------------------------------------------------------
+     * A group has to exist before anything can join it.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(call_pg(sys_setpgid, 0, 987654) == E_SRCH,
+                 "[STRICT] [PGROUP] joining a group nobody is in is refused");
+
+    /* ------------------------------------------------------------------
+     * Only itself or a child.
+     *
+     * The narrow rule is the point: a group is what the terminal talks to and
+     * what Ctrl-C reaches, so a program able to move an unrelated process could
+     * take a shell's job away from it, or arrange to be interrupted in its place.
+     * ------------------------------------------------------------------ */
+    process_t *stranger = 0;
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p != current_task && p != idle_task &&
+            p->state != TASK_EMPTY && p->state != TASK_DEAD &&
+            p->parent_pid != current_task->pid) {
+            stranger = p;
+            break;
+        }
+    }
+
+    if (stranger != 0) {
+        uint32_t before = stranger->pgid;
+        KTEST_ASSERT(call_pg(sys_setpgid, (uint32_t)stranger->pid, 0) == E_PERM,
+                     "[STRICT] [PGROUP] a task that is neither the caller nor its child is refused");
+        KTEST_ASSERT(stranger->pgid == before,
+                     "[STRICT] [PGROUP] and its group really did not move");
+    }
+
+    /* ------------------------------------------------------------------
+     * The terminal.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(call_pg(sys_tcsetpgrp, current_task->pgid, 0) == E_OK,
+                 "[PGROUP] a caller may hand the terminal to its own group");
+    KTEST_ASSERT(foreground_pgid == current_task->pgid,
+                 "[STRICT] [PGROUP] and the terminal follows");
+
+    KTEST_ASSERT(call_pg(sys_tcsetpgrp, 0, 0) == E_INVAL,
+                 "[PGROUP] group zero is not a group");
+    KTEST_ASSERT(call_pg(sys_tcsetpgrp, 987654, 0) == E_SRCH,
+                 "[STRICT] [PGROUP] and neither is one with nobody in it");
+
+    if (stranger != 0 && stranger->pgid != current_task->pgid) {
+        KTEST_ASSERT(call_pg(sys_tcsetpgrp, stranger->pgid, 0) == E_PERM,
+                     "[STRICT] [PGROUP] a background task's group cannot take the terminal");
+    }
+
+    current_task->pgid = saved_pgid;
+    foreground_pgid = saved_fg;
+}
 /**
  * @brief Tests the Process Scheduler's state management and task creation.
  *

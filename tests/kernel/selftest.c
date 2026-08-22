@@ -67,6 +67,8 @@ static const ktest_module_t kernel_modules[] = {
     { "fault",       run_fault_tests },
     { "syscall",     run_syscall_tests },
     { "klog",        run_klog_tests },
+    { "tty",         run_tty_tests },
+    { "pgroup",      run_pgroup_tests },
     { "process",     run_process_tests },
     { "signal",      run_signal_tests },
     { "reap",        run_reap_tests },
@@ -383,7 +385,15 @@ static void run_user_mode_tests(void) {
     KTEST_ASSERT(pid > 0, "[RING3] user-mode payload loaded into its own address space");
     if (pid <= 0) return;
 
-    foreground_task = pid;
+    /*
+     * The payload founds its own foreground group. It inherited the synthetic
+     * task's pgid from create_process(), and that task is not what the terminal
+     * should be following once the Ring 3 half starts.
+     */
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->pid == pid) { p->pgid = (uint32_t)pid; break; }
+    }
+    foreground_pgid = (uint32_t)pid;
     start_first_task();
 
     /* start_first_task() iret's into Ring 3 and never comes back. */
@@ -439,6 +449,10 @@ void run_all_selftests(void) {
     dummy_task.fd_table = dummy_fds;
     dummy_task.uid = 0;
     dummy_task.pid = 999;
+    /* Assembled by hand rather than through create_process(), so every field it
+     * needs has to be set here - and a task with no group is one the terminal
+     * cannot be handed to. */
+    dummy_task.pgid = 999;
     dummy_task.state = 1; // TASK_RUNNING
     dummy_task.next = 0;
     dummy_task.prev = 0;

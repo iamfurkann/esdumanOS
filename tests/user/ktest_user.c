@@ -1376,6 +1376,96 @@ void main(void) {
 
         syscall(SYSCALL_CLOSE, kfd, 0, 0);
     }
+
+    /* ------------------------------------------------------------------
+     * Process groups, from the side where the permission checks are real.
+     *
+     * A group is what the terminal talks to and what Ctrl-C reaches. The
+     * keyboard half of that cannot be tested from here - nothing in a program
+     * can press a key - but everything underneath it can: who may join a group,
+     * who may hold the terminal, and whether a signal sent to a group reaches
+     * every member of it.
+     * ------------------------------------------------------------------ */
+    int my_pgid = syscall(62, 0, 0, 0);
+    KT_ASSERT(my_pgid > 0, "[PGROUP] a program can read its own group");
+    KT_ASSERT(syscall(62, 999999, 0, 0) < 0,
+              "[STRICT] [PGROUP] a pid that names no task is refused");
+
+    /*
+     * A child is in its parent's group until somebody moves it. That is what
+     * keeps every stage of a pipeline addressable as the one thing that was
+     * typed.
+     */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        int inherited = syscall(62, 0, 0, 0);
+        KT_ASSERT(inherited == my_pgid,
+                  "[STRICT] [PGROUP] a forked child starts in its parent's group");
+        kt_child_exit(0);
+    }
+    syscall(SYSCALL_WAIT, 0, 0, 0);
+
+    /* And a parent may move its own child out into a group of its own, which is
+     * what a shell does to every job it starts. */
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        syscall(SYSCALL_SLEEP, 400, 0, 0);
+        kt_child_exit(0);
+    }
+
+    if (child > 0) {
+        KT_ASSERT(syscall(60, child, child, 0) == 0,
+                  "[PGROUP] a parent may put its child in a group of its own");
+        KT_ASSERT(syscall(62, child, 0, 0) == child,
+                  "[STRICT] [PGROUP] and the child really moved");
+
+        /* The terminal may follow it, because it is this process's child. */
+        KT_ASSERT(syscall(61, child, 0, 0) == 0,
+                  "[PGROUP] and hand it the terminal");
+
+        /*
+         * A signal to the group reaches the member. This is the path Ctrl-C
+         * takes once the keyboard has decided who to send it to - the half a
+         * program can reach.
+         */
+        KT_ASSERT(syscall(SYSCALL_KILL, child, 2, 0) >= 0,
+                  "[PGROUP] SIG_INT can be sent to the job");
+
+        int st = -1;
+        int who = syscall(SYSCALL_WAIT, (int)&st, 0, 0);
+        KT_ASSERT(who == child, "[PGROUP] and the job reports back");
+        KT_ASSERT(st == 128 + 2,
+                  "[STRICT] [PGROUP] having been terminated by SIG_INT, not by anything else");
+
+        /* Take the terminal back, which a shell does after every job. */
+        KT_ASSERT(syscall(61, my_pgid, 0, 0) == 0,
+                  "[PGROUP] the parent can reclaim the terminal afterwards");
+    }
+
+    /*
+     * A process that is neither the caller nor its child is out of reach.
+     *
+     * Asked the other way round - a child trying to move its parent - because
+     * from here there is no way to name a stranger. There is no getppid(), pid 0
+     * already means "myself" at this call, and any literal pid is a guess about
+     * how many tasks happen to exist: this named pid 1, which is a stranger in a
+     * full run and is the payload itself under `make test_smap`, where the
+     * kernel-mode modules are skipped and fewer tasks are ever created. It
+     * passed in one configuration and failed in the other, against a kernel that
+     * was refusing exactly what it should.
+     *
+     * A parent is neither its child nor a child of its child, so the relationship
+     * is the one thing here that does not depend on what else is running.
+     */
+    int my_pid = syscall(SYSCALL_GETPID, 0, 0, 0);
+
+    child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        KT_ASSERT(syscall(60, my_pid, my_pid, 0) < 0,
+                  "[STRICT] [PGROUP] a child cannot move the group of its own parent");
+        kt_child_exit(0);
+    }
+    syscall(SYSCALL_WAIT, 0, 0, 0);
         ufree(shared);
     }
 

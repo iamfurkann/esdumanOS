@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-alpha] - 2026-08-22
+
+The terminal starts taking orders, and a process starts belonging to something. Two
+halves of the same idea: a full-screen program needs to say where to draw, and the
+user needs to be able to stop what they just started - which is never one process.
+
+### Added
+
+- **ANSI escape sequences.** Cursor positioning and relative motion, erase display and
+  line, colour and attributes, a saved cursor, a scroll region, and line insert and
+  delete. Enough for a full-screen program to draw with; anything else is swallowed
+  rather than printed, because a sequence the terminal does not implement should leave
+  no trace instead of spraying its parameters across the screen.
+
+  Rows are counted in the 24 the screen actually shows. There are three coordinate
+  spaces in the driver - the 25 rows the hardware has, the 24 of text because row 0 is
+  the status bar, and the 100 the scrollback buffer holds - and an escape names rows in
+  the second while the cursor is stored in the third.
+
+- **Process groups.** A task belongs to one, named by the pid of the task that founded
+  it, and inherited from its creator alongside uid and working directory. The terminal
+  now points at a group rather than at a process: `SETPGID` (60) places a process,
+  `TCSETPGRP` (61) hands the terminal over, `GETPGID` (62) reads it back.
+
+  Both restricted deliberately. A caller may place itself or a child and nothing else,
+  and may hand the terminal only to its own group or one holding a child - otherwise a
+  background job could take the terminal from the shell that started it, and the next
+  interrupt would reach something the user was not looking at.
+
+- **Ctrl-C.** `SIG_INT` goes to every process in the foreground group. The shell puts
+  each pipeline in a group of its own and hands it the terminal, so `ls | grep etc` is
+  three tasks the user can stop with one key, and takes the terminal back when the job
+  is done. Background jobs get their own group and are never given the terminal, which
+  is what keeps the interrupt away from them.
+
+  The shell ignores `SIG_INT` itself. Between commands the foreground group is the
+  shell's own - there is nothing else to hand the terminal to - and a shell taking the
+  default action would end the session the first time somebody pressed Ctrl-C at an
+  idle prompt.
+
+### Changed
+
+- **The keyboard stops delivering Ctrl-C as data.** The driver has folded Ctrl-letter
+  combinations into control bytes since v0.5.3, so `0x03` has been arriving in the
+  input ring all along and being handed to whatever happened to be reading. What was
+  missing was never the key: interrupting one process is not what Ctrl-C means, and
+  until a process could belong to a group there was no way to name everything the user
+  had started with a single command.
+
+- **The terminal changes hands when a group empties, not when a task dies.** Reaping
+  the foreground *task* used to hand the terminal on, which was the same thing only
+  while a group could not have two members - the first stage of a pipeline exiting
+  would have taken the terminal from the stage still running.
+
+- **The view follows the cursor only when the cursor leaves it.** `view_offset` was
+  recomputed from the cursor on every character, which works while the cursor can only
+  move forward and becomes impossible once an escape can put it anywhere: positioning
+  to the top of the screen and printing one character would have snapped the view down
+  by twenty-three rows, so absolute addressing could never have worked. Sequential
+  output is unchanged.
+
+- **`jobs` numbers are stable.** It printed the table position, which renumbers every
+  time an earlier job is collected - so the name of a job changed under the user
+  between one listing and the next. A job is also a group now rather than a pid,
+  because that is what the terminal addresses.
+
 ## [0.7.2-alpha] - 2026-08-21
 
 A log record becomes a record. v0.6.1 made the ring wrap and stopped `printk()` feeding

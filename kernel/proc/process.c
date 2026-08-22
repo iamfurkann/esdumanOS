@@ -22,7 +22,7 @@ process_t *task_list_tail = 0;
 cpu_state_t cpus[MAX_CPUS];
 int multitasking_enabled = 0;
 int next_pid = 0;
-int foreground_task = -1;
+uint32_t foreground_pgid = 0;
 process_t *zombie_tasks_head = 0;
 
 /*
@@ -163,10 +163,29 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
         new_task->parent_pid = -1;
         new_task->uid = 0;
         new_task->cwd_id = 0;
+        /* Nothing to inherit from: the first task founds its own group. */
+        new_task->pgid = (uint32_t)new_task->pid;
     } else {
         new_task->parent_pid = current_task->pid;
         new_task->uid = current_task->uid;
         new_task->cwd_id = current_task->cwd_id;
+        /*
+         * Same rule as uid and cwd_id. A forked child and an exec'd stage both
+         * land in the group their creator was standing in, which is what keeps a
+         * pipeline together without the shell having to place every stage.
+         *
+         * Unless the creator has no group, in which case this task founds one.
+         * The idle task is created first, takes pid 0 because that is where the
+         * pid counter starts, and therefore founds group 0 - which is the value
+         * meaning "no group" everywhere else. create_process() then makes it
+         * current_task on the spot, so the shell was built while the idle task
+         * was standing there and inherited group 0 from it, and so did every
+         * program the shell ever started. send_signal_to_group() refuses group 0,
+         * so Ctrl-C reached nobody at all: the whole system was in the group that
+         * means there isn't one.
+         */
+        new_task->pgid = current_task->pgid ? current_task->pgid
+                                            : (uint32_t)new_task->pid;
     }
 
     klog_int(LOG_LEVEL_DEBUG, "PROCESS", "New process created", new_task->pid);
@@ -308,8 +327,8 @@ void inherit_fd_table(process_t *child, process_t *parent) {
 /**
  * @brief Copies the parent state a forked child continues with.
  *
- * create_process() already inherits uid and cwd_id from the creating task, so
- * those are not repeated here. What is left is everything a process accumulates
+ * create_process() already inherits uid, cwd_id and pgid from the creating task,
+ * so those are not repeated here. What is left is everything a process accumulates
  * while running, which exec() deliberately discards - a new program image starts
  * with default handlers and no arguments - and which fork() must carry over
  * because the child is the same program at the same instruction.
@@ -792,12 +811,40 @@ void reap_task(process_t *victim) {
      * shell they are typing into.
      */
     if (woken_parent != 0) {
-        foreground_task = woken_parent->pid;
-    } else if (victim->pid == foreground_task) {
-        foreground_task = -1;
+        foreground_pgid = woken_parent->pgid;
+    } else if (victim->pgid == foreground_pgid) {
+        /*
+         * A group keeps the terminal until its last member goes. This used to
+         * hand it on when the foreground *task* died, which was the same thing
+         * only while a group could not have two members: the first stage of
+         * "ls | grep etc" exiting would have taken the terminal away from the
+         * stage still running.
+         */
+        int survivors = 0;
         for (process_t *p = task_list_head; p != 0; p = p->next) {
-            if (p != victim && (p->state == TASK_RUNNING || p->state == TASK_WAITING)) {
-                foreground_task = p->pid;
+            if (p != victim && p->pgid == foreground_pgid &&
+                (p->state == TASK_RUNNING || p->state == TASK_WAITING)) {
+                survivors = 1;
+                break;
+            }
+        }
+
+        if (!survivors) {
+            foreground_pgid = 0;
+            for (process_t *p = task_list_head; p != 0; p = p->next) {
+                if (p == victim || p == idle_task) continue;
+                if (p->state != TASK_RUNNING && p->state != TASK_WAITING) continue;
+                /*
+                 * A group of zero is not a group. Every task built through
+                 * create_process() has a real one, but a task assembled by hand -
+                 * the synthetic task the kernel-mode tests run against - can
+                 * carry a zeroed field, and handing the terminal to that group is
+                 * handing it to nobody: Ctrl-C would then reach no one at all.
+                 * The idle task is skipped for the same reason, more obviously.
+                 */
+                if (p->pgid == 0) continue;
+
+                foreground_pgid = p->pgid;
                 break;
             }
         }
@@ -1307,7 +1354,8 @@ int register_user_signal(int sig_num, uint32_t handler_addr) {
  * @return 1 for SIG_KILL, SIG_TERM and SIG_PIPE, 0 otherwise.
  */
 static int signal_terminates_by_default(int sig_num) {
-    return sig_num == SIG_KILL || sig_num == SIG_TERM || sig_num == SIG_PIPE;
+    return sig_num == SIG_KILL || sig_num == SIG_TERM || sig_num == SIG_PIPE ||
+           sig_num == SIG_INT;
 }
 
 /**
@@ -1352,12 +1400,63 @@ void send_user_signal(int target_pid, int sig_num) {
                 /* Self-signalled: handled on the syscall return path. */
             }
 
-            if (p->state == TASK_WAITING) {
+            /*
+             * Wake a blocked *read* so it can report the interruption, and leave
+             * every other wait alone.
+             *
+             * This used to wake any waiting task, which is wrong here for a
+             * reason that only appears once signals reach a shell: a blocked
+             * syscall resumes by re-running from the trap instruction, so waking
+             * a shell that is parked inside exec() would make it run the program
+             * again. Ctrl-C would have killed the job and immediately started a
+             * second copy of it.
+             *
+             * A parent waiting on a child does not need waking in any case - the
+             * child's death wakes it, with the status - so the only wait that
+             * gains anything from being cut short is one for input.
+             */
+            if (p->state == TASK_WAITING && p->wait_reason == WAIT_KBD) {
                 p->state = TASK_RUNNING;
                 p->wait_reason = WAIT_NONE;
+                p->signal_interrupted = 1;
             }
             return;
         }
+    }
+}
+
+/**
+ * @brief Sends a signal to every task in a process group.
+ *
+ * The pids are collected before any of them is signalled, and that is not
+ * tidiness. send_user_signal() reaps its target outright when the signal
+ * terminates by default and the target is not the running task, and reaping
+ * unlinks that task from the very list this would otherwise be walking - so the
+ * step after the first casualty would follow a pointer out of a node that no
+ * longer exists.
+ *
+ * MAX_TASKS is the ceiling by construction: a group cannot hold more members
+ * than there are tasks.
+ *
+ * @param pgid Group to signal; 0 signals nothing.
+ * @param sig_num Signal number.
+ */
+void send_signal_to_group(uint32_t pgid, int sig_num) {
+    int targets[MAX_TASKS];
+    int count = 0;
+
+    if (pgid == 0) return;
+    if (sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return;
+
+    for (process_t *p = task_list_head; p != 0 && count < MAX_TASKS; p = p->next) {
+        if (p == idle_task) continue;
+        if (p->pgid != pgid) continue;
+        if (p->state == TASK_EMPTY || p->state == TASK_DEAD) continue;
+        targets[count++] = p->pid;
+    }
+
+    for (int i = 0; i < count; i++) {
+        send_user_signal(targets[i], sig_num);
     }
 }
 
@@ -1514,9 +1613,9 @@ void start_first_task(void) {
 
     process_t *first_task = 0;
 
-    if (foreground_task > 0) {
+    if (foreground_pgid > 0) {
         for (process_t *p = task_list_head; p != 0; p = p->next) {
-            if (p->pid == foreground_task && p->state == TASK_RUNNING) {
+            if (p->pgid == foreground_pgid && p->state == TASK_RUNNING) {
                 first_task = p;
                 break;
             }

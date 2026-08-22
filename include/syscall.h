@@ -177,6 +177,32 @@
 /** @brief Return how many records the ring has overwritten since boot. */
 #define KLOG_CTL_DROPPED        4
 
+/**
+ * @brief Place a process in a process group; ebx is the pid, ecx the group.
+ *
+ * A pid of 0 means the caller, and a group of 0 means "found a new group named
+ * by that pid". A caller may place itself or one of its children and nothing
+ * else, which is what stops an unrelated program moving a shell's job out from
+ * under it.
+ *
+ * Both the shell and the child it just forked call this with the same arguments,
+ * which is the ordinary Unix answer to a race neither of them can win: whichever
+ * runs first, the group is set before the child can be signalled.
+ */
+#define SYSCALL_SETPGID         60
+/**
+ * @brief Hand the terminal to a process group; ebx is the group.
+ *
+ * The foreground group is what Ctrl-C interrupts. A caller may only name its own
+ * group or a group containing one of its children - a background job cannot take
+ * the terminal away from the shell that started it.
+ */
+#define SYSCALL_TCSETPGRP       61
+/**
+ * @brief Read a process's group; ebx is the pid, or 0 for the caller.
+ */
+#define SYSCALL_GETPGID         62
+
 // ==========================================================
 // Test-build-only syscalls (>= 200)
 //

@@ -163,6 +163,10 @@ void run_fault_tests(void);
 void run_syscall_tests(void);
 /** @brief Kernel log: the record ring, its counters, and /dev/kmsg. */
 void run_klog_tests(void);
+/** @brief Terminal: ANSI escape sequences and the coordinate space they name. */
+void run_tty_tests(void);
+/** @brief Process groups: membership, the terminal, and who may change either. */
+void run_pgroup_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
 void run_reap_tests(void);

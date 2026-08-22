@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.7.2-alpha
+**Version:** 0.8.0-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -243,7 +243,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 16 user-space programs and 28 shell builtins
-- 29 kernel self-test modules and CI pipeline
+- 31 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -262,6 +262,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
 | **Syscall Interface** | 55 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
+| **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
 
@@ -725,7 +726,7 @@ make test
 # Run parser fuzzing with 54 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 29 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 31 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -884,7 +885,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      29 kernel-mode test modules + framework
+|   |-- kernel/                      31 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (54 corpus files)
 |
@@ -922,6 +923,9 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | 57 | `MMAP` | Map anonymous, private, zeroed pages; returns the address or `0xFFFFFFFF` |
 | 58 | `MUNMAP` | Release pages obtained from `MMAP`; refuses any range outside that region |
 | 59 | `KLOG_CTL` | Inspect and control the kernel log: clear it, move the severity threshold, read the held and dropped counts |
+| 60 | `SETPGID` | Place a process in a process group; the caller may move itself or a child |
+| 61 | `TCSETPGRP` | Hand the terminal to a process group, which is what Ctrl-C reaches |
+| 62 | `GETPGID` | Read a process's group |
 | 99 | `YIELD` | Voluntarily yield the CPU |
 
 `TIME` fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space the
@@ -1172,10 +1176,16 @@ The following are known constraints of the current implementation. These are doc
 - **Job control stops at `&`, `jobs` and `wait`.** There is no `fg`, no `bg`, no
   Ctrl-Z and no process groups, so a background job can be waited for or killed but
   not brought back to the foreground. The shell tracks at most eight jobs.
-- **No Ctrl-C.** Interrupting a running foreground process needs process groups to
-  decide who receives the signal, and there are none. Ctrl-D exists — it ends input
-  for a program reading the keyboard — but it does not stop a program that is not
-  reading.
+- **Ctrl-C cannot interrupt a builtin.** A builtin runs inside the shell, and the
+  shell ignores `SIG_INT` so that an interrupt at an idle prompt does not end the
+  session — so `sleep 30` typed at the prompt runs to completion. External programs,
+  and every stage of a pipeline, are in their own group and stop as expected.
+- **A program that makes no system calls at all is interrupted late.** The default
+  action for an unhandled signal is applied on the way out of a syscall, so a task
+  spinning without one keeps its pending `SIG_INT` until it makes its next call. A
+  registered handler is delivered at the next context switch either way.
+- **No Ctrl-Z, no `fg`, no `bg`.** Stopping a job needs a task state the scheduler
+  does not have yet; `jobs` and `wait` are the whole of job control.
 - **`SIGPIPE` is the only signal a program receives without asking.** `SIGKILL` and
   `SIGTERM` still have to be sent with `kill`. There is no `SIGCHLD`, no `SIGALRM`
   delivered to user space, and no way to block a signal rather than ignoring it —

@@ -91,6 +91,19 @@ void sys_read(arch_regs_t *regs) {
     file_descriptor_t *desc = &current_task->fd_table[fd];
 
     if (desc->type == FD_TYPE_CONSOLE) {
+        /*
+         * A signal cut a previous attempt short. Reported as E_INTR rather than
+         * blocking again: the syscall restarts from the beginning when it is
+         * woken, so a read that simply went back to sleep would make the
+         * interrupt invisible - which is what Ctrl-C at a shell prompt looked
+         * like before this.
+         */
+        if (current_task->signal_interrupted) {
+            current_task->signal_interrupted = 0;
+            regs->eax = E_INTR;
+            return;
+        }
+
         char c = get_keyboard_char();
         if (c == 0) {
             // Nothing typed yet: block, and re-run the whole read once a key

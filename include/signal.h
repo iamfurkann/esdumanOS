@@ -47,6 +47,34 @@
 #define SIG_PIPE 13
 
 /*
+ * Sent to every process in the foreground group when the user presses Ctrl-Z.
+ *
+ * Stops the target by default rather than terminating it: the program keeps its
+ * memory, its descriptors and the instruction it was on, and can be put back
+ * exactly where it was with SIG_CONT. That is the whole point - a job the user
+ * wants out of the way for a moment is not a job they want to lose.
+ *
+ * Catchable, and therefore declinable, which is load-bearing. The shell runs a
+ * foreground program with exec() and init runs the shell the same way, so both
+ * are in the group the terminal is pointing at when Ctrl-Z arrives; a signal
+ * neither of them could refuse would stop the session itself. This is why there
+ * is no SIGSTOP here: an uncatchable stop has nobody to exempt init.
+ */
+#define SIG_TSTP 20
+
+/*
+ * Puts a stopped process back to work.
+ *
+ * Acted on where the signal is sent rather than where it is delivered, because a
+ * stopped task is by definition not running and will never reach a delivery
+ * point of its own. It is a no-op against a task that is not stopped.
+ *
+ * Numbered as Linux does on i386, which is also what the shell writes out as a
+ * literal - these programs are freestanding and cannot include this header.
+ */
+#define SIG_CONT 18
+
+/*
  * Disposition meaning "discard this signal", stored in signal_handlers[] where a
  * handler address would go.
  *

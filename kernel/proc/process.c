@@ -16,6 +16,9 @@
 #include "paging.h"
 #include "process.h"
 #include "security.h"
+/* For WSTATUS_STOPPED: the value a stopped child is reported to wait() with,
+ * which stop_task() writes into a blocked exec()'s saved frame. */
+#include "syscall.h"
 
 process_t *task_list_head = 0;
 process_t *task_list_tail = 0;
@@ -508,14 +511,21 @@ void cleanup_process_memory(uint32_t page_directory_phys) {
 }
 
 /**
- * @brief A child's exit status, held until its parent asks for it.
+ * @brief Something a child has to report, held until its parent asks for it.
+ *
+ * Two kinds of news share these slots. An exit status is the historical one: the
+ * child is gone and the number is all that is left of it. A stop notification is
+ * the other, and it is not history at all - the child is alive, parked, and
+ * waiting to be continued - so it is taken only by a caller that asked for
+ * WUNTRACED, and continue_task() withdraws it if nobody has.
  */
 typedef struct {
     int parent_pid;
     int child_pid;
-    int exit_code;
+    int exit_code;     /**< Exit status, or the signal number for a stop. */
     uint32_t seq;      /**< Arrival order, so "oldest" means something when full. */
     uint8_t used;
+    uint8_t stopped;   /**< 1 when this is a stop notification, not an exit. */
 } exit_slot_t;
 
 /*
@@ -537,13 +547,14 @@ static exit_slot_t exit_slots[MAX_TASKS];
 static uint32_t exit_slot_seq = 1;
 
 /**
- * @brief Stores a child's exit status for a parent that is not waiting yet.
+ * @brief Stores something a child has to report for a parent not waiting yet.
  *
  * @param parent_pid Parent to deliver to.
- * @param child_pid  Child that exited.
- * @param exit_code  Status to hold.
+ * @param child_pid  Child the news is about.
+ * @param exit_code  Exit status, or the signal number when stopped is set.
+ * @param stopped    1 for a stop notification, 0 for an exit status.
  */
-static void park_exit_status(int parent_pid, int child_pid, int exit_code) {
+static void park_child_news(int parent_pid, int child_pid, int exit_code, int stopped) {
     int slot = -1;
 
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -571,6 +582,55 @@ static void park_exit_status(int parent_pid, int child_pid, int exit_code) {
     exit_slots[slot].exit_code = exit_code;
     exit_slots[slot].seq = exit_slot_seq++;
     exit_slots[slot].used = 1;
+    exit_slots[slot].stopped = (uint8_t)(stopped ? 1 : 0);
+}
+
+/**
+ * @brief Withdraws any stop notification parked for a child, uncollected.
+ *
+ * A stop describes what a task is, not what it did, so a second stop must not
+ * queue behind the first and a stop that has been continued must not still be
+ * sitting there to be reported later. Exit statuses are left alone: those are
+ * history and every one of them is owed to somebody.
+ *
+ * @param child_pid Child whose stop notification is no longer true.
+ */
+static void drop_parked_stop(int child_pid) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (exit_slots[i].used && exit_slots[i].stopped &&
+            exit_slots[i].child_pid == child_pid) {
+            exit_slots[i].used = 0;
+        }
+    }
+}
+
+/**
+ * @brief Records that a child has stopped, for a parent to collect with wait().
+ *
+ * @param parent_pid Parent to deliver to.
+ * @param child_pid  Child that stopped.
+ * @param sig_num    Signal that stopped it.
+ */
+static void park_stop_notice(int parent_pid, int child_pid, int sig_num) {
+    drop_parked_stop(child_pid);
+    park_child_news(parent_pid, child_pid, sig_num, 1);
+}
+
+/**
+ * @brief Stores a child's exit status for a parent that is not waiting yet.
+ *
+ * @param parent_pid Parent to deliver to.
+ * @param child_pid  Child that exited.
+ * @param exit_code  Status to hold.
+ */
+static void park_exit_status(int parent_pid, int child_pid, int exit_code) {
+    /*
+     * A child that exits has nothing left to be stopped about. Leaving the stop
+     * behind would let a shell collect "it stopped" for a process that is gone
+     * and go looking for it with fg.
+     */
+    drop_parked_stop(child_pid);
+    park_child_news(parent_pid, child_pid, exit_code, 0);
 }
 
 /**
@@ -586,7 +646,10 @@ int take_parked_status(int parent_pid, int *child_pid_out, int *exit_code_out) {
     uint32_t oldest = 0xFFFFFFFF;
 
     for (int i = 0; i < MAX_TASKS; i++) {
-        if (exit_slots[i].used && exit_slots[i].parent_pid == parent_pid) {
+        /* Stop notifications are not exits and are invisible here. A caller that
+         * wants them asks take_parked_stop(), which is what WUNTRACED reaches. */
+        if (exit_slots[i].used && !exit_slots[i].stopped &&
+            exit_slots[i].parent_pid == parent_pid) {
             if (exit_slots[i].seq < oldest) { oldest = exit_slots[i].seq; slot = i; }
         }
     }
@@ -595,6 +658,33 @@ int take_parked_status(int parent_pid, int *child_pid_out, int *exit_code_out) {
 
     if (child_pid_out) *child_pid_out = exit_slots[slot].child_pid;
     if (exit_code_out) *exit_code_out = exit_slots[slot].exit_code;
+    exit_slots[slot].used = 0;
+    return 1;
+}
+
+/**
+ * @brief Takes one stop notification parked for a parent, oldest first.
+ *
+ * @param parent_pid    Parent asking.
+ * @param child_pid_out Receives the pid that stopped.
+ * @param sig_out       Receives the signal that stopped it.
+ * @return 1 when a notification was taken, 0 when none is parked.
+ */
+int take_parked_stop(int parent_pid, int *child_pid_out, int *sig_out) {
+    int slot = -1;
+    uint32_t oldest = 0xFFFFFFFF;
+
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (exit_slots[i].used && exit_slots[i].stopped &&
+            exit_slots[i].parent_pid == parent_pid) {
+            if (exit_slots[i].seq < oldest) { oldest = exit_slots[i].seq; slot = i; }
+        }
+    }
+
+    if (slot == -1) return 0;
+
+    if (child_pid_out) *child_pid_out = exit_slots[slot].child_pid;
+    if (sig_out) *sig_out = exit_slots[slot].exit_code;
     exit_slots[slot].used = 0;
     return 1;
 }
@@ -626,9 +716,64 @@ int has_pending_children(int pid) {
         if (exit_slots[i].used && exit_slots[i].parent_pid == pid) return 1;
     }
     for (process_t *p = task_list_head; p != 0; p = p->next) {
+        /* A stopped child is still a child. It cannot report anything until it
+         * is continued, but wait() must not answer E_CHILD while it exists -
+         * that would tell a shell it has no jobs left to bring back. */
         if (p->parent_pid == pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) return 1;
     }
     return 0;
+}
+
+/**
+ * @brief Whether a process group still holds anybody able to use the terminal.
+ *
+ * Stopped members do not count, and that is the whole reason this is asked. A
+ * group that has been stopped is a group nothing can be typed at: it will not
+ * read the keyboard and it will not act on an interrupt, so the terminal has to
+ * move on to somebody who will.
+ *
+ * @param pgid      Group to examine; 0 is not a group and holds nobody.
+ * @param excluding Task to ignore - the one being reaped or stopped, whose state
+ *                  may not have been written yet.
+ * @return 1 when a running or blocked member other than excluding exists.
+ */
+static int group_has_a_live_member(uint32_t pgid, const process_t *excluding) {
+    if (pgid == 0) return 0;
+
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p == excluding) continue;
+        if (p->pgid != pgid) continue;
+        if (p->state == TASK_RUNNING || p->state == TASK_WAITING) return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Gives the terminal to whichever live task can be found for it.
+ *
+ * The fallback, used when the foreground group has emptied and nobody was woken
+ * who could take it. Split out of reap_task() because stopping a group has the
+ * same problem as reaping one and had been about to grow a second copy of it.
+ *
+ * A group of zero is skipped. Every task built through create_process() has a
+ * real one, but a task assembled by hand - the synthetic task the kernel-mode
+ * tests run against - can carry a zeroed field, and handing the terminal to that
+ * group is handing it to nobody: Ctrl-C would then reach no one at all. The idle
+ * task is skipped for the same reason, more obviously.
+ *
+ * @param excluding Task not to consider, or 0.
+ */
+static void hand_terminal_to_any_live_task(const process_t *excluding) {
+    foreground_pgid = 0;
+
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p == excluding || p == idle_task) continue;
+        if (p->state != TASK_RUNNING && p->state != TASK_WAITING) continue;
+        if (p->pgid == 0) continue;
+
+        foreground_pgid = p->pgid;
+        return;
+    }
 }
 
 /**
@@ -757,8 +902,27 @@ void reap_task(process_t *victim) {
         }
 
         if (p->wait_reason == WAIT_CHILD) {
+            /*
+             * Only for the child this parent is actually inside exec() waiting
+             * for.
+             *
+             * It used to be any child at all, which was the same thing only
+             * while exec() was the only way to have one: the caller blocked
+             * before the child could run, so there was never a second. fork()
+             * and background jobs broke that, and the parent was then woken by
+             * whichever child died first - a "sleep 30 &" finishing while the
+             * shell sat in exec() returned the job's status as the foreground
+             * command's, so the shell printed a prompt with that command still
+             * running and both then read the keyboard.
+             *
+             * A non-match falls through to the parking below, which is where an
+             * unrelated child's status belongs.
+             */
+            if (p->exec_child_pid != victim->pid) continue;
+
             p->state = TASK_RUNNING;
             p->wait_reason = WAIT_NONE;
+            p->exec_child_pid = 0;
 
             /*
              * Hand the child's status up.
@@ -810,44 +974,24 @@ void reap_task(process_t *victim) {
      * a task the user is not looking at must not take the terminal away from the
      * shell they are typing into.
      */
-    if (woken_parent != 0) {
-        foreground_pgid = woken_parent->pgid;
-    } else if (victim->pgid == foreground_pgid) {
-        /*
-         * A group keeps the terminal until its last member goes. This used to
-         * hand it on when the foreground *task* died, which was the same thing
-         * only while a group could not have two members: the first stage of
-         * "ls | grep etc" exiting would have taken the terminal away from the
-         * stage still running.
-         */
-        int survivors = 0;
-        for (process_t *p = task_list_head; p != 0; p = p->next) {
-            if (p != victim && p->pgid == foreground_pgid &&
-                (p->state == TASK_RUNNING || p->state == TASK_WAITING)) {
-                survivors = 1;
-                break;
-            }
-        }
-
-        if (!survivors) {
-            foreground_pgid = 0;
-            for (process_t *p = task_list_head; p != 0; p = p->next) {
-                if (p == victim || p == idle_task) continue;
-                if (p->state != TASK_RUNNING && p->state != TASK_WAITING) continue;
-                /*
-                 * A group of zero is not a group. Every task built through
-                 * create_process() has a real one, but a task assembled by hand -
-                 * the synthetic task the kernel-mode tests run against - can
-                 * carry a zeroed field, and handing the terminal to that group is
-                 * handing it to nobody: Ctrl-C would then reach no one at all.
-                 * The idle task is skipped for the same reason, more obviously.
-                 */
-                if (p->pgid == 0) continue;
-
-                foreground_pgid = p->pgid;
-                break;
-            }
-        }
+    /*
+     * A group keeps the terminal until its last member goes. This used to hand
+     * it on when the foreground *task* died, which was the same thing only while
+     * a group could not have two members: the first stage of "ls | grep etc"
+     * exiting would have taken the terminal away from the stage still running.
+     *
+     * And the woken parent is inside that test rather than ahead of it, which is
+     * a correction. Waking a parent used to move the terminal to it whatever the
+     * dying task was, so a background job finishing while a foreground job ran
+     * took the terminal from a job the user was looking at - the shell's own
+     * wait() is what the job it started wakes, and it is also what every other
+     * child of it wakes. A task that did not hold the terminal cannot give it
+     * away.
+     */
+    if (victim->pgid == foreground_pgid &&
+        !group_has_a_live_member(foreground_pgid, victim)) {
+        if (woken_parent != 0) foreground_pgid = woken_parent->pgid;
+        else hand_terminal_to_any_live_task(victim);
     }
 
     // Remove from linked list
@@ -863,6 +1007,153 @@ void reap_task(process_t *victim) {
 }
 
 /**
+ * @brief Take a task out of the scheduler's reach without ending it.
+ *
+ * @param victim  Task to stop; may or may not be the running task.
+ * @param sig_num Signal that stopped it, reported to the parent through wait().
+ */
+void stop_task(process_t *victim, int sig_num) {
+    if (victim == 0) return;
+    if (victim->state == TASK_EMPTY || victim->state == TASK_DEAD) return;
+    if (victim->state == TASK_STOPPED) return;
+
+    /*
+     * The idle task is not stoppable, for the reason it is not reapable: the
+     * scheduler reaches it through a named pointer as its guarantee that there
+     * is always something to pick, and a stopped idle task would leave
+     * schedule() panicking with nowhere to go the first time everything else
+     * blocked.
+     */
+    if (victim == idle_task) {
+        klog(LOG_LEVEL_WARN, "PROCESS", "Refused to stop the idle task.");
+        return;
+    }
+
+    /*
+     * Remember what it was doing, then take it out of that state. A task in
+     * TASK_STOPPED is not waiting for anything as far as the rest of the kernel
+     * is concerned - wakeup_tasks() must not find it and release it behind the
+     * user's back - so the reason moves aside rather than staying live.
+     */
+    victim->stopped_wait_reason =
+        (victim->state == TASK_WAITING) ? victim->wait_reason : WAIT_NONE;
+    victim->state = TASK_STOPPED;
+    victim->wait_reason = WAIT_NONE;
+
+    /* The signal has done what it does; leaving the bit set would stop the task
+     * a second time the moment it was continued. */
+    if (sig_num >= 0 && sig_num < MAX_USER_SIGNALS) {
+        victim->pending_signals &= ~(1u << sig_num);
+    }
+
+    /* DEBUG rather than INFO, which is the level the screen shows. Stopping and
+     * continuing are routine and user-initiated - a line of kernel log over the
+     * prompt on every Ctrl-Z is noise, and the record is still in the ring for
+     * dmesg. */
+    klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Stopped by signal: PID", victim->pid);
+
+    /*
+     * Tell the parent, and tell it the same way reap_task() does.
+     *
+     * This is not politeness. A shell waiting for the job it just started is
+     * blocked in wait() or inside exec(), and a stopped child will never finish -
+     * so without this the shell waits for the rest of the boot for something that
+     * is only ever going to be resumed by the shell itself.
+     */
+    process_t *woken_parent = 0;
+    for (process_t *p = task_list_head; p != 0; p = p->next) {
+        if (p->pid != victim->parent_pid || p->state != TASK_WAITING) continue;
+
+        if (p->wait_reason == WAIT_PID) {
+            /* Parked and woken, not handed over: wait() writes the status into
+             * the caller's own memory and this code runs with somebody else's
+             * directory in CR3. The syscall restarts and collects it. */
+            park_stop_notice(p->pid, victim->pid, sig_num);
+            p->state = TASK_RUNNING;
+            p->wait_reason = WAIT_NONE;
+            woken_parent = p;
+            break;
+        }
+
+        if (p->wait_reason == WAIT_CHILD && p->exec_child_pid == victim->pid) {
+            /*
+             * A blocking exec() cannot restart - it would launch the program a
+             * second time - so it is handed a value in its saved frame, the same
+             * way an exit status is. The notification is parked as well, because
+             * the value says only that something stopped: exec() never told the
+             * caller which pid it started, so wait() is the only way to find out
+             * who to bring back.
+             */
+            park_stop_notice(p->pid, victim->pid, sig_num);
+            p->regs.eax = (uint32_t)(WSTATUS_STOPPED | sig_num);
+            p->state = TASK_RUNNING;
+            p->wait_reason = WAIT_NONE;
+            p->exec_child_pid = 0;
+            woken_parent = p;
+            break;
+        }
+    }
+
+    if (woken_parent == 0 && victim->parent_pid > 0) {
+        park_stop_notice(victim->parent_pid, victim->pid, sig_num);
+    }
+
+    /*
+     * And the terminal, by the same rule death follows: it moves only once the
+     * group holding it has nobody left who could use it, and a stopped member is
+     * not one of those - it will not read a key and will not act on an
+     * interrupt. Then the woken parent takes it back, or the fallback finds
+     * somebody who can hold it.
+     */
+    if (victim->pgid == foreground_pgid &&
+        !group_has_a_live_member(foreground_pgid, victim)) {
+        if (woken_parent != 0) foreground_pgid = woken_parent->pgid;
+        else hand_terminal_to_any_live_task(victim);
+    }
+}
+
+/**
+ * @brief Put a stopped task back where it was.
+ *
+ * @param task Task to continue; anything not stopped is left alone.
+ */
+void continue_task(process_t *task) {
+    if (task == 0 || task->state != TASK_STOPPED) return;
+
+    /* A stop that has not happened yet is cancelled by being continued, which is
+     * the POSIX rule and also the only sane reading of the two arriving
+     * together. */
+    task->pending_signals &= ~(1u << SIG_TSTP);
+
+    /* The notification described the task as it was. It is not true any more,
+     * and a parent that had not got round to collecting it would otherwise be
+     * told about a stop that has already been undone. */
+    drop_parked_stop(task->pid);
+
+    if (task->stopped_wait_reason == WAIT_CHILD) {
+        /* Back into the wait. See stopped_wait_reason: this is the one block
+         * that returns through eax rather than re-running its syscall, so
+         * releasing it as runnable would return from exec() with a register
+         * nobody wrote. */
+        task->state = TASK_WAITING;
+        task->wait_reason = WAIT_CHILD;
+    } else {
+        /*
+         * Released as runnable even if it was blocked. Every other blocking
+         * syscall resumes on the trap instruction and re-evaluates what it was
+         * waiting for, so this both restores the wait and repairs the wakeup
+         * that arrived while the task was stopped - wakeup_tasks() only touches
+         * TASK_WAITING, so those were missed.
+         */
+        task->state = TASK_RUNNING;
+        task->wait_reason = WAIT_NONE;
+    }
+
+    task->stopped_wait_reason = WAIT_NONE;
+    klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Continued by signal: PID", task->pid);
+}
+
+/**
  * @brief Whether any task is still able to run.
  *
  * Asked separately from the foreground bookkeeping above. Folding the two
@@ -870,11 +1161,16 @@ void reap_task(process_t *victim) {
  * announce a shutdown whenever a task died while foreground_task happened to be
  * unset, which is its value for the whole of early boot.
  *
- * @return 1 while at least one task is runnable or blocked, 0 otherwise.
+ * A stopped task counts. It cannot run, but it exists, holds its memory and can
+ * be continued - announcing that the machine has shut down while one is sitting
+ * there would be announcing the loss of it.
+ *
+ * @return 1 while at least one task is runnable, blocked or stopped, 0 otherwise.
  */
 static int any_task_alive(void) {
     for (process_t *p = task_list_head; p != 0; p = p->next) {
-        if (p->state == TASK_RUNNING || p->state == TASK_WAITING) return 1;
+        if (p->state == TASK_RUNNING || p->state == TASK_WAITING ||
+            p->state == TASK_STOPPED) return 1;
     }
     return 0;
 }
@@ -1350,12 +1646,30 @@ int register_user_signal(int sig_num, uint32_t handler_addr) {
  * stage whose reader has gone has nothing left to do, and until this it kept
  * reading its input to the end while every write failed.
  *
+ * SIG_INT joined them in v0.8.0 and this line did not, which is the kind of drift
+ * that makes a comment worth less than no comment.
+ *
  * @param sig_num The signal number.
- * @return 1 for SIG_KILL, SIG_TERM and SIG_PIPE, 0 otherwise.
+ * @return 1 for SIG_KILL, SIG_TERM, SIG_PIPE and SIG_INT, 0 otherwise.
  */
 static int signal_terminates_by_default(int sig_num) {
     return sig_num == SIG_KILL || sig_num == SIG_TERM || sig_num == SIG_PIPE ||
            sig_num == SIG_INT;
+}
+
+/**
+ * @brief Whether a signal stops a process that has not handled it.
+ *
+ * The second kind of default action, and the reason it has to be asked
+ * separately from the first: the four signals above end a process, and this one
+ * parks it with everything intact. A single "has a default action" test would
+ * have to decide which of those to do from the signal number anyway.
+ *
+ * @param sig_num The signal number.
+ * @return 1 for SIG_TSTP, 0 otherwise.
+ */
+static int signal_stops_by_default(int sig_num) {
+    return sig_num == SIG_TSTP;
 }
 
 /**
@@ -1377,6 +1691,11 @@ static int signal_terminates_by_default(int sig_num) {
  * mid-syscall on that task's stack. The pending bit is left set instead, and
  * apply_default_signal_action() terminates it on the way back out to user mode.
  *
+ * A signal whose default action is to stop rather than to end follows exactly
+ * that shape - in place for another task, deferred for this one - and SIG_CONT
+ * is the one signal acted on here in every case, because its target is by
+ * definition not running.
+ *
  * @param target_pid The target process ID.
  * @param sig_num The signal number.
  */
@@ -1384,7 +1703,36 @@ void send_user_signal(int target_pid, int sig_num) {
     if (sig_num < 0 || sig_num >= MAX_USER_SIGNALS) return;
     for (process_t *p = task_list_head; p != 0; p = p->next) {
         if (p->pid == target_pid && p->state != TASK_EMPTY && p->state != TASK_DEAD) {
+            /*
+             * SIG_CONT is acted on here and nowhere else, and it is the one
+             * signal that has to be.
+             *
+             * Everything else is recorded and then delivered to the target when
+             * the target next runs. A stopped process does not next run - that
+             * is what being stopped is - so a continue that waited for delivery
+             * would wait forever. It is not recorded either: there is nothing
+             * for the process to be told, and a pending bit nobody clears would
+             * sit in the mask for the rest of its life.
+             */
+            if (sig_num == SIG_CONT) {
+                continue_task(p);
+                return;
+            }
+
             p->pending_signals |= (1 << sig_num);
+
+            /*
+             * Stopped like the killed case below: in place when the target is
+             * not the running task, and left pending when it is. The reasoning
+             * is identical - this code may be running inside the target's own
+             * syscall, on its kernel stack, and taking it out of the scheduler
+             * from there is not something that can be done halfway through.
+             */
+            if (p->signal_handlers[sig_num] == 0 && signal_stops_by_default(sig_num)
+                && p != idle_task && p != current_task) {
+                stop_task(p, sig_num);
+                return;
+            }
 
             if (p->signal_handlers[sig_num] == 0 && signal_terminates_by_default(sig_num)
                 && p != idle_task) {
@@ -1489,7 +1837,16 @@ void check_and_deliver_signals(arch_regs_t *regs) {
 
                 uint32_t handler = curr->signal_handlers[i];
 
-                if (handler == 0 && signal_terminates_by_default(i)) {
+                /*
+                 * A default action is not delivery, and it is not this
+                 * function's to perform - it is left pending for
+                 * apply_default_signal_action(), which runs somewhere it is safe
+                 * to end or park the task. Both kinds have to be named here:
+                 * clearing the bit for a stop would discard a Ctrl-Z on the way
+                 * out of the very syscall that was about to act on it.
+                 */
+                if (handler == 0 &&
+                    (signal_terminates_by_default(i) || signal_stops_by_default(i))) {
                     continue;
                 }
 
@@ -1547,21 +1904,42 @@ void apply_default_signal_action(arch_regs_t *regs) {
      * than walking into an exit that reap_task() will refuse anyway.
      */
     if (curr == idle_task) {
-        curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM) | (1u << SIG_PIPE));
+        curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM) |
+                                   (1u << SIG_PIPE) | (1u << SIG_INT) |
+                                   (1u << SIG_TSTP));
         return;
     }
 
     for (int i = 0; i < MAX_USER_SIGNALS; i++) {
         if ((curr->pending_signals & (1 << i)) == 0) continue;
         if (curr->signal_handlers[i] != 0) continue;
-        if (!signal_terminates_by_default(i)) continue;
 
-        curr->pending_signals &= ~(1 << i);
-        curr->exit_code = 128 + i;
+        if (signal_terminates_by_default(i)) {
+            curr->pending_signals &= ~(1 << i);
+            curr->exit_code = 128 + i;
 
-        klog_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
-        exit_current_process(regs);
-        return;
+            klog_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
+            exit_current_process(regs);
+            return;
+        }
+
+        /*
+         * The other default action, and the same reason it happens here: this is
+         * the running task, and send_user_signal() could not take it out of the
+         * scheduler from inside its own syscall.
+         *
+         * The frame is snapshotted before the switch, exactly as
+         * sleep_current_task() does - schedule() overwrites *regs with the
+         * incoming task's context, so anything not saved by this point is gone.
+         * The task resumes on the instruction after the trap when it is
+         * continued, with the syscall it was making already finished.
+         */
+        if (signal_stops_by_default(i)) {
+            curr->regs = *regs;
+            stop_task(curr, i);
+            schedule(regs);
+            return;
+        }
     }
 }
 

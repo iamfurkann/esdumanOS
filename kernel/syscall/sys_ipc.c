@@ -89,7 +89,16 @@ void sys_signal_reg(arch_regs_t *regs) {
 }
 
 /**
- * @brief Function sys_kill
+ * @brief Sends a signal to a process, or to every member of a process group.
+ *
+ * A negative pid names the group -pid. That is POSIX's spelling and it is what
+ * the shell needs to continue a stopped job: a job is a group, and the process
+ * the shell forked is often not the only member of it - that process may itself
+ * have started the program the user is looking at, and Ctrl-Z stopped both. A
+ * continue delivered to the one pid the shell happens to know would leave the
+ * other stopped, with the first blocked waiting for it.
+ *
+ * @param regs ebx is the pid, or the negated group; ecx is the signal number.
  */
 void sys_kill(arch_regs_t *regs) {
     int target_pid = (int)regs->ebx;
@@ -97,7 +106,40 @@ void sys_kill(arch_regs_t *regs) {
 
     uint32_t my_uid = current_task->uid;
     int has_permission = 0;
-    
+
+    if (target_pid < 0) {
+        uint32_t pgid = (uint32_t)(-target_pid);
+        int members = 0;
+        int foreign = 0;
+
+        for (process_t *p = task_list_head; p != 0; p = p->next) {
+            if (p->state == TASK_EMPTY || p->state == TASK_DEAD) continue;
+            if (p->pgid != pgid) continue;
+            members++;
+            if (p->uid != my_uid) foreign = 1;
+        }
+
+        /* An empty group is not a group. Reported rather than quietly succeeding,
+         * so a shell asking to continue a job that has since finished can tell
+         * that from a job that ignored it. */
+        if (members == 0) {
+            regs->eax = E_SRCH;
+            return;
+        }
+
+        /* Every member, not just one: a group holding a process the caller does
+         * not own is a group the caller cannot signal. Root is exempt, as it is
+         * for a single target. */
+        if (my_uid == 0 || !foreign) {
+            send_signal_to_group(pgid, sig_num);
+            regs->eax = 0;
+        } else {
+            klog(LOG_LEVEL_WARN, "SYSCALL", "kill: Permission denied (group holds another user's process)!");
+            regs->eax = E_PERM;
+        }
+        return;
+    }
+
     if (my_uid == 0) {
         has_permission = 1;
     } else {

@@ -528,6 +528,15 @@ void run_reap_tests(void) {
 
         parent->state = TASK_WAITING;
         parent->wait_reason = WAIT_CHILD;
+        /*
+         * Which child the wait is for. sys_exec() records this and the reaper
+         * now requires it to match, because a parent in WAIT_CHILD used to be
+         * woken by whichever child died first - a background job finishing while
+         * the shell sat in exec() handed the shell the job's status as the
+         * foreground command's. A task assembled here has to set it for the same
+         * reason it has to set pgid: it never went through sys_exec().
+         */
+        parent->exec_child_pid = child_pid;
         parent->regs.eax = 0xDEADBEEF;
 
         send_user_signal(child_pid, SIG_KILL);
@@ -539,6 +548,69 @@ void run_reap_tests(void) {
 
         parent->state = TASK_RUNNING;
         parent->wait_reason = WAIT_NONE;
+        parent->exec_child_pid = 0;
+        parent->regs.eax = 0;
+    }
+
+    /* ------------------------------------------------------------------
+     * And the other half of that rule: a child the parent is not waiting for
+     * does not wake it.
+     *
+     * This is the defect the pid above exists to close. Two children, a parent
+     * blocked in exec() for the second, and the first exiting - the parent used
+     * to wake with the wrong status while the program it was waiting for was
+     * still running, and the shell printed a prompt over the top of it.
+     * ------------------------------------------------------------------ */
+    int bystander_pid = 0;
+    int wanted_pid = 0;
+    process_t *bystander = make_victim(&bystander_pid);
+    process_t *wanted = make_victim(&wanted_pid);
+
+    if (bystander != 0 && wanted != 0) {
+        process_t *parent = current_task;
+
+        /*
+         * Clear what earlier sections left behind first.
+         *
+         * Every victim killed above this point is a child of the running task
+         * that nothing was waiting for, so each one parked a status - eight of
+         * them by here. take_parked_status() hands back the *oldest*, so the
+         * check below would be shown the first victim of the module rather than
+         * the one it just killed, and would fail against a kernel doing exactly
+         * the right thing. What a test asserts and what it needs in order to
+         * assert it are two different things, and the second is the test's own
+         * job to arrange.
+         */
+        int drained_pid = 0;
+        int drained_code = 0;
+        while (take_parked_status(parent->pid, &drained_pid, &drained_code)) { }
+
+        parent->state = TASK_WAITING;
+        parent->wait_reason = WAIT_CHILD;
+        parent->exec_child_pid = wanted_pid;
+        parent->regs.eax = 0xDEADBEEF;
+
+        send_user_signal(bystander_pid, SIG_KILL);
+
+        KTEST_ASSERT(parent->state == TASK_WAITING,
+                     "[STRICT] [REAP] a child the parent is not waiting for leaves it blocked");
+        KTEST_ASSERT(parent->regs.eax == 0xDEADBEEF,
+                     "[STRICT] [REAP] and does not overwrite the status it is waiting for");
+
+        int reported_pid = 0;
+        int reported_code = 0;
+        KTEST_ASSERT(take_parked_status(parent->pid, &reported_pid, &reported_code) &&
+                     reported_pid == bystander_pid,
+                     "[REAP] that child's status is parked for a later wait() instead");
+
+        send_user_signal(wanted_pid, SIG_KILL);
+
+        KTEST_ASSERT(parent->state == TASK_RUNNING,
+                     "[STRICT] [REAP] the child it was waiting for does wake it");
+
+        parent->state = TASK_RUNNING;
+        parent->wait_reason = WAIT_NONE;
+        parent->exec_child_pid = 0;
         parent->regs.eax = 0;
     }
 

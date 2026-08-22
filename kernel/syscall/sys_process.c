@@ -21,6 +21,8 @@
 #include "bcache.h"
 #include "paging.h"
 #include "rtc.h"
+/* For the exec() modes and the wait() flags and status bits. */
+#include "syscall.h"
 
 static int copy_user_string(char *destination, const char *source, size_t max_len) {
     if (!validate_string_pointer(source, max_len)) return 0;
@@ -169,10 +171,10 @@ void sys_fork(arch_regs_t *regs) {
  * API of this kind gets to be wrong, so it was changed while there was one.
  *
  * @param regs Live syscall frame. ebx is an int* in user memory receiving the
- *             status, or NULL when the caller only wants the pid; a non-zero ecx
- *             asks not to block. On return eax holds the pid of the child that
- *             reported, 0 when nothing is ready and the caller asked not to wait,
- *             or E_CHILD when it has no children left at all.
+ *             status, or NULL when the caller only wants the pid; ecx carries
+ *             WNOHANG and WUNTRACED. On return eax holds the pid of the child
+ *             that reported, 0 when nothing is ready and the caller asked not to
+ *             wait, or E_CHILD when it has no children left at all.
  */
 void sys_wait(arch_regs_t *regs) {
     if (current_task == 0) {
@@ -182,10 +184,17 @@ void sys_wait(arch_regs_t *regs) {
 
     /* NULL is allowed and means the caller only wants to know which child. */
     int *user_status = (int *)regs->ebx;
-    /* Non-zero ecx is WNOHANG: report that nothing is ready rather than block. A
-     * shell tracking background jobs has to be able to ask without committing to
-     * a wait - it has a prompt to print. */
-    int no_hang = (int)regs->ecx;
+    /*
+     * WNOHANG: report that nothing is ready rather than block. A shell tracking
+     * background jobs has to be able to ask without committing to a wait - it
+     * has a prompt to print.
+     *
+     * ecx was the whole flag rather than a mask, and every existing caller
+     * passes exactly 1 for it, so reading it as a bit field costs nothing and
+     * leaves WUNTRACED somewhere to live.
+     */
+    int flags = (int)regs->ecx;
+    int no_hang = (flags & WNOHANG) != 0;
     if (user_status && !validate_user_writable_pointer(user_status, sizeof(int))) {
         regs->eax = E_FAULT;
         return;
@@ -206,6 +215,29 @@ void sys_wait(arch_regs_t *regs) {
         }
         regs->eax = (uint32_t)child_pid;
         return;
+    }
+
+    /*
+     * Exits first, stops second.
+     *
+     * A child that has finished is owed a collection - the slot holding its
+     * status is a fixed resource and nobody else can free it - while a stop can
+     * be reported at any point, because the child is still there. Asking in the
+     * other order would let a shell with one stopped job and one that just
+     * finished keep hearing about the stop.
+     */
+    if (flags & WUNTRACED) {
+        int stop_sig = 0;
+        if (take_parked_stop(current_task->pid, &child_pid, &stop_sig)) {
+            status = WSTATUS_STOPPED | stop_sig;
+            if (user_status && copy_to_user(user_status, &status, sizeof(int)) != E_OK) {
+                klog(LOG_LEVEL_ERROR, "SYSCALL", "wait: stop notice could not be written to user memory.");
+                regs->eax = E_FAULT;
+                return;
+            }
+            regs->eax = (uint32_t)child_pid;
+            return;
+        }
     }
 
     /*
@@ -242,7 +274,23 @@ void sys_wait(arch_regs_t *regs) {
 }
 
 /**
- * @brief Function sys_exec
+ * @brief Starts a program, either waiting for it or handing back its pid.
+ *
+ * The blocking form is what this call has always been: the caller sleeps in
+ * WAIT_CHILD and reap_task() writes the child's exit status into its saved
+ * frame. It is the right shape for init, which has nothing else to do while the
+ * shell runs, and it is kept for that.
+ *
+ * EXEC_NOWAIT exists because a shell cannot use the blocking form to own a job.
+ * It never learns the pid, so it cannot put the program in a group of its own,
+ * cannot hand it the terminal, and - once a program can be stopped rather than
+ * finished - has no way to name the thing it would bring back. Returning the pid
+ * makes a foreground command exactly what a pipeline already is: a process the
+ * shell placed, gave the terminal to, and waits for with wait().
+ *
+ * @param regs ebx is the path, ecx the mode (EXEC_WAIT or EXEC_NOWAIT), edx the
+ *             argument string. On return eax is the child's exit status, or its
+ *             pid for EXEC_NOWAIT, or a negative errno.
  */
 void sys_exec(arch_regs_t *regs) {
     char target_path[MAX_FILENAME];
@@ -315,6 +363,28 @@ void sys_exec(arch_regs_t *regs) {
             }
             child_process->cmd_args[i] = '\0';
         }
+
+        /*
+         * The caller asked for the pid rather than the outcome, so there is
+         * nothing to wait for. The child is already on the run list and the
+         * caller returns with it running - which is the whole point: it can now
+         * place the child in a group, hand it the terminal, and wait for it with
+         * a call that can report a stop as well as an exit.
+         */
+        if ((int)regs->ecx == EXEC_NOWAIT) {
+            regs->eax = (uint32_t)child_idx;
+            return;
+        }
+
+        /*
+         * Which child this wait is for.
+         *
+         * reap_task() delivers into the frame below, and it used to do that for
+         * whichever child died first - so a background job finishing while the
+         * shell sat here returned the job's status as this program's. Recording
+         * the pid is what lets the reaper tell them apart.
+         */
+        if (current_task) current_task->exec_child_pid = child_idx;
 
         /*
          * Publish the parent's return value BEFORE sleeping.

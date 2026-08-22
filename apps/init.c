@@ -153,6 +153,19 @@ void main(void) {
      */
     syscall(24, 2, 1, 0);
 
+    /*
+     * And Ctrl-Z, where the same reasoning has a worse ending.
+     *
+     * A stopped init is not a dead one, so nothing would announce it - the login
+     * screen would simply never come back, and there would be no process left
+     * running that could send the signal to bring it round. 20 is SIG_TSTP.
+     *
+     * This is why the stop signal is one a process can decline. An uncatchable
+     * SIGSTOP would reach init exactly the same way and there would be nothing
+     * this line could do about it.
+     */
+    syscall(24, 20, 1, 0);
+
     syscall(10, 0, 0, 0);
     printk("======================================\n");
     printk("         Welcome to esdumanOS         \n");

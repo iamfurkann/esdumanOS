@@ -69,6 +69,7 @@ static const ktest_module_t kernel_modules[] = {
     { "klog",        run_klog_tests },
     { "tty",         run_tty_tests },
     { "pgroup",      run_pgroup_tests },
+    { "jobctl",      run_jobctl_tests },
     { "process",     run_process_tests },
     { "signal",      run_signal_tests },
     { "reap",        run_reap_tests },

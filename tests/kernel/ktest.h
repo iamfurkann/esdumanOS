@@ -167,6 +167,8 @@ void run_klog_tests(void);
 void run_tty_tests(void);
 /** @brief Process groups: membership, the terminal, and who may change either. */
 void run_pgroup_tests(void);
+/** @brief Job control: stopping a task, continuing it, and reporting both. */
+void run_jobctl_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
 void run_reap_tests(void);

@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.6.1--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.8.1--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.8.0-alpha
+**Version:** 0.8.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -234,6 +234,30 @@ unseen. `dmesg` grew `-c`, `-n` and `-l` to reach it, and `/dev/kmsg` streams th
 records in a machine-readable form, writable by root so that a program's words are
 recorded as a program's rather than as the kernel's.
 
+v0.8.0 gives a process something to belong to. The terminal used to point at a single
+process, which is not what the user typed: `ls | grep etc` is three tasks and one
+intention, and interrupting one of them is not interrupting the command. A task now
+belongs to a process group, inherited from its creator alongside its uid and working
+directory, and the terminal points at a group — so Ctrl-C reaches everything the user
+started with one key. The keyboard had been folding Ctrl-C into a 0x03 since v0.5.3 and
+handing it to whatever happened to be reading; what was missing was never the key, it
+was somebody to send it to. The terminal driver learned ANSI escape sequences in the
+same release, which nothing in user space emits yet — the editor two releases out is
+what they are for.
+
+v0.8.1 lets the user set a job aside instead of losing it. Stopping needs a state the
+scheduler never had: a task that is neither running nor waiting for anything, holding
+its memory, its descriptors and the instruction it was on until somebody asks for it
+back. Ctrl-Z parks the foreground job, `fg` gives it the terminal again and `bg` lets it
+run on without one, and a job is named by number — `%1`, or nothing at all for the most
+recent. A stopped task remembers what it was doing, because almost every blocking
+syscall here resumes on the trap instruction and re-evaluates what it was waiting for;
+`exec()` is the exception, and a task stopped inside one goes back into exactly that
+wait. `exec()` also gained a form that hands back a pid instead of blocking, which is
+what lets the shell own a foreground command the way it already owned a pipeline —
+without a pid there was no group to put it in, no way to hand it the terminal, and
+nothing to name when the user stopped it.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -242,8 +266,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 16 user-space programs and 28 shell builtins
-- 31 kernel self-test modules and CI pipeline
+- 16 user-space programs and 33 shell builtins
+- 32 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -261,7 +285,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 55 system calls via INT 0x80, covering process control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 60 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -284,6 +308,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **Working directory** | Per-process, held in the PCB and inherited from the creating process. Relative paths resolve against it; user space can only move it through `chdir()` |
 | **IPC** | Message passing (8-slot mailbox per process), anonymous and named pipes (16 pipes, 4 KB ring buffer each) |
 | **Signals** | Per-process signal handlers (32 slots), kernel timer slots (32) |
+| **Job control** | Process groups, a foreground group the terminal points at, and a stopped task state. Ctrl-C interrupts the foreground job and Ctrl-Z parks it; `fg` and `bg` bring it back |
 | **FPU** | Eager FPU state save/restore on every context switch (FXSAVE/FXRSTOR), per-process 512-byte state. Not lazy — there is no `CR0.TS` / `#NM` path |
 
 ### File System
@@ -328,7 +353,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 23 kernel-mode modules: VFS, memory, pipe, security, passwd, devfs, regression, integration, adversarial, concurrency, stress, string, paging, PMM, lifecycle, fault, syscall, process, signal, ELF, crypto, entropy, bcache — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side |
+| **Kernel Self-Tests** | 32 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 54 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -625,10 +650,43 @@ sure what the current build produces.
 | Up / Down Arrow | Scroll terminal history |
 | AltGr | Access Turkish keyboard layout characters |
 | Ctrl-D | End input for a program reading the keyboard (`cat`, `grep`, `head`, `wc`) |
+| Ctrl-C | Interrupt the foreground job — every process in it, not just one |
+| Ctrl-Z | Stop the foreground job and get the prompt back; `fg` or `bg` resumes it |
 
 Ctrl with a letter produces that letter's control code, which is how Ctrl-D becomes the
-end-of-file byte. Ctrl with anything else is passed through unchanged. There is no
-Ctrl-C: interrupting a foreground process needs process groups, which do not exist yet.
+end-of-file byte. Ctrl with anything else is passed through unchanged.
+
+Ctrl-C and Ctrl-Z are consumed by the driver rather than delivered as bytes: they name
+the foreground process group and send it a signal. A program that wants the interrupt
+itself asks for it by catching `SIG_INT`; leaving the byte in the input ring as well
+would hand every reader a stray control character after every keypress.
+
+**Ctrl-Z does not reach the guest under `-display curses`.** The key gets as far as the
+terminal QEMU is running in — `stty susp undef; cat -v` echoes `^Z` there — but the
+curses front end does not turn it into a guest keypress, and `stty susp undef` before
+launching does not change that. Ctrl-C and Ctrl-D are delivered normally.
+
+The symptom is unambiguous, because the `^Z` echo happens in the driver before
+anything else: no `^Z` on screen means nothing arrived. Two ways to reach the same
+place, both verified:
+
+```
+Esc, then 2          (QEMU monitor)
+sendkey ctrl-z
+Esc, then 1          (back to the guest)
+```
+
+or send the signal from inside the OS, which needs no monitor at all:
+
+```
+sleep 30 &
+kill <pid> 20
+jobs
+fg
+```
+
+A graphical display backend delivers the key without any of this; curses is the one
+that does not.
 
 ### Shell Commands
 
@@ -648,8 +706,15 @@ env                   List environment variables
 export KEY VALUE      Set environment variable (two words, not KEY=VALUE)
 sleep <seconds>       Pause for a number of seconds
 exec <program>        Execute an ELF binary
+jobs                  List the jobs this shell started and still tracks
+fg [%n]               Bring a job to the foreground and wait for it. With no
+                      argument, the most recent one.
+bg [%n]               Continue a stopped job without giving it the terminal
+wait                  Block until every background job has finished
 kill <pid> <signal>   Send a signal to a process (decimal). 9 and 15 terminate a
-                      target that has not registered a handler for them.
+                      target that has not registered a handler for them; 20 stops
+                      it and 18 continues it. A negative pid names a process group
+                      and signals every member.
 su                    Switch to root (prompts for the root password)
 dmesg                 Display the kernel log
 meminfo               Display memory usage (root only)
@@ -775,6 +840,7 @@ filtered run proves one module, not the tree.
 | `test_syscall.c` | Dispatcher rejection of bad numbers, FDs, and sizes |
 | `test_process.c` | Scheduler, live-frame detection, rwlocks, syscall restart, idle task |
 | `test_signal.c` | Handler registration and pending-signal bookkeeping |
+| `test_jobctl.c` | Stopping and continuing a task: the state it remembers, who is told, and what happens to the terminal |
 | `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
@@ -912,12 +978,12 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | Number | Name | Description |
 |--------|------|-------------|
 | 1 | `EXIT` | Terminate the current process |
-| 5 | `EXEC` | Load and execute an ELF binary; blocks until it exits, then returns its status |
+| 5 | `EXEC` | Load and execute an ELF binary. Blocks until it exits and returns its status, or with `EXEC_NOWAIT` (1) in ecx returns its pid straight away |
 | 7 | `SET_PRIORITY` | Set process scheduling priority |
 | 51 | `GETPID` | Get the process ID of the caller |
 | 52 | `SLEEP` | Block the caller for a number of **milliseconds** |
 | 53 | `FORK` | Duplicate the caller; returns 0 in the child and its pid in the parent |
-| 54 | `WAIT` | Collect a finished child's exit status; blocks if none has finished yet |
+| 54 | `WAIT` | Collect what a child has to report; blocks unless `WNOHANG` (1). With `WUNTRACED` (2) a child that stopped is reported too, as `WSTATUS_STOPPED` (0x100) OR'd with the signal |
 | 55 | `TIME` | Fill an `esd_time_t` with the current wall-clock time |
 | 56 | `BRK` | Move the program break; returns the resulting break, so a refusal is the break unmoved |
 | 57 | `MMAP` | Map anonymous, private, zeroed pages; returns the address or `0xFFFFFFFF` |
@@ -1037,13 +1103,20 @@ RTC is not wired into the VFS, so any time reported here would be invented.
 | 6 | `IPC_RECEIVE` | Receive a message from mailbox |
 | 18 | `ALARM` | Set a timer-based alarm |
 | 24 | `SIGNAL_REG` | Register a signal handler, or `SIG_DFL` (0) / `SIG_IGN` (1) |
-| 25 | `KILL` | Send a signal to a process |
+| 25 | `KILL` | Send a signal to a process, or to every member of a group when the pid is negative |
 | 27 | `SIGRETURN` | Return from signal handler |
 
-Three signals terminate a process that has not handled them: `SIGKILL` (9), `SIGTERM`
-(15) and `SIGPIPE` (13). The exit status is 128 plus the signal number, so a `wait()`
-reporting 141 means the child was killed writing to a broken pipe. Every other signal is
-recorded and dropped when no handler is registered.
+Four signals terminate a process that has not handled them: `SIGKILL` (9), `SIGTERM`
+(15), `SIGPIPE` (13) and `SIGINT` (2). The exit status is 128 plus the signal number, so
+a `wait()` reporting 141 means the child was killed writing to a broken pipe.
+
+One signal stops it instead: `SIGTSTP` (20), which is what Ctrl-Z sends. A stopped
+process keeps its memory, its descriptors and the instruction it was on, and `SIGCONT`
+(18) puts it back. `SIGCONT` is acted on where it is sent rather than delivered — a
+stopped process never reaches a delivery point of its own — and so it is the one signal
+a program cannot catch.
+
+Every other signal is recorded and dropped when no handler is registered.
 
 A disposition is one of three things: an address to jump to, 0 for the default action, or
 1 for `SIG_IGN`, which discards the signal. Dispositions are inherited across `fork()`
@@ -1173,23 +1246,32 @@ The following are known constraints of the current implementation. These are doc
 - **`/etc/profile` is a settings file, not a script.** Only `export KEY VALUE` is
   recognised. Running arbitrary commands from it would mean forking and exec'ing before
   the first prompt, and a syntax error in it would be a shell that will not start.
-- **Job control stops at `&`, `jobs` and `wait`.** There is no `fg`, no `bg`, no
-  Ctrl-Z and no process groups, so a background job can be waited for or killed but
-  not brought back to the foreground. The shell tracks at most eight jobs.
-- **Ctrl-C cannot interrupt a builtin.** A builtin runs inside the shell, and the
-  shell ignores `SIG_INT` so that an interrupt at an idle prompt does not end the
-  session — so `sleep 30` typed at the prompt runs to completion. External programs,
-  and every stage of a pipeline, are in their own group and stop as expected.
-- **A program that makes no system calls at all is interrupted late.** The default
-  action for an unhandled signal is applied on the way out of a syscall, so a task
-  spinning without one keeps its pending `SIG_INT` until it makes its next call. A
+- **The shell tracks at most eight jobs**, and a job of at most four processes. Both
+  are the pipeline budget seen from the other end. A ninth job still runs and is still
+  collected; it just cannot be named with `%n`.
+- **Ctrl-C and Ctrl-Z cannot reach a builtin.** A builtin runs inside the shell, and
+  the shell declines both signals so that a keypress at an idle prompt does not end or
+  park the session — so `sleep 30` typed at the prompt runs to completion. External
+  programs, and every stage of a pipeline, are in their own group and stop as expected.
+- **A program that makes no system calls at all is interrupted or stopped late.** The
+  default action for an unhandled signal is applied on the way out of a syscall, so a
+  task spinning without one keeps its pending signal until it makes its next call. A
   registered handler is delivered at the next context switch either way.
-- **No Ctrl-Z, no `fg`, no `bg`.** Stopping a job needs a task state the scheduler
-  does not have yet; `jobs` and `wait` are the whole of job control.
-- **`SIGPIPE` is the only signal a program receives without asking.** `SIGKILL` and
-  `SIGTERM` still have to be sent with `kill`. There is no `SIGCHLD`, no `SIGALRM`
-  delivered to user space, and no way to block a signal rather than ignoring it —
-  the disposition is one of handler, default or ignore, with no mask.
+- **A job continued with `bg` competes with the shell for the keyboard** if it reads
+  standard input. Unix answers this with `SIGTTIN`, which stops a background process
+  that tries to read the terminal rather than letting it take the user's keystrokes;
+  that signal does not exist here yet.
+- **Ctrl-Z at an idle prompt throws away the line being typed**, exactly as Ctrl-C
+  does. The shell ignores the signal, but the read it is blocked in is still cut short
+  and has no way to tell which signal cut it.
+- **There is no `SIGSTOP`.** Stopping is `SIG_TSTP` only, and `SIG_TSTP` is catchable —
+  which is what lets the shell and init decline it. An uncatchable stop would reach
+  init the same way and there would be nothing either of them could do about it.
+- **`SIGPIPE` is the only signal a program receives without asking.** `SIGKILL`,
+  `SIGTERM` and `SIGTSTP` still have to be sent with `kill` or a key. There is no
+  `SIGCHLD`, no `SIGALRM` delivered to user space, `SIGCONT` is acted on where it is
+  sent rather than delivered, and there is no way to block a signal rather than
+  ignoring it — the disposition is one of handler, default or ignore, with no mask.
 - **`meminfo`, `hexdump`, `stack` and `free` print from inside the kernel**, so their
   output goes to the screen whatever the calling process's descriptor 1 points at. They
   cannot be piped or redirected: `meminfo > mem.txt` creates an empty file. `ls` and

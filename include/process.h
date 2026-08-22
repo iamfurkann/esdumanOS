@@ -38,8 +38,17 @@
 /**
  * @brief Enumeration of possible task states.
  * Defines the current execution status of a process.
+ *
+ * TASK_STOPPED is appended rather than inserted. The numbers are written out as
+ * literals in places that build a task by hand - the synthetic task the
+ * kernel-mode suite runs against sets "state = 1" with TASK_RUNNING in a comment
+ * beside it - so anything placed in the middle would silently renumber the rest.
+ *
+ * A stopped task is not waiting for anything. schedule() picks TASK_RUNNING and
+ * nothing else, so it simply stops being considered; what it was doing when it
+ * stopped is remembered in stopped_wait_reason below.
  */
-typedef enum { TASK_EMPTY, TASK_RUNNING, TASK_WAITING, TASK_DEAD } task_state_t;
+typedef enum { TASK_EMPTY, TASK_RUNNING, TASK_WAITING, TASK_DEAD, TASK_STOPPED } task_state_t;
 
 /**
  * @brief Enumeration of reasons a task might be in a waiting state.
@@ -157,9 +166,45 @@ typedef struct process_s {
      */
     int exit_code;
 
+    /*
+     * The child this task is blocked inside exec() waiting for, or 0 when it is
+     * not in a blocking exec at all.
+     *
+     * reap_task() delivers an exit status to a parent in WAIT_CHILD by writing
+     * into its saved frame, and it used to do that for whichever child happened
+     * to die - which was the same thing only while exec() was the only way to
+     * have one. It is not any more: a background job finishing while the shell
+     * sat in exec() woke the shell with the *job's* status, so the shell printed
+     * a prompt while the foreground program was still running.
+     *
+     * Recorded by sys_exec() in its blocking form only. The non-blocking form
+     * returns the pid and the caller waits with wait(), which has always been
+     * addressed per child through the parked statuses.
+     */
+    int exec_child_pid;
+
     task_state_t state;
     wait_reason_t wait_reason;
     mutex_t *wait_mutex;
+
+    /*
+     * What this task was doing when it was stopped.
+     *
+     * WAIT_NONE means it was running. Any other value means it was blocked, and
+     * continue_task() has to decide whether to put it back into that wait or
+     * simply let it run:
+     *
+     *  - WAIT_CHILD goes back into the wait. It is the one block that does not
+     *    re-run its syscall - sys_exec() sleeps without rewinding EIP and returns
+     *    through eax - so a task released as runnable would return from exec()
+     *    with whatever happened to be in that register.
+     *  - everything else is released as runnable. Those syscalls resume on the
+     *    trap instruction (see syscall_block_and_restart) and re-evaluate what
+     *    they were waiting for, so a wakeup that arrived while the task was
+     *    stopped - and which wakeup_tasks() could not deliver, because it only
+     *    touches TASK_WAITING - is not lost.
+     */
+    wait_reason_t stopped_wait_reason;
     arch_regs_t regs;
     arch_paddr_t page_directory;
     uint8_t base_priority; 
@@ -489,6 +534,54 @@ int has_pending_children(int pid);
  * @param victim Task to reap; may or may not be the running task.
  */
 void reap_task(process_t *victim);
+
+/**
+ * @brief Takes a task out of the scheduler's reach without ending it.
+ *
+ * The counterpart of reap_task() for a job the user wants back: the address
+ * space, the descriptors and the saved frame all stay exactly as they are, and
+ * the task simply stops being a candidate to run. Written the same way as
+ * reap_task() in that the victim need not be the running task - Ctrl-Z arrives
+ * on an interrupt and names a whole group, most of which is parked elsewhere.
+ *
+ * Stopping the *running* task is not this function's business; it is left
+ * pending and handled by apply_default_signal_action() on the way out to user
+ * mode, for the same reason a self-signalled kill is.
+ *
+ * A parent blocked waiting for this task is woken and told, which is what keeps
+ * a shell from sitting in wait() forever while the job it is waiting for is
+ * stopped and unable to finish.
+ *
+ * @param victim Task to stop; the idle task and an already stopped or dead task
+ *               are refused.
+ * @param sig_num Signal that stopped it, reported to the parent through wait().
+ */
+void stop_task(process_t *victim, int sig_num);
+
+/**
+ * @brief Puts a stopped task back where it was.
+ *
+ * Restores the state stop_task() took it out of - see stopped_wait_reason - and
+ * drops the stop notification the parent has not collected, because a stop is a
+ * live fact about a task rather than a record of something that happened.
+ *
+ * @param task Task to continue; anything not stopped is left alone.
+ */
+void continue_task(process_t *task);
+
+/**
+ * @brief Takes one stop notification parked for a parent, oldest first.
+ *
+ * Kept apart from take_parked_status() rather than folded into it: a caller that
+ * did not ask for WUNTRACED must not be handed a child that is still alive, and
+ * a shell that asks for both wants the exits first.
+ *
+ * @param parent_pid    Parent asking.
+ * @param child_pid_out Receives the pid that stopped.
+ * @param sig_out       Receives the signal that stopped it.
+ * @return 1 when a notification was taken, 0 when none is parked.
+ */
+int take_parked_stop(int parent_pid, int *child_pid_out, int *sig_out);
 
 
 // --- Added by Refactor Script ---

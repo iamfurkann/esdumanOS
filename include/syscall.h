@@ -14,8 +14,26 @@
 
 /** @brief Terminate current process */
 #define SYSCALL_EXIT            1
-/** @brief Execute a new process */
+/**
+ * @brief Start a program; ebx is the path, ecx the mode, edx the argument string.
+ *
+ * A zero ecx is the form this call has always had: the caller blocks until the
+ * program finishes and receives its exit status. init uses it, because init has
+ * nothing else to do while the shell runs.
+ *
+ * EXEC_NOWAIT returns the child's pid immediately instead. A shell needs that to
+ * own the program it just started the way it owns a pipeline - put it in a group
+ * of its own, hand it the terminal, and wait for it with wait(), which can
+ * report a child that stopped as well as one that exited. With the blocking form
+ * there is no pid to name, so a stopped foreground command could not be brought
+ * back.
+ */
 #define SYSCALL_EXEC            5
+
+/** @brief exec() mode: block until the program finishes and return its status. */
+#define EXEC_WAIT               0
+/** @brief exec() mode: return the new process's pid and leave it running. */
+#define EXEC_NOWAIT             1
 /** @brief Set process scheduling priority */
 #define SYSCALL_SET_PRIORITY    7
 /** @brief Yield CPU to another process */
@@ -68,7 +86,14 @@
 #define SYSCALL_ALARM           18
 /** @brief Register a signal handler */
 #define SYSCALL_SIGNAL_REG      24
-/** @brief Send a signal to a process */
+/**
+ * @brief Send a signal; ebx is the pid, ecx the signal.
+ *
+ * A negative pid names the process group -pid and signals every member, which is
+ * how the shell continues a stopped job: a job is a group, and the process the
+ * shell forked is rarely the only member of it - that process may itself have
+ * started the program the user is actually looking at, and both were stopped.
+ */
 #define SYSCALL_KILL            25
 /** @brief Return from a signal handler */
 #define SYSCALL_SIGRETURN       27
@@ -125,8 +150,35 @@
 #define SYSCALL_SLEEP           52
 /** @brief Duplicate the calling process; returns 0 in the child, its pid in the parent */
 #define SYSCALL_FORK            53
-/** @brief Wait for a child to finish; returns its exit status */
+/**
+ * @brief Collect a child that has something to report; ebx is an int*, ecx flags.
+ *
+ * eax comes back as the pid that reported, 0 when children exist but none has
+ * anything to say and WNOHANG was asked for, or E_CHILD when there is nothing
+ * left to wait for at all. The status is written through ebx, which may be NULL
+ * when the caller only wants the pid.
+ */
 #define SYSCALL_WAIT            54
+
+/** @brief wait() flag: report that nothing is ready rather than blocking. */
+#define WNOHANG                 1
+/**
+ * @brief wait() flag: report a child that stopped, not only one that exited.
+ *
+ * Without it a stopped child is invisible here, which is the right default: a
+ * caller that does not know about job control would otherwise be handed a pid
+ * whose process is still very much alive and would treat it as finished.
+ */
+#define WUNTRACED               2
+
+/**
+ * @brief Status bit meaning "this child stopped", OR'd with the signal number.
+ *
+ * Above the eight bits an exit status occupies - sys_exit() masks its argument
+ * to 0-255 and a signalled death is reported as 128 plus the signal - so there
+ * is no value a caller could confuse with either.
+ */
+#define WSTATUS_STOPPED         0x100
 /** @brief Fill an esd_time_t with the current time; non-zero ecx asks for UTC */
 #define SYSCALL_TIME            55
 /**

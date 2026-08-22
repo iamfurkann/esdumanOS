@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1-alpha] - 2026-08-22
+
+v0.8.0 gave the user a way to stop what they had just started. This one gives them a
+way to set it aside instead - which needs something the scheduler never had: a task
+that is neither running nor waiting for anything, holding its memory and its place in
+the program, until somebody asks for it back.
+
+### Added
+
+- **Ctrl-Z, `fg` and `bg`.** `SIG_TSTP` (20) goes to every process in the foreground
+  group and parks it in a new task state, `TASK_STOPPED`. `SIG_CONT` (18) takes it out
+  again. `fg` gives a job the terminal and waits for it, `bg` lets it run on without
+  one, and both name a job as `%1` or by number - or nothing at all, which means the
+  most recent.
+
+  A stopped task remembers what it was doing. Almost every blocking syscall in this
+  kernel resumes on the trap instruction and re-evaluates what it was waiting for, so
+  such a task is released as runnable and repairs itself; `exec()` is the one that
+  does not, because it returns through a register rather than re-running, and a task
+  stopped inside one goes back into exactly that wait.
+
+  Both signals are catchable, and that is load-bearing rather than incidental. The
+  shell and init are both in the foreground group when no job is running, so a stop
+  neither of them could decline would park the session with nothing left able to
+  continue it. There is deliberately no `SIGSTOP`: an uncatchable stop would reach
+  init the same way and nothing could be done about it.
+
+- **`wait()` can report a child that stopped.** `WUNTRACED` (2) asks for it and
+  `WNOHANG` (1) keeps its old meaning; the status comes back as `WSTATUS_STOPPED`
+  (0x100) OR'd with the signal. Without the flag a stopped child stays invisible,
+  which is the right default - a caller that knows nothing about job control would
+  otherwise be handed a pid it would treat as finished for a process still very much
+  alive.
+
+- **`exec()` that hands back a pid.** A non-zero mode argument (`EXEC_NOWAIT`) starts
+  the program and returns its pid instead of blocking for its exit status. The shell
+  could not own a foreground command without it: never learning the pid, it could not
+  put the program in a group of its own, could not hand it the terminal, and had no
+  way to name a job the user had stopped. A foreground command is now exactly what a
+  pipeline already was.
+
+- **`kill()` with a negative pid signals a process group.** Needed to continue a job:
+  the process the shell forked is often not the only member, because that process
+  started the program the user is looking at and one Ctrl-Z stopped both. Continuing
+  only the pid the shell knows about would leave it blocked on a task still stopped.
+
+### Fixed
+
+- **A parent inside `exec()` was woken by whichever child died first.** It used to be
+  any child at all, which was the same thing only while `exec()` was the only way to
+  have one. With background jobs it is not: `sleep 30 &` finishing while the shell sat
+  in `exec()` returned the job's status as the foreground command's, so the shell
+  printed a prompt with that command still running and both then read the keyboard.
+  The pid being waited for is recorded, and the reaper delivers only for that one.
+
+- **A task that never held the terminal could give it away.** Waking a parent moved the
+  terminal to it whatever the dying task was — and a shell's `wait()` is woken by the
+  job it is waiting for and by every other child it has. So a background job finishing
+  while a foreground job ran took the terminal from the job on the screen, and the next
+  Ctrl-C reached a shell that ignores it. The same rule that already kept a pipeline's
+  terminal until its last stage exited now covers this: a group that still has a member
+  keeps it, and a group that never had it cannot pass it on.
+
+- **The `exec` builtin reported success for a program that failed.** It tested only
+  for a negative return, so any exit status counted as 0. It now takes the same path
+  as an ordinary command and reports what the program reported.
+
+### Known issues
+
+- **Ctrl-Z does not reach the guest under `-display curses`.** The key gets as far as
+  the terminal QEMU runs in — `stty susp undef; cat -v` echoes `^Z` there — but the
+  curses front end does not turn it into a guest keypress; Ctrl-C and Ctrl-D are
+  delivered normally. The `^Z` echo is the first thing the driver does, so no `^Z` on
+  screen means nothing arrived. The QEMU monitor's `sendkey ctrl-z` reaches the guest,
+  and so does `kill <pid> 20` from inside the OS.
+- A **builtin cannot be stopped**, for the same reason it cannot be interrupted: it is
+  the shell, and the shell declines both signals. `sleep 30` typed at the prompt runs
+  to completion.
+- A job put in the background with `bg` **competes with the shell for the keyboard**
+  if it reads standard input. Unix answers this with `SIGTTIN`, which stops a
+  background process that tries to read the terminal; there is no `SIGTTIN` here yet.
+- **Ctrl-Z at an idle prompt discards the line being typed**, exactly as Ctrl-C does.
+  The shell ignores the signal, but the read it is blocked in is still cut short and
+  cannot tell which signal cut it.
+- **`wait` will not wait for a stopped job.** It says so and stops rather than blocking
+  on something that can never finish - the shell ignores Ctrl-C, so there would be no
+  way out of it.
+- `SIG_CONT` is **not delivered to user space**. It is acted on where it is sent,
+  because a stopped process never reaches a delivery point of its own.
+
 ## [0.8.0-alpha] - 2026-08-22
 
 The terminal starts taking orders, and a process starts belonging to something. Two

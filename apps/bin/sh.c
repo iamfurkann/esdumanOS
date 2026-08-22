@@ -255,6 +255,18 @@ void printk(const char *str) { syscall(SYSCALL_WRITE, 1, (int)str, ft_strlen(str
  */
 char get_keyboard_char(void) { char c = 0; syscall(SYSCALL_READ, 0, (int)&c, 1); return c;}
 /**
+ * @brief Reads one character, keeping the result the kernel returned.
+ *
+ * get_keyboard_char() folds every outcome into the character itself, so a read
+ * cut short by a signal is indistinguishable from one that produced a zero byte.
+ * Anything that has to tell those apart - the line reader, so that Ctrl-C can
+ * abandon a half-typed line - asks through here instead.
+ *
+ * @param out Receives the character.
+ * @return 1 when a character arrived, 0 at end of input, negative on error.
+ */
+int sys_read_char(char *out) { return syscall(SYSCALL_READ, 0, (int)out, 1); }
+/**
  * @brief Creates a new file via system call.
  * @param name File name.
  * @param content File content.
@@ -336,16 +348,39 @@ int sys_wait_nohang(int *status) { return syscall(SYSCALL_WAIT, (int)status, 1, 
  * people's children.
  */
 #define MAX_JOBS 8
-static int job_pids[MAX_JOBS];
+
+/**
+ * @brief One background job.
+ *
+ * A job is a process group rather than a process, because that is what the
+ * terminal addresses: "ls | grep etc &" is three tasks and one job, and
+ * interrupting it or handing it the terminal has to reach all three.
+ *
+ * The number is stable for as long as the job lives. `jobs` used to print the
+ * table position, which renumbers every time an earlier job is collected - so
+ * the name of a job changed under the user between one listing and the next.
+ * Nothing could refer to a job by name yet; something will.
+ */
+typedef struct {
+    int id;
+    int pid;    /**< Group leader, and what wait() reports. */
+    int pgid;
+} job_t;
+
+static job_t jobs[MAX_JOBS];
 static int job_count = 0;
+static int next_job_id = 1;
 
 /**
  * @brief Records a background job, if there is room to.
  * @param pid Process id of the job.
  */
-static void job_add(int pid) {
+static void job_add(int pid, int pgid) {
     if (job_count < MAX_JOBS) {
-        job_pids[job_count++] = pid;
+        jobs[job_count].id = next_job_id++;
+        jobs[job_count].pid = pid;
+        jobs[job_count].pgid = pgid;
+        job_count++;
     } else {
         /* Said out loud rather than dropped. The job still runs and is still
          * reaped by the sweep below - it just cannot be listed. */
@@ -359,8 +394,8 @@ static void job_add(int pid) {
  */
 static void job_remove(int pid) {
     for (int i = 0; i < job_count; i++) {
-        if (job_pids[i] == pid) {
-            for (int j = i; j < job_count - 1; j++) job_pids[j] = job_pids[j + 1];
+        if (jobs[i].pid == pid) {
+            for (int j = i; j < job_count - 1; j++) jobs[j] = jobs[j + 1];
             job_count--;
             return;
         }
@@ -397,6 +432,7 @@ static void jobs_reap(void) {
  * POSIX's, and signal.h has to agree.
  */
 #define SIG_PIPE 13
+#define SIG_INT   2   /* Ctrl-C, sent to the whole foreground group */
 #define SIG_DFL   0   /* default action: terminate, for the signals that have one */
 #define SIG_IGN   1   /* discard the signal */
 
@@ -406,6 +442,30 @@ static void jobs_reap(void) {
  * @param handler Pointer to the handler function, or SIG_DFL / SIG_IGN.
  */
 void sys_register_signal(int sig_num, void *handler) { syscall(SYSCALL_SIGNAL_REG, sig_num, (int)handler, 0); }
+/**
+ * @brief Places a process in a process group.
+ *
+ * A pid of 0 means this process, and a group of 0 founds a new one named by that
+ * pid. Called from both sides of a fork with the same arguments, which is the
+ * ordinary answer to a race neither side can win.
+ *
+ * @param pid Process to place, or 0 for the caller.
+ * @param pgid Group to join, or 0 to found one.
+ * @return 0, or a negative errno.
+ */
+int sys_setpgid(int pid, int pgid) { return syscall(60, pid, pgid, 0); }
+/**
+ * @brief Hands the terminal to a process group, which is what Ctrl-C reaches.
+ * @param pgid Group to put in the foreground.
+ * @return 0, or a negative errno.
+ */
+int sys_tcsetpgrp(int pgid) { return syscall(61, pgid, 0, 0); }
+/**
+ * @brief Reads a process's group.
+ * @param pid Process to ask about, or 0 for the caller.
+ * @return The group, or a negative errno.
+ */
+int sys_getpgid(int pid) { return syscall(62, pid, 0, 0); }
 /**
  * @brief Sends a signal to a process.
  * @param pid Process ID.
@@ -583,15 +643,29 @@ void my_custom_handler(void) {
  * @param hide Whether to hide characters (e.g., for passwords).
  * @param max_len Maximum length of the buffer.
  */
-void read_line(char *buf, int hide, int max_len) {
+int read_line(char *buf, int hide, int max_len) {
     int idx = 0;
     while (1) {
-        char c = get_keyboard_char();
-        if (c == '\n' || c == '\r') { buf[idx] = '\0'; printk("\n"); break; } 
-        else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } } 
+        char c = 0;
+        int r = sys_read_char(&c);
+
+        /*
+         * Ctrl-C. The line is abandoned rather than kept, which is what a
+         * terminal does: whatever was half-typed is gone and the caller starts
+         * again. The kernel has already echoed the "^C", so there is nothing to
+         * print here.
+         */
+        if (r == E_INTR) { buf[0] = '\0'; return -1; }
+
+        /* Nothing readable this time round - end of input, or a read that
+         * produced no byte. Unchanged from before. */
+        if (r <= 0) continue;
+
+        if (c == '\n' || c == '\r') { buf[idx] = '\0'; printk("\n"); return 0; }
+        else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } }
         else if (c >= 32 && c <= 126 && idx < max_len - 1) {
-            char str[2] = { hide ? '*' : c, '\0' }; 
-            printk(str); 
+            char str[2] = { hide ? '*' : c, '\0' };
+            printk(str);
             buf[idx++] = c;
         }
     }
@@ -1242,8 +1316,14 @@ void execute_command(char **args) {
     else if (ft_strcmp(args[0], "su") == 0) {
         printk("Password for root: ");
         char su_pass[64];
-        read_line(su_pass, 1, 64);
-        if (sys_setuid(0, su_pass) == 0) {
+
+        /* Ctrl-C abandons the password prompt without attempting an
+         * authentication, which also keeps the failed-attempt rate limit from
+         * counting an entry the user never made. */
+        if (read_line(su_pass, 1, 64) < 0) {
+            last_exit_status = 130;
+        }
+        else if (sys_setuid(0, su_pass) == 0) {
             set_env("USER", "root");
             current_uid = 0;
             ft_strcpy(current_username, "root");
@@ -1306,9 +1386,11 @@ void execute_command(char **args) {
             char num[16];
             for (int i = 0; i < job_count; i++) {
                 printk("[");
-                ft_itoa(i + 1, num); printk(num);
+                ft_itoa(jobs[i].id, num); printk(num);
                 printk("] pid ");
-                ft_itoa(job_pids[i], num); printk(num);
+                ft_itoa(jobs[i].pid, num); printk(num);
+                printk(" pgid ");
+                ft_itoa(jobs[i].pgid, num); printk(num);
                 printk("\n");
             }
         }
@@ -1848,6 +1930,21 @@ void main(void) {
     sys_register_signal(SIG_PIPE, (void *)SIG_IGN);
 
     /*
+     * And SIG_INT, for a different reason.
+     *
+     * Ctrl-C goes to every process in the foreground group, and between commands
+     * that group is the shell's own - there is nothing else to hand the terminal
+     * to. A shell that took the default action would end the session the first
+     * time somebody pressed Ctrl-C at an idle prompt, which is to say it would
+     * end the session.
+     *
+     * Every stage forked below puts it back to the default, exactly as it does
+     * with SIG_PIPE: a job that ignored the interrupt would be a job the user
+     * cannot stop.
+     */
+    sys_register_signal(SIG_INT, (void *)SIG_IGN);
+
+    /*
      * Last in the setup, so that a value exported from /etc/profile wins over
      * the ones set above rather than being overwritten by them.
      */
@@ -1871,14 +1968,36 @@ void main(void) {
         else printk(" $ ");
 
         int idx = 0;
+        int interrupted = 0;
+
     while (1) {
-            char c = get_keyboard_char();
-            if (c == '\n' || c == '\r') { cmd_buf[idx] = '\0'; printk("\n"); break; } 
-            else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } } 
+            char c = 0;
+            int r = sys_read_char(&c);
+
+            /*
+             * Ctrl-C at the prompt. The half-typed line is thrown away and the
+             * loop starts over with a fresh prompt, which is what a terminal
+             * does - the alternative, going quietly back to sleep with the line
+             * still there, is what this looked like before the read could report
+             * being cut short. The kernel has already echoed the "^C".
+             */
+            if (r == E_INTR) { interrupted = 1; break; }
+            if (r <= 0) continue;
+
+            if (c == '\n' || c == '\r') { cmd_buf[idx] = '\0'; printk("\n"); break; }
+            else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } }
             else if (c == '\t') { cmd_buf[idx] = '\0'; handle_tab_completion(cmd_buf, &idx); }
             else if (c >= 32 && c <= 126 && idx < 254) {
                 char str[2] = {c, '\0'}; printk(str); cmd_buf[idx++] = c;
             }
+        }
+
+        if (interrupted) {
+            /* 130 is 128 + SIG_INT, which is what a shell reports for a command
+             * the user interrupted - and an interrupted prompt is the same
+             * answer to "how did that go". */
+            last_exit_status = 130;
+            continue;
         }
         if (idx == 0) continue;
 
@@ -2106,18 +2225,38 @@ void main(void) {
                         } else {
                             int forked = 0;
                             int last_pid = -1;
+                            int leader_pid = -1;
 
                             for (int s = 0; s < stage_count; s++) {
                                 int pid = sys_fork();
 
                                 if (pid == 0) {
+                                    /*
+                                     * Join the pipeline's group before anything
+                                     * else. The parent makes the same call on the
+                                     * line below, with the same arguments,
+                                     * because neither side can know which of them
+                                     * runs first - and a stage that is signalled
+                                     * before it has a group is not in the one the
+                                     * user is looking at.
+                                     *
+                                     * The first stage founds the group and the
+                                     * rest join it, so "ls | grep etc" is three
+                                     * tasks the terminal can address as the one
+                                     * thing that was typed.
+                                     */
+                                    sys_setpgid(0, (leader_pid > 0) ? leader_pid : 0);
+
                                     /* Undo the shell's own SIG_IGN, inherited a
                                      * line ago through fork(). A writing stage is
                                      * the one process that has to die when its
                                      * reader does, and a builtin stage runs right
                                      * here in the shell's image with the shell's
-                                     * dispositions. */
+                                     * dispositions. The same goes for SIG_INT: a
+                                     * stage the user cannot interrupt is worse
+                                     * than one that dies. */
                                     sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
+                                    sys_register_signal(SIG_INT, (void *)SIG_DFL);
 
                                     if (s > 0) dup2(pfd[s - 1][0], 0);
                                     if (s < pipes_needed) dup2(pfd[s][1], 1);
@@ -2139,9 +2278,16 @@ void main(void) {
 
                                 if (pid < 0) break;
 
+                                if (leader_pid < 0) leader_pid = pid;
+                                sys_setpgid(pid, leader_pid);
+
                                 last_pid = pid;
                                 forked++;
                             }
+
+                            /* The pipeline holds the terminal while it runs, so
+                             * Ctrl-C reaches its stages and not this shell. */
+                            if (leader_pid > 0) sys_tcsetpgrp(leader_pid);
 
                             /*
                              * The shell closes every end before waiting, and this
@@ -2172,6 +2318,16 @@ void main(void) {
                                 if (who == last_pid) last_exit_status = st;
                                 reaped++;
                             }
+
+                            /*
+                             * Take the terminal back. The kernel already hands it
+                             * to a woken parent when the last member of the
+                             * foreground group dies, so this is belt and braces -
+                             * but a pipeline that failed to fork every stage never
+                             * had a group to lose, and the prompt has to be
+                             * interruptible-by-nobody either way.
+                             */
+                            sys_tcsetpgrp(sys_getpgid(0));
                         }
                     } else if (background) {
                         /*
@@ -2183,9 +2339,16 @@ void main(void) {
                          */
                         int pid = sys_fork();
                         if (pid == 0) {
+                            /* Its own group, set from both sides for the same
+                             * reason the pipeline sets it from both. A background
+                             * job is deliberately never given the terminal, which
+                             * is what keeps Ctrl-C from reaching it. */
+                            sys_setpgid(0, 0);
+
                             /* Same reason as the pipeline stages: only the shell
-                             * itself gets to ignore SIG_PIPE. */
+                             * itself gets to ignore SIG_PIPE and SIG_INT. */
                             sys_register_signal(SIG_PIPE, (void *)SIG_DFL);
+                            sys_register_signal(SIG_INT, (void *)SIG_DFL);
                             if (stage_redirect[0]) run_with_redirect(stage_args[0], stage_redirect[0]);
                             else execute_command(stage_args[0]);
                             sys_exit_status(last_exit_status);
@@ -2193,7 +2356,8 @@ void main(void) {
                             printk("sh: cannot fork\n");
                             last_exit_status = 1;
                         } else {
-                            job_add(pid);
+                            sys_setpgid(pid, pid);
+                            job_add(pid, pid);
 
                             char num[16];
                             printk("[bg] pid ");

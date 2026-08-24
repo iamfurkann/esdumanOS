@@ -282,8 +282,37 @@ void main(void) {
         }
         KT_ASSERT(same, "[IPC] pipe round trip preserves the payload byte for byte");
 
-        syscall(SYSCALL_CLOSE, (int)fds[0], 0, 0);
+        /* ------------------------------------------------------------------
+         * 4b. poll(), which is a pipe's three states seen from outside.
+         *
+         * The call exists for the keyboard - it is what tells the Escape key
+         * from the first byte of an escape sequence - but a pipe is where its
+         * contract can be pinned down exactly, because all three states can be
+         * arranged on demand. Drained is the one worth being careful about:
+         * "would not block" has to include having an end of file to report,
+         * since a read that returns zero has returned.
+         * ------------------------------------------------------------------ */
+        KT_ASSERT(syscall(SYSCALL_POLL, (int)fds[0], 0, 0) == 0,
+                  "[POLL] a drained pipe with its writer still open would block");
+
+        syscall(SYSCALL_WRITE, (int)fds[1], (int)payload, plen);
+        KT_ASSERT(syscall(SYSCALL_POLL, (int)fds[0], 0, 0) == 1,
+                  "[POLL] and does not once there is something in it");
+
+        syscall(SYSCALL_READ, (int)fds[0], (int)rbuf, plen);
+        KT_ASSERT(syscall(SYSCALL_POLL, (int)fds[0], 0, 0) == 0,
+                  "[POLL] draining it puts it back to blocking");
+
         syscall(SYSCALL_CLOSE, (int)fds[1], 0, 0);
+        KT_ASSERT(syscall(SYSCALL_POLL, (int)fds[0], 0, 0) == 1,
+                  "[STRICT] [POLL] end of file is an answer, so a closed writer does not block a read");
+
+        KT_ASSERT(syscall(SYSCALL_POLL, 99, 0, 0) < 0,
+                  "[POLL] a descriptor out of range is refused");
+        KT_ASSERT(syscall(SYSCALL_POLL, (int)fds[1], 0, 0) < 0,
+                  "[STRICT] [POLL] and so is one that has been closed");
+
+        syscall(SYSCALL_CLOSE, (int)fds[0], 0, 0);
     }
 
     /* ------------------------------------------------------------------

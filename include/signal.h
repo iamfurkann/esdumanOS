@@ -69,10 +69,30 @@
  * stopped task is by definition not running and will never reach a delivery
  * point of its own. It is a no-op against a task that is not stopped.
  *
+ * A process that registered a handler is told as well, once it is running again.
+ * The default action needs no delivery - being continued is the whole of it -
+ * but a full-screen program has to redraw what the shell wrote over its display
+ * while it was away, and there is no other moment it could learn to.
+ *
  * Numbered as Linux does on i386, which is also what the shell writes out as a
  * literal - these programs are freestanding and cannot include this header.
  */
 #define SIG_CONT 18
+
+/*
+ * Sent to a process that tries to read the terminal from the background.
+ *
+ * There is one keyboard and one input ring, and every blocked reader is woken
+ * when a key arrives - so a background job reading standard input does not share
+ * the keyboard with the shell, it races it for every keystroke. Half the line the
+ * user types goes to the job and half to the prompt, and the shell is left
+ * unusable by a job the user deliberately put out of the way.
+ *
+ * Stops by default, like SIG_TSTP, which is what makes the answer recoverable
+ * rather than fatal: the job parks, `jobs` shows it stopped, and `fg` gives it
+ * the terminal it was asking for. The read re-runs when it continues.
+ */
+#define SIG_TTIN 21
 
 /*
  * Disposition meaning "discard this signal", stored in signal_handlers[] where a

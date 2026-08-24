@@ -33,6 +33,110 @@ char get_keyboard_char(void) {
     return temp;
 }
 
+/**
+ * @brief Whether a byte is waiting to be read.
+ *
+ * So that a caller can find out whether a read would block without performing
+ * one. get_keyboard_char() cannot answer this: it returns 0 both for an empty
+ * ring and for nothing in particular, and asking it consumes the byte.
+ *
+ * @return 1 when the ring holds at least one byte.
+ */
+int keyboard_has_input(void) {
+    return kbd_head != kbd_tail;
+}
+
+/**
+ * @brief How many more bytes the ring can take.
+ *
+ * One slot is always left empty: head meeting tail is how the ring says it is
+ * empty, so filling the last slot would make a full ring indistinguishable from
+ * an empty one.
+ *
+ * @return Free slots, 0 when full.
+ */
+static int kbd_free_space(void) {
+    int used = (kbd_head - kbd_tail + KBD_BUFFER_SIZE) % KBD_BUFFER_SIZE;
+    return KBD_BUFFER_SIZE - 1 - used;
+}
+
+/**
+ * @brief Places a run of bytes in the input ring, all of it or none of it.
+ *
+ * The all-or-nothing part is the whole reason this is not a loop over
+ * kbd_push(). A navigation key is three or four bytes that mean one thing, and a
+ * reader handed the first two of them has no way to know the rest was dropped:
+ * it waits for a byte that is never coming, or takes the next unrelated key as
+ * the tail of the sequence. Refusing the key outright is a keystroke lost, which
+ * is what a full ring means anyway.
+ *
+ * The wakeup is once per sequence rather than once per byte. Waking a reader
+ * after the first byte would have it consume a partial sequence for exactly the
+ * same reason.
+ *
+ * @param seq Null-terminated bytes to place.
+ */
+static void kbd_push_seq(const char *seq) {
+    int len = 0;
+    while (seq[len]) len++;
+
+    if (len == 0 || kbd_free_space() < len) return;
+
+    for (int i = 0; i < len; i++) {
+        kbd_buffer[kbd_head] = seq[i];
+        kbd_head = (kbd_head + 1) % KBD_BUFFER_SIZE;
+    }
+
+    wakeup_tasks(WAIT_KBD);
+}
+
+/**
+ * @brief Places a single byte in the input ring.
+ *
+ * @param c Byte to place; 0 is not placed, since that is what an empty ring
+ *          reports.
+ */
+static void kbd_push(char c) {
+    char one[2] = { c, '\0' };
+    kbd_push_seq(one);
+}
+
+/**
+ * @brief The escape sequence a navigation key stands for, or 0.
+ *
+ * This is what a real terminal sends, and sending anything else would mean every
+ * program that ever reads a key needs a table of this system's own invention.
+ * The names are xterm's, which is what the sequences the terminal already
+ * *writes* were taken from in v0.8.0 - the two halves now speak the same
+ * language in both directions.
+ *
+ * Until this existed these keys reached nobody at all: the arrows were bound to
+ * the scrollback, and Home, End, Insert, Delete and both Page keys landed on
+ * zero entries in the layout tables and were dropped without trace.
+ *
+ * The keypad shares these scancodes when Num Lock is off, and is deliberately
+ * not told apart: the driver does not track Num Lock, and keypad 8 meaning "up"
+ * is the behaviour a user expects from it anyway.
+ *
+ * @param scancode Make code from the keyboard.
+ * @return A null-terminated sequence, or 0 when the key is not a navigation key.
+ */
+static const char *kbd_sequence_for(uint8_t scancode) {
+    switch (scancode) {
+        case 0x48: return "\033[A";    /* Up        */
+        case 0x50: return "\033[B";    /* Down      */
+        case 0x4D: return "\033[C";    /* Right     */
+        case 0x4B: return "\033[D";    /* Left      */
+        case 0x47: return "\033[H";    /* Home      */
+        case 0x4F: return "\033[F";    /* End       */
+        case 0x52: return "\033[2~";   /* Insert    */
+        case 0x53: return "\033[3~";   /* Delete    */
+        case 0x49: return "\033[5~";   /* Page Up   */
+        case 0x51: return "\033[6~";   /* Page Down */
+        default:   return 0;
+    }
+}
+
 /* LAYOUTS */
 const char kbd_US[128] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -97,13 +201,33 @@ void keyboard_interrupt_handler(void) {
     uint8_t scancode = inb(0x60);
 
     /*
-     * Before the early returns, deliberately. Most paths through this handler
+     * Before the early returns, deliberately. Most paths through the handler
      * bail out - 0xE0 prefixes, modifiers, key releases, function keys - and the
      * timing of those events is entropy just the same as a printable character's.
      * Human keystroke intervals are the best source this machine has.
+     *
+     * It stays here rather than moving into the translation below, because what
+     * it measures is when the interrupt arrived. A synthetic scancode from a test
+     * carries no timing at all, and feeding the pool from one would be adding
+     * entropy that does not exist.
      */
     entropy_add_event(ENTROPY_SRC_KBD, scancode);
 
+    keyboard_handle_scancode(scancode);
+}
+
+/**
+ * @brief Turns one scancode into whatever it means, with no hardware involved.
+ *
+ * Split out of the interrupt handler so that the translation can be driven
+ * directly. It reads a port and there is no way to write one from a test, so
+ * every rule below - which keys become sequences, which are swallowed, what
+ * Ctrl does to a letter - had no coverage at all, in the one path every
+ * keystroke in the system goes through.
+ *
+ * @param scancode Make or break code as the controller delivered it.
+ */
+void keyboard_handle_scancode(uint8_t scancode) {
     if (scancode == 0xE0) { e0_mode = 1; return; }
 
     if (e0_mode) {
@@ -123,12 +247,31 @@ void keyboard_interrupt_handler(void) {
     if (scancode == 0x1D) { ctrl_pressed = 1; return; }
     if (scancode == 0x3A) { caps_lock = !caps_lock; return; }
     
-    // F-keys and Scrollback
+    // F-keys
     if (scancode == 0x3B) { terminal_switch(0); return; }
     if (scancode == 0x3C) { terminal_switch(1); return; }
     if (scancode == 0x3D) { terminal_switch(2); return; }
-    if (scancode == 0x48) { terminal_scroll_up(); return; }
-    if (scancode == 0x50) { terminal_scroll_down(); return; }
+
+    /*
+     * Scrollback moves off the arrow keys onto Shift with the Page keys, which
+     * is where every terminal emulator puts it.
+     *
+     * It had the arrows because nothing else wanted them. Something does now:
+     * the arrows are the only way a program can be told where to move, and a key
+     * the driver consumes is a key no program will ever see. Shift is what
+     * separates "scroll the window I am looking at" from "move within what I am
+     * editing", and the driver already tracks it.
+     */
+    if (shift_pressed && scancode == 0x49) { terminal_scroll_up(); return; }
+    if (shift_pressed && scancode == 0x51) { terminal_scroll_down(); return; }
+
+    /*
+     * Navigation keys become the sequences a terminal sends. Checked before the
+     * layout tables, which map every one of these to zero - which is to say they
+     * were being dropped.
+     */
+    const char *seq = kbd_sequence_for(scancode);
+    if (seq != 0) { kbd_push_seq(seq); return; }
 
     char c = 0;
     if (current_layout == 1) {
@@ -212,11 +355,6 @@ void keyboard_interrupt_handler(void) {
     }
 
     if (c != 0) {
-        int next_head = (kbd_head + 1) % KBD_BUFFER_SIZE;
-        if (next_head != kbd_tail) {
-            kbd_buffer[kbd_head] = c;
-            kbd_head = next_head;
-wakeup_tasks(WAIT_KBD);
-        }
+        kbd_push(c);
     }
 }

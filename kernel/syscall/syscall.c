@@ -74,6 +74,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         //sys_fs.c
         case SYSCALL_READ:         sys_read(regs); break;
+        case SYSCALL_POLL:         sys_poll(regs); break;
         case SYSCALL_WRITE:        sys_write(regs); break;
         case SYSCALL_PIPE:         sys_pipe(regs); break;
         case SYSCALL_DUP2:         sys_dup2(regs); break;

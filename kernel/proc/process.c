@@ -1122,8 +1122,28 @@ void continue_task(process_t *task) {
 
     /* A stop that has not happened yet is cancelled by being continued, which is
      * the POSIX rule and also the only sane reading of the two arriving
-     * together. */
-    task->pending_signals &= ~(1u << SIG_TSTP);
+     * together. Both of them: a job stopped for reading the terminal may have a
+     * Ctrl-Z sitting behind it, and vice versa. */
+    task->pending_signals &= ~((1u << SIG_TSTP) | (1u << SIG_TTIN));
+
+    /*
+     * A process that asked to hear about this is told, once it is running again.
+     *
+     * The signal is acted on where it is sent - a stopped task never reaches a
+     * delivery point of its own - so nothing was ever recorded for it and a
+     * program had no way to learn it had been continued. That is fine for a
+     * program that only computes, and useless for one that draws: everything it
+     * had on screen was written over by the shell while it was stopped, and the
+     * moment it is running again is the only moment it could redraw.
+     *
+     * Only when a handler is registered. A bit left pending for a task with no
+     * handler would be cleared by check_and_deliver_signals() and nothing else,
+     * which is a pending bit that means nothing.
+     */
+    if (task->signal_handlers[SIG_CONT] != 0 &&
+        task->signal_handlers[SIG_CONT] != SIG_IGN) {
+        task->pending_signals |= (1u << SIG_CONT);
+    }
 
     /* The notification described the task as it was. It is not true any more,
      * and a parent that had not got round to collecting it would otherwise be
@@ -1661,15 +1681,20 @@ static int signal_terminates_by_default(int sig_num) {
  * @brief Whether a signal stops a process that has not handled it.
  *
  * The second kind of default action, and the reason it has to be asked
- * separately from the first: the four signals above end a process, and this one
- * parks it with everything intact. A single "has a default action" test would
+ * separately from the first: the four signals above end a process, and these
+ * park it with everything intact. A single "has a default action" test would
  * have to decide which of those to do from the signal number anyway.
  *
+ * SIG_TTIN joins SIG_TSTP because the answer to a background job reading the
+ * terminal is the same answer: park it where the user can find it and give it
+ * back with fg. Killing it would lose whatever it had done, and letting it read
+ * is the behaviour the signal exists to prevent.
+ *
  * @param sig_num The signal number.
- * @return 1 for SIG_TSTP, 0 otherwise.
+ * @return 1 for SIG_TSTP and SIG_TTIN, 0 otherwise.
  */
 static int signal_stops_by_default(int sig_num) {
-    return sig_num == SIG_TSTP;
+    return sig_num == SIG_TSTP || sig_num == SIG_TTIN;
 }
 
 /**
@@ -1741,7 +1766,16 @@ void send_user_signal(int target_pid, int sig_num) {
                      * signalled child with. exit_code is masked to 8 bits on the
                      * exit() path, and 128 + 15 still fits. */
                     p->exit_code = 128 + sig_num;
-                    klog_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by signal: PID", p->pid);
+                    /* DEBUG rather than INFO, which is the level the console
+                     * shows. A process ending because the user pressed Ctrl-C is
+                     * the user's own doing, and a line of kernel log over the
+                     * prompt every time is noise - over a full-screen program it
+                     * is worse than noise. The cost is real and worth saying: a
+                     * DEBUG record at the default threshold is discarded rather
+                     * than hidden, so it is not in the ring for dmesg either.
+                     * Separating the console level from the ring level is the
+                     * honest fix and belongs to a release about the log. */
+                    klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Terminated by signal: PID", p->pid);
                     reap_task(p);
                     return;
                 }
@@ -1906,7 +1940,7 @@ void apply_default_signal_action(arch_regs_t *regs) {
     if (curr == idle_task) {
         curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM) |
                                    (1u << SIG_PIPE) | (1u << SIG_INT) |
-                                   (1u << SIG_TSTP));
+                                   (1u << SIG_TSTP) | (1u << SIG_TTIN));
         return;
     }
 
@@ -1918,7 +1952,7 @@ void apply_default_signal_action(arch_regs_t *regs) {
             curr->pending_signals &= ~(1 << i);
             curr->exit_code = 128 + i;
 
-            klog_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
+            klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
             exit_current_process(regs);
             return;
         }

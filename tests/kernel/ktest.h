@@ -169,6 +169,8 @@ void run_tty_tests(void);
 void run_pgroup_tests(void);
 /** @brief Job control: stopping a task, continuing it, and reporting both. */
 void run_jobctl_tests(void);
+/** @brief Keyboard: what each key puts in the input ring, and what it does not. */
+void run_kbd_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
 void run_reap_tests(void);

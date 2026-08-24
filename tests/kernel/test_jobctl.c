@@ -283,7 +283,46 @@ void run_jobctl_tests(void) {
 
         task_a->signal_handlers[SIG_TSTP] = 0;
         task_a->pending_signals = 0;
+
+        /*
+         * SIG_TTIN parks a job for the same reason and by the same route. It is
+         * what a background job gets for reading the terminal, and stopping is
+         * the answer that loses nothing: fg gives it the terminal it asked for.
+         */
+        send_user_signal(pid_a, SIG_TTIN);
+        KTEST_ASSERT(task_a->state == TASK_STOPPED,
+                     "[JOBCTL] SIG_TTIN stops a task that has not handled it");
+
+        send_user_signal(pid_a, SIG_CONT);
+        KTEST_ASSERT(task_a->state == TASK_RUNNING,
+                     "[JOBCTL] and SIG_CONT releases it again");
+
+        /*
+         * A continue reaches user space only when somebody asked for it.
+         *
+         * The default action needs no delivery - being runnable again is the
+         * whole of it - but a program that draws on the screen has to redraw
+         * what the shell wrote over it while it was stopped, and there is no
+         * other moment it could find out.
+         */
+        task_a->signal_handlers[SIG_CONT] = 0x400000;
+        stop_task(task_a, SIG_TSTP);
+        continue_task(task_a);
+        KTEST_ASSERT((task_a->pending_signals & (1u << SIG_CONT)) != 0,
+                     "[STRICT] [JOBCTL] a continue is delivered to a task that registered a handler");
+
+        task_a->signal_handlers[SIG_CONT] = SIG_IGN;
+        task_a->pending_signals = 0;
+        stop_task(task_a, SIG_TSTP);
+        continue_task(task_a);
+        KTEST_ASSERT((task_a->pending_signals & (1u << SIG_CONT)) == 0,
+                     "[STRICT] [JOBCTL] and not to one that declined it");
+
+        task_a->signal_handlers[SIG_CONT] = 0;
+        task_a->pending_signals = 0;
     }
+
+    jc_drain_notices();
 
     /* The idle task is the scheduler's guarantee that there is always something
      * to pick, so it is no more stoppable than it is reapable. */

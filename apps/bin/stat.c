@@ -1,9 +1,28 @@
 /**
  * @file stat.c
- * @brief Prints a file's metadata: size, type, owner and storage form.
+ * @brief Prints a file's metadata: size, type, owner, mode, times and storage form.
+ *
+ * The mode, the group and the two timestamps arrived with the v0.9.0 disk format.
+ * The mode is shown because it is stored; nothing enforces it yet, which the
+ * README says and this does not pretend otherwise by dressing it up as an
+ * ls-style rwx string it would have to invent meaning for.
+ *
+ * Times are shown as dates rather than as the counts they are stored as. The
+ * conversion is esdtime.h's, the same one the kernel stamped them with - it is
+ * header-only and pure, so this gets it without a link step, exactly as
+ * /bin/edit gets the edit buffer.
+ *
+ * They are stored in UTC and shown in local time, and both halves of that are
+ * deliberate. An epoch that is not UTC is not an epoch: two files stamped either
+ * side of a timezone change would compare by what somebody's clock said rather
+ * than by when it happened, which is the one thing a stored timestamp exists to
+ * get right. Nobody reads their own files in UTC, though, so the offset the
+ * system is set to goes back on for display and is printed alongside - the same
+ * shape date(1) uses, and unambiguous either way.
  */
 #include "syscall.h"
 #include "stat.h"
+#include "esdtime.h"
 
 /**
  * @brief Invokes a system call
@@ -57,6 +76,89 @@ void print_uint(unsigned int value) {
 }
 
 /**
+ * @brief Prints a value in octal, which is how a mode is read.
+ * @param value The mode bits.
+ */
+void print_octal(unsigned int value) {
+    char buf[12];
+    char out[13];
+    int i = 0, j = 0;
+
+    if (value == 0) { print("0"); return; }
+
+    while (value > 0) { buf[i++] = (char)('0' + (value & 7u)); value >>= 3; }
+
+    out[j++] = '0';
+    while (i > 0) { out[j++] = buf[--i]; }
+    out[j] = '\0';
+    print(out);
+}
+
+/**
+ * @brief Prints a number as exactly two digits, so a date lines up.
+ * @param value 0 to 99.
+ */
+void print_two(unsigned int value) {
+    char out[3];
+
+    out[0] = (char)('0' + (value / 10u) % 10u);
+    out[1] = (char)('0' + value % 10u);
+    out[2] = '\0';
+    print(out);
+}
+
+/**
+ * @brief Hours the system's clock is ahead of UTC, learned once in main().
+ */
+int tz_offset = 0;
+
+/**
+ * @brief Prints a timezone offset the way a date does: a sign and two digits.
+ * @param hours Hours ahead of UTC, negative for behind.
+ */
+void print_offset(int hours) {
+    if (hours < 0) { print("-"); hours = -hours; }
+    else print("+");
+
+    print_two((unsigned int)hours);
+}
+
+/**
+ * @brief Prints a stored timestamp as a local date.
+ *
+ * Zero is printed as a dash rather than as 1970. A file whose timestamp was
+ * never set has no time, and the start of the epoch is a real instant that would
+ * read as one - which is what the root directory reports, having never been
+ * created.
+ *
+ * The offset is applied to the count before it is broken down rather than to the
+ * fields afterwards, so a time that crosses midnight takes its date with it and
+ * there is no second copy of the carry arithmetic to get wrong.
+ *
+ * @param epoch Seconds since the Unix epoch, UTC.
+ */
+void print_time(unsigned int epoch) {
+    esd_time_t t;
+    int shift = tz_offset * 3600;
+
+    if (epoch == 0) { print("-"); return; }
+
+    /* A negative offset cannot be allowed to wrap the count round; no real
+     * timestamp is anywhere near the epoch, but a clamp is one comparison. */
+    if (shift < 0 && (unsigned int)(-shift) > epoch) epoch = 0;
+    else epoch = (unsigned int)((int)epoch + shift);
+
+    esd_time_from_epoch(epoch, &t);
+    print_uint(t.year); print("-");
+    print_two(t.month); print("-");
+    print_two(t.day); print(" ");
+    print_two(t.hour); print(":");
+    print_two(t.minute); print(":");
+    print_two(t.second); print(" ");
+    print_offset(tz_offset);
+}
+
+/**
  * @brief Main entry point for the application
  *
  * The whole argument string is the path, as the other tools here treat it. Since
@@ -79,6 +181,15 @@ void main(void) {
         syscall(SYSCALL_EXIT, 1, 0, 0);
         while (1);
     }
+
+    /*
+     * The offset comes from the clock rather than from a constant here. A local
+     * reading carries the offset it was adjusted by, which is the only thing this
+     * needs and the only place a program can learn it - there is no syscall that
+     * reports the timezone on its own.
+     */
+    esd_time_t now;
+    if (syscall(SYSCALL_TIME, (int)&now, 0, 0) == 0) tz_offset = now.tz_offset_hours;
 
     esd_stat_t st;
     int res = syscall(SYSCALL_STAT, (int)args_buf, (int)&st, 0);
@@ -108,7 +219,15 @@ void main(void) {
     print_newline();
 
     print(" Inode: "); print_uint(st.st_ino); print_newline();
-    print(" Owner: "); print_uint(st.st_uid); print_newline();
+    print(" Owner: "); print_uint(st.st_uid);
+    print(":"); print_uint(st.st_gid); print_newline();
+
+    /* Stored, reported, and not yet consulted by anything - see the file note. */
+    print("  Mode: "); print_octal(st.st_mode);
+    print(" (stored, not yet enforced)"); print_newline();
+
+    print("Modify: "); print_time(st.st_mtime); print_newline();
+    print("Create: "); print_time(st.st_ctime); print_newline();
 
     syscall(SYSCALL_EXIT, 0, 0, 0);
     while (1);

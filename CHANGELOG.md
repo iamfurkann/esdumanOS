@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2-alpha] - 2026-08-25
+
+The last category on the list to 1.0: answers that looked right and were not. Every one
+of them was broken the same way — the command ran, exited zero, printed the right thing
+on the screen, and sent nothing at all to a pipe or a file.
+
+```
+meminfo > mem.txt          # empty file, no error
+cat_raw f | grep something # empty pipe, no error
+grep nothing f && echo hi  # prints hi, having matched nothing
+```
+
+The cause was one thing: the output was printed from the kernel with `printk()` and
+never reached the caller's descriptor 1. `dmesg` was fixed this way in v0.8.x and the
+rest follow it now — the kernel renders, the caller writes.
+
+### Fixed
+
+- **`meminfo`, `stack`, `testmalloc`, `hexdump` and `/bin/free` write their own output.**
+  Each renders into a buffer the caller supplies and returns its length, in the shape
+  `readdir` already used — buffer in `ebx`, capacity in `ecx`, bytes back in `eax`. The
+  loop stays in the shell for the reason `dmesg`'s does: a write into a full pipe blocks,
+  and a blocked syscall resumes by re-running from the trap, so a kernel-side dump that
+  blocked halfway would start over and emit everything twice. A buffer too small is
+  filled rather than refused.
+
+- **`cat_raw` is a program again.** It used to be a syscall that took a path, read the
+  whole file and printed it as hex from the kernel. Rendering that into a buffer would
+  not have helped — 64 KB of file is 192 KB of hex — so the primitive changed instead of
+  its output. `SYSCALL_CAT_RAW` (34) became `SYSCALL_READ_RAW`: `read()` against the
+  stored form, same descriptor, same offset, same shape. Opening, looping and formatting
+  are the shell's work now, and the only part that needed to be a syscall is the part
+  that bypasses decryption.
+
+- **`grep` reports what it found.** 0 matched, 1 did not, 2 could not look — the
+  convention it has everywhere. It returned 1 for both "nothing matched" and "no such
+  file", which made the status useless for the one thing a status is for: `grep x f &&`
+  ran its second half whether or not anything was found. **Errors moved from 1 to 2**,
+  which is a behaviour change for anything that was checking.
+
+- **The clock can be set.** `date -s "YYYY-MM-DD HH:MM:SS"`, root only. The RTC could be
+  read and never written, so `date` reported whatever the machine came up with and
+  nothing could correct it — which mattered more once v0.9.0 started stamping files. The
+  write is the read path run backwards: it asks register B what format the chip is in and
+  writes that, rather than reconfiguring the hardware to suit itself, and it halts the
+  update cycle so a tick cannot land between the hour and the day.
+
+### Removed
+
+- **`SYSCALL_CAT_FILE` (11).** It printed a file's contents from the kernel and had no
+  caller at all — the shell's `cat` opens the file and writes it itself, which is why
+  `cat` worked in a pipe and this would not have. Dead and wrong at once. The number is
+  left free rather than reused; what becomes of it belongs with freezing the ABI at 1.0,
+  alongside the gap at 99 where `YIELD` sits.
+
+### Changed
+
+- **`lockdown` keeps printing from the kernel, and now says so in the log.** It was on
+  the list and comes off it: what it prints is not output, it is a red banner announcing
+  a state change to whoever is at the console — the same class as the message `halt`
+  prints on the way down. There is no pipeline that wants it. What it was missing is a
+  `klog` record, so `dmesg` can now say when the system was locked.
+
 ## [0.9.1-alpha] - 2026-08-25
 
 v0.9.0 wrote a mode, an owner and a group onto every file and consulted none of them.

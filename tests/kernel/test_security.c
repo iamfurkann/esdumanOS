@@ -9,6 +9,7 @@
 #include "process.h" // To access process_t and current_task pointer
 #include "libft.h"
 #include "security.h"
+#include "fs.h"
 // Import kernel variables to clean up UID after test
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
@@ -61,8 +62,84 @@ static void test_smap_status(void) {
     KTEST_ASSERT(smap_enabled, "[STRICT] SMAP enabled in CR4 when CPU supports it");
 }
 
+/**
+ * @brief Verifies the permission rule the VFS decides with.
+ *
+ * Expected behavior:
+ * - The owner gets the owner bits, the owning group the group bits, everyone
+ *   else the other bits.
+ * - The first class that matches decides, and no other class is consulted.
+ * - Every bit asked for has to be granted, not just one of them.
+ * - Root is not subject to any of it.
+ *
+ * Edge cases covered:
+ * - A mode that gives the owner less than everybody else, which is the case that
+ *   proves the classes do not fall through.
+ * - A mode of zero, which refuses everyone who is not root.
+ *
+ * This is checked here rather than through the syscalls because the way
+ * permission logic fails is silently: a check that is too permissive returns the
+ * same "it worked" as a correct one, and only a test that states the expected
+ * answer for a known mode can tell them apart.
+ */
+static void run_mode_tests(void) {
+    printk("\n--- File permission bits ---\n");
+
+    /* 0754: owner rwx, group r-x, other r--. Owner 1000, group 1000. */
+    KTEST_ASSERT(fs_mode_allows(0754, 1000, 1000, 1000, 1000, FS_WANT_WRITE) == 1,
+                 "[PERM] the owner gets the owner bits");
+    KTEST_ASSERT(fs_mode_allows(0754, 1000, 1000, 2000, 1000, FS_WANT_WRITE) == 0,
+                 "[PERM] the group does not get the owner's write bit");
+    KTEST_ASSERT(fs_mode_allows(0754, 1000, 1000, 2000, 1000, FS_WANT_READ | FS_WANT_EXEC) == 1,
+                 "[PERM] but it gets the group's read and search");
+    KTEST_ASSERT(fs_mode_allows(0754, 1000, 1000, 2000, 2000, FS_WANT_READ) == 1,
+                 "[PERM] and everyone else gets the other bits");
+    KTEST_ASSERT(fs_mode_allows(0754, 1000, 1000, 2000, 2000, FS_WANT_EXEC) == 0,
+                 "[PERM] which here do not include search");
+
+    /*
+     * The class that matches is the only class consulted. 0077 gives the owner
+     * nothing and everybody else everything, and an owner who fell through to
+     * the group bits would be allowed - which is the misreading that makes
+     * "chmod 077 secret" do the opposite of what it says.
+     */
+    KTEST_ASSERT(fs_mode_allows(0077, 1000, 1000, 1000, 1000, FS_WANT_READ) == 0,
+                 "[STRICT] [PERM] an owner with no permission is refused, not passed to the group");
+    KTEST_ASSERT(fs_mode_allows(0077, 1000, 9999, 2000, 9999, FS_WANT_READ) == 1,
+                 "[STRICT] [PERM] while the group it excluded the owner from is allowed");
+
+    /* Every bit asked for, not any of them. */
+    KTEST_ASSERT(fs_mode_allows(0500, 1000, 1000, 1000, 1000, FS_WANT_READ | FS_WANT_EXEC) == 1,
+                 "[PERM] r-x grants a request for read and search together");
+    KTEST_ASSERT(fs_mode_allows(0400, 1000, 1000, 1000, 1000, FS_WANT_READ | FS_WANT_EXEC) == 0,
+                 "[STRICT] [PERM] r-- does not, because one of the two is missing");
+
+    KTEST_ASSERT(fs_mode_allows(0777, 1000, 1000, 2000, 2000,
+                                FS_WANT_READ | FS_WANT_WRITE | FS_WANT_EXEC) == 1,
+                 "[PERM] 0777 grants everything to everyone, which is what /tmp needs");
+    KTEST_ASSERT(fs_mode_allows(0000, 1000, 1000, 2000, 2000, FS_WANT_READ) == 0,
+                 "[PERM] and 0000 grants nothing");
+
+    /* Root is above all of it, including a mode of zero. */
+    KTEST_ASSERT(fs_mode_allows(0000, 1000, 1000, 0, 0,
+                                FS_WANT_READ | FS_WANT_WRITE | FS_WANT_EXEC) == 1,
+                 "[STRICT] [PERM] root is not subject to the bits at all");
+
+    /* The system's own modes, checked as the arrangement they are meant to be. */
+    KTEST_ASSERT(fs_mode_allows(0600, 0, 0, 1000, 1000, FS_WANT_READ) == 0,
+                 "[STRICT] [PERM] /etc/shadow at 0600 is unreadable by a user");
+    KTEST_ASSERT(fs_mode_allows(0644, 0, 0, 1000, 1000, FS_WANT_READ) == 1,
+                 "[PERM] /etc/passwd at 0644 is readable by one");
+    KTEST_ASSERT(fs_mode_allows(0700, 0, 0, 1000, 1000, FS_WANT_EXEC) == 0,
+                 "[STRICT] [PERM] /root at 0700 cannot even be entered");
+    KTEST_ASSERT(fs_mode_allows(0777, 0, 0, 1000, 1000, FS_WANT_WRITE | FS_WANT_EXEC) == 1,
+                 "[PERM] and /tmp at 0777 can be written in");
+}
+
 void run_security_tests(void) {
     printk("\n--- Security and Authorization Tests ---\n");
+
+    run_mode_tests();
     
     int original_uid = 0;
     if (current_task != 0) {

@@ -2,6 +2,11 @@
 #define PROCESS_H
 
 #include "types.h"
+/* For fs_id_t: cwd_id is a directory entry id, and it has to be the same width
+ * as one. It was a byte until v0.9.0, which would have quietly truncated any
+ * working directory past the 256th entry the moment the table grew. fs.h pulls
+ * in nothing but types.h, so this costs no dependency worth the name. */
+#include "fs.h"
 #include "registers.h"
 #include "isr.h"
 /**
@@ -117,6 +122,17 @@ typedef struct process_s {
     uint32_t uid;
 
     /*
+     * Group id, which files are stamped with as of v0.9.0.
+     *
+     * There is no group database and no way to be in more than one, so it starts
+     * equal to the uid and stays there. It exists because the on-disk format now
+     * has a place for it, and a field filled with something plausible at the
+     * moment a file is created would be a worse answer than one filled from the
+     * task that created it - even while the two happen to agree.
+     */
+    uint32_t gid;
+
+    /*
      * Current working directory, as a VFS directory entry id (0 is root).
      *
      * Lives here rather than in user space because the shell used to keep it in
@@ -128,7 +144,7 @@ typedef struct process_s {
      * Inherited from the creating process, like uid - see create_process(). fork()
      * will rely on that same inheritance when it lands.
      */
-    uint8_t cwd_id;
+    fs_id_t cwd_id;
 
     /*
      * sleep() bookkeeping.

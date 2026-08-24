@@ -165,12 +165,14 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     if (current_task == 0) {
         new_task->parent_pid = -1;
         new_task->uid = 0;
+        new_task->gid = 0;
         new_task->cwd_id = 0;
         /* Nothing to inherit from: the first task founds its own group. */
         new_task->pgid = (uint32_t)new_task->pid;
     } else {
         new_task->parent_pid = current_task->pid;
         new_task->uid = current_task->uid;
+        new_task->gid = current_task->gid;
         new_task->cwd_id = current_task->cwd_id;
         /*
          * Same rule as uid and cwd_id. A forked child and an exec'd stage both

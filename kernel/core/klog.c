@@ -551,7 +551,7 @@ int klog_persist(void) {
     }
 
     int var_id = fs_get_entry_idx("var", 0);
-    int log_id = (var_id >= 0) ? fs_get_entry_idx("log", (uint8_t)var_id) : -1;
+    int log_id = (var_id >= 0) ? fs_get_entry_idx("log", (fs_id_t)var_id) : -1;
 
     if (log_id < 0) {
         kfree(staging);
@@ -560,10 +560,10 @@ int klog_persist(void) {
     }
 
     int rc;
-    if (fs_get_entry_idx("kern.log", (uint8_t)log_id) >= 0) {
-        rc = fs_atomic_update("kern.log", (const uint8_t *)staging, got, (uint8_t)log_id);
+    if (fs_get_entry_idx("kern.log", (fs_id_t)log_id) >= 0) {
+        rc = fs_atomic_update("kern.log", (const uint8_t *)staging, got, (fs_id_t)log_id);
     } else {
-        rc = fs_create_file("kern.log", (const uint8_t *)staging, got, (uint8_t)log_id);
+        rc = fs_create_file("kern.log", (const uint8_t *)staging, got, (fs_id_t)log_id);
     }
 
     kfree(staging);

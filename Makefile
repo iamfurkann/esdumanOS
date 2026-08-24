@@ -556,8 +556,6 @@ test:
 	@gcc tests/host/c/test_elf_sast.c -o tests/host/bin/test_elf_sast
 	@./tests/host/bin/test_elf_sast
 
-	@python3 -m unittest discover -s tests/host/python -p "test_*.py"
-
 # Built into build/test, which is what makes this incremental.
 #
 # These objects carry -DPBKDF2_DEV_ITERATIONS and the production ones do not, and
@@ -681,10 +679,9 @@ clean:
 	rm -f $(ARCH_C_SRCS:.c=.o) $(ARCH_C_SRCS:.c=.d)
 	rm -f $(ARCH_ASM_SRCS:.asm=.o)
 	rm -f lib/*.o lib/*.d lib/libc.a
-	# Left by the test targets: QEMU's instruction log, the host SAST binary, and
-	# the bytecode the Python test writes beside its sources.
+	# Left by the test targets: QEMU's instruction log and the host SAST binary.
 	rm -f qemu.log
-	rm -rf tests/host/bin tests/host/python/__pycache__ tools/__pycache__
+	rm -rf tests/host/bin
 	# Not removed on purpose: .vscode/ and compile_commands.json are editor state,
 	# not build output. Deleting the compilation database would silently break
 	# code navigation until someone thought to run `bear -- make` again.

@@ -15,25 +15,47 @@
 #include "process.h"
 #include "bcache.h"
 #include "kheap.h"
+#include "esdtime.h"
+#include "rtc.h"
 disk_file_entry_t dir_table[MAX_FILES_IN_DIR];
 uint32_t fs_max_sectors = 4096;
 uint32_t file_allocation_table[4096];
 
-int fs_get_entry_idx(const char *name, uint8_t parent_id);
+disk_superblock_t fs_super;
+int fs_mounted = 0;
+
+int fs_get_entry_idx(const char *name, fs_id_t parent_id);
+
+/**
+ * @brief The current time, as the on-disk format records it.
+ *
+ * Seconds since the Unix epoch, from the RTC's UTC reading. A file's timestamp
+ * exists to be compared with another file's, so it is stored in the one form
+ * that compares with a subtraction - see the note in esdtime.h on why the epoch
+ * arrived with this format rather than earlier.
+ *
+ * @return Seconds since 1970-01-01 UTC.
+ */
+static uint32_t fs_now(void) {
+    esd_time_t now;
+
+    rtc_read_utc(&now);
+    return esd_time_to_epoch(&now);
+}
 
 /**
  * @brief Checks that a parent id names a directory that actually exists.
  *
- * Entry ids arrive from user space as a raw byte, and fs_mkdir()/
- * fs_create_file_raw() store whatever they are given. Accepting an arbitrary id
- * let a process create an entry whose parent is itself, and the parent walk in
- * check_vfs_access() then never terminated.
+ * Entry ids arrive from user space, and fs_mkdir()/fs_create_file_raw() store
+ * whatever they are given. Accepting an arbitrary id let a process create an
+ * entry whose parent is itself, and the parent walk in check_vfs_access() then
+ * never terminated.
  *
  * @param parent_id Candidate parent entry id. 0 is the root, which has no
  *                  directory table entry of its own.
  * @return 1 when the id names an existing directory, 0 otherwise.
  */
-int fs_dir_exists(uint8_t parent_id) {
+int fs_dir_exists(fs_id_t parent_id) {
     if (parent_id == 0) return 1;
 
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
@@ -107,9 +129,9 @@ static void save_fat_to_disk(void) {
     uint8_t *fat_ptr = (uint8_t *)file_allocation_table;
     uint32_t total_bytes = fs_max_sectors * sizeof(uint32_t);
     uint32_t sectors_needed = (total_bytes + 511) / 512;
-    
+
     for (uint32_t i = 0; i < sectors_needed; i++) {
-        bcache_write_sector(FS_FAT_START_SECTOR + i, fat_ptr + (i * 512));
+        bcache_write_sector(fs_super.fat_start + i, fat_ptr + (i * 512));
     }
 }
 
@@ -125,7 +147,7 @@ static uint32_t allocate_fat_chain(uint32_t count) {
     uint32_t current_sector = FAT_EOF;
     uint32_t allocated = 0;
 
-    for (uint32_t i = FS_DATA_START_SECTOR; i < fs_max_sectors && allocated < count; i++) {
+    for (uint32_t i = fs_super.data_start; i < fs_max_sectors && allocated < count; i++) {
         if (file_allocation_table[i] == FAT_FREE) {
             if (start_sector == FAT_EOF) {
                 start_sector = i;
@@ -161,27 +183,169 @@ static void save_directory_to_disk(void) {
     uint8_t *dir_ptr = (uint8_t *)dir_table;
     uint32_t total_bytes = sizeof(disk_file_entry_t) * MAX_FILES_IN_DIR;
     uint32_t sectors_needed = (total_bytes + 511) / 512;
-    
+
     for (uint32_t i = 0; i < sectors_needed; i++) {
         uint8_t sec_buf[512];
         ft_memset(sec_buf, 0, 512);
-        
+
         uint32_t copy_size = 512;
         if ((i * 512) + 512 > total_bytes) {
             copy_size = total_bytes % 512;
         }
-        
+
         for (uint32_t j = 0; j < copy_size; j++) {
             sec_buf[j] = dir_ptr[(i * 512) + j];
         }
-        bcache_write_sector(FS_DIR_START_SECTOR + i, sec_buf);
+        bcache_write_sector(fs_super.dir_start + i, sec_buf);
     }
 }
 
 /* --- FILE SYSTEM INITIALIZATION --- */
 
 /**
- * @brief init_fs
+ * @brief Sectors the directory table occupied before v0.9.0.
+ *
+ * Only used to decide whether a disk that has no superblock is blank or is one
+ * of the old ones. Nothing reads an old table; recognising it is the whole of
+ * what this is for.
+ */
+#define FS_LEGACY_DIR_SECTORS 136
+
+/**
+ * @brief Writes the superblock to sector 0.
+ *
+ * The tail of the sector is zeroed rather than left as whatever was there, so
+ * that a field added to the struct later reads as zero on a disk written now and
+ * zero can be given a meaning.
+ */
+static void save_superblock(void) {
+    uint8_t sec_buf[512];
+    uint8_t *src = (uint8_t *)&fs_super;
+
+    ft_memset(sec_buf, 0, 512);
+    for (uint32_t i = 0; i < sizeof(disk_superblock_t); i++) sec_buf[i] = src[i];
+    bcache_write_sector(FS_SUPER_SECTOR, sec_buf);
+}
+
+/**
+ * @brief Whether every byte of a run of sectors is zero.
+ *
+ * @param start First sector.
+ * @param count How many.
+ * @return 1 when the whole run is zero.
+ */
+static int region_is_blank(uint32_t start, uint32_t count) {
+    uint8_t sec_buf[512];
+
+    for (uint32_t s = 0; s < count; s++) {
+        bcache_read_sector(start + s, sec_buf);
+        for (int i = 0; i < 512; i++) {
+            if (sec_buf[i] != 0) return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * @brief Lays a fresh file system onto a blank disk.
+ *
+ * The geometry comes from the FS_ constants here and is then written down in the
+ * superblock, which is what everything afterwards reads. Changing the constants
+ * later therefore changes what new disks are formatted as, and cannot change how
+ * an existing one is read.
+ */
+static void format_disk(void) {
+    uint8_t zero[512];
+
+    klog(LOG_LEVEL_INFO, "VFS", "Blank disk; laying out a new file system.");
+
+    ft_memset(&fs_super, 0, sizeof(fs_super));
+    fs_super.magic = FS_SUPER_MAGIC;
+    fs_super.format_version = FS_FORMAT_VERSION;
+    fs_super.sector_size = 512;
+    fs_super.total_sectors = fs_max_sectors;
+    fs_super.dir_start = FS_DIR_START_SECTOR;
+    fs_super.dir_sectors = FS_DIR_SECTOR_COUNT;
+    fs_super.max_entries = MAX_FILES_IN_DIR;
+    fs_super.entry_size = (uint16_t)sizeof(disk_file_entry_t);
+    fs_super.cluster_sectors = 1;
+    fs_super.fat_start = FS_FAT_START_SECTOR;
+    fs_super.data_start = FS_DATA_START_SECTOR;
+    fs_super.flags = 0;
+
+    ft_memset(dir_table, 0, sizeof(dir_table));
+    ft_memset(file_allocation_table, 0, sizeof(file_allocation_table));
+
+    /* The metadata sectors are spoken for before anything can be allocated. */
+    for (uint32_t i = 0; i < fs_super.data_start && i < fs_max_sectors; i++) {
+        file_allocation_table[i] = FAT_EOF;
+    }
+
+    ft_memset(zero, 0, 512);
+    for (uint32_t i = 0; i < fs_super.dir_sectors; i++) {
+        bcache_write_sector(fs_super.dir_start + i, zero);
+    }
+
+    save_superblock();
+    save_fat_to_disk();
+    save_directory_to_disk();
+    bcache_flush();
+}
+
+/**
+ * @brief Reads sector 0 and decides whether it describes a file system we can read.
+ *
+ * Checks the geometry as well as the magic. A superblock that says the directory
+ * table holds more entries than dir_table has room for, or entries of a size this
+ * build does not agree with, describes a disk this kernel would misread - and
+ * misreading it silently is how a file system eats itself.
+ *
+ * @return 1 when fs_super has been filled with a usable geometry.
+ */
+static int load_superblock(void) {
+    uint8_t sec_buf[512];
+    uint8_t *dst = (uint8_t *)&fs_super;
+
+    bcache_read_sector(FS_SUPER_SECTOR, sec_buf);
+    for (uint32_t i = 0; i < sizeof(disk_superblock_t); i++) dst[i] = sec_buf[i];
+
+    if (fs_super.magic != FS_SUPER_MAGIC) return 0;
+
+    if (fs_super.format_version != FS_FORMAT_VERSION) {
+        klog_int(LOG_LEVEL_ERROR, "VFS",
+                 "Disk was written by a different format version", fs_super.format_version);
+        return 0;
+    }
+    if (fs_super.sector_size != 512 ||
+        fs_super.entry_size != (uint16_t)sizeof(disk_file_entry_t) ||
+        fs_super.max_entries > MAX_FILES_IN_DIR ||
+        fs_super.cluster_sectors != 1 ||
+        fs_super.dir_start == 0 ||
+        fs_super.fat_start <= fs_super.dir_start ||
+        fs_super.data_start <= fs_super.fat_start) {
+        klog(LOG_LEVEL_ERROR, "VFS", "Superblock describes a geometry this kernel cannot read.");
+        return 0;
+    }
+    return 1;
+}
+
+/**
+ * @brief Mounts the file system, formatting a blank disk and refusing anything else.
+ *
+ * Three outcomes, and the third is the one this exists for.
+ *
+ * A disk carrying our superblock is mounted with the geometry the superblock
+ * records. A disk that is entirely blank is formatted. Anything else - an image
+ * written by a kernel from before v0.9.0, a disk belonging to something else, or
+ * 2 MB of noise - is refused, and nothing is written to it.
+ *
+ * Refusing matters more than mounting. Before v0.9.0 there was no superblock and
+ * no check of any kind: the directory table and the FAT were read out of their
+ * sectors and used as they were. Handed an older image, this kernel would have
+ * read 272-byte entries as 96-byte ones, found a directory tree that was not
+ * there, and written its own tables over the user's files. An old disk is
+ * recognisable precisely because the old format never used sector 0, so a zero
+ * superblock over a non-zero directory region can only be one thing.
  */
 void init_fs(void) {
     mutex_init(&vfs_mutex);
@@ -192,17 +356,35 @@ void init_fs(void) {
     fs_max_sectors = ata_identify();
 
     if (fs_max_sectors > 4096) {
-        fs_max_sectors = 4096; 
+        fs_max_sectors = 4096;
+    }
+
+    fs_mounted = 0;
+    ft_memset(dir_table, 0, sizeof(dir_table));
+
+    if (!load_superblock()) {
+        if (!region_is_blank(FS_SUPER_SECTOR, 1) ||
+            !region_is_blank(FS_DIR_START_SECTOR, FS_LEGACY_DIR_SECTORS)) {
+            klog(LOG_LEVEL_ERROR, "VFS",
+                 "Unrecognised disk; refusing to mount it or write to it.");
+            printk("\n[VFS] This disk was not written by this version of esdumanOS.\n");
+            printk("      v0.9.0 changed the on-disk format, and an image from an\n");
+            printk("      earlier release cannot be read. Nothing has been written to\n");
+            printk("      it. Use the disk.img from the release, or start from a blank\n");
+            printk("      one - `make run` does that for you.\n\n");
+            return;
+        }
+        format_disk();
     }
 
     uint8_t *dir_ptr = (uint8_t *)dir_table;
-    uint32_t total_bytes = sizeof(disk_file_entry_t) * MAX_FILES_IN_DIR;
+    uint32_t total_bytes = (uint32_t)fs_super.entry_size * fs_super.max_entries;
     uint32_t sectors_needed = (total_bytes + 511) / 512;
 
     for (uint32_t i = 0; i < sectors_needed; i++) {
         uint8_t sec_buf[512];
-        bcache_read_sector(FS_DIR_START_SECTOR + i, sec_buf);
-        
+        bcache_read_sector(fs_super.dir_start + i, sec_buf);
+
         uint32_t copy_size = 512;
         if ((i * 512) + 512 > total_bytes) {
             copy_size = total_bytes % 512;
@@ -217,14 +399,16 @@ void init_fs(void) {
     uint32_t fat_sectors_needed = (fat_total_bytes + 511) / 512;
 
     for (uint32_t i = 0; i < fat_sectors_needed; i++) {
-        bcache_read_sector(FS_FAT_START_SECTOR + i, fat_ptr + (i * 512));
+        bcache_read_sector(fs_super.fat_start + i, fat_ptr + (i * 512));
     }
 
-    for (uint32_t i = 0; i < FS_DATA_START_SECTOR; i++) {
+    for (uint32_t i = 0; i < fs_super.data_start && i < fs_max_sectors; i++) {
         if (file_allocation_table[i] == FAT_FREE) {
             file_allocation_table[i] = FAT_EOF;
         }
     }
+
+    fs_mounted = 1;
     save_fat_to_disk();
 }
 
@@ -409,7 +593,7 @@ int fs_commit_writes(vfs_file_t *file) {
     if (file->inode_idx < 0 || file->inode_idx >= MAX_FILES_IN_DIR) {
         res = E_BADF;
     } else {
-        uint8_t parent_id = dir_table[file->inode_idx].parent_id;
+        fs_id_t parent_id = dir_table[file->inode_idx].parent_id;
         /* An empty commit still needs a valid pointer; fs_create_file() is happy
          * with a zero length, which is how /bin/touch already creates files. */
         const uint8_t *content = file->write_buf ? file->write_buf : (const uint8_t *)"";
@@ -472,16 +656,31 @@ int fs_size(vfs_file_t *file, uint32_t *out_size) {
  * @param parent_id
  * @return int
  */
-int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
+int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
+    if (!fs_mounted) return E_NODEV;
+
     vfs_lock();
+
+    /*
+     * A name too long to store is refused rather than shortened. safe_strcpy()
+     * truncates, which was academic while a name could be 255 bytes and is not
+     * now that it is 63: a file created under a name the user did not choose is
+     * a file they cannot find again, and two long names that share a prefix
+     * become the same file.
+     */
+    if (ft_strlen(name) >= MAX_FILENAME) {
+        vfs_unlock(); return E_INVAL;
+    }
 
     if (!fs_dir_exists(parent_id)) {
         klog_int(LOG_LEVEL_WARN, "VFS", "Rejected file creation under a non-existent parent", parent_id);
         vfs_unlock(); return E_NOENT;
     }
 
-uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
-    
+    uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
+    uint32_t c_gid = (current_task != 0) ? current_task->gid : 0;
+    uint32_t now = fs_now();
+
     if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
         klog_int(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can modify 'passwd'. UID", c_uid);
         vfs_unlock(); return E_ACCES;
@@ -542,10 +741,14 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
     dir_table[free_idx].start_sector = new_sector;
     dir_table[free_idx].file_size = size;
     dir_table[free_idx].is_used = 1;
-    dir_table[free_idx].file_type = 0;
-    dir_table[free_idx].entry_id = free_idx; 
-    dir_table[free_idx].parent_id = parent_id; 
+    dir_table[free_idx].file_type = FT_REGULAR;
+    dir_table[free_idx].entry_id = (fs_id_t)free_idx;
+    dir_table[free_idx].parent_id = parent_id;
     dir_table[free_idx].owner_uid = c_uid;
+    dir_table[free_idx].owner_gid = c_gid;
+    dir_table[free_idx].mode = FS_MODE_DEFAULT_FILE;
+    dir_table[free_idx].ctime = now;
+    dir_table[free_idx].mtime = now;
 
     save_directory_to_disk();
     klog(LOG_LEVEL_INFO, "VFS", "New file created and written to disk.");
@@ -561,7 +764,7 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
  * @param parent_id
  * @return int
  */
-int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
+int fs_create_file(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File creation blocked!");
         return E_ROFS;
@@ -585,7 +788,9 @@ int fs_create_file(const char *name, const uint8_t *content, uint32_t size, uint
  * @param file
  * @return int
  */
-int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file) {
+int fs_open(const char *name, fs_id_t parent_id, vfs_file_t *file) {
+    if (!fs_mounted) return E_NODEV;
+
     vfs_lock();
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1 && 
@@ -624,7 +829,9 @@ int fs_open(const char *name, uint8_t parent_id, vfs_file_t *file) {
  * @param parent_id
  * @return int
  */
-int fs_delete(const char *name, uint8_t parent_id) {
+int fs_delete(const char *name, fs_id_t parent_id) {
+    if (!fs_mounted) return E_NODEV;
+
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File deletion blocked!");
@@ -712,7 +919,10 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
  * @param parent_id
  * @return int
  */
-int fs_rename(const char *old_name, const char *new_name, uint8_t parent_id) {
+int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
+    if (!fs_mounted) return E_NODEV;
+    if (ft_strlen(new_name) >= MAX_FILENAME) return E_INVAL;
+
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File renaming blocked!");
@@ -739,7 +949,11 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
             
             ft_memset(dir_table[i].filename, 0, MAX_FILENAME);
             safe_strcpy(dir_table[i].filename, new_name, MAX_FILENAME);
-            
+
+            /* The entry changed, the contents did not, so this is a ctime and
+             * not an mtime - the distinction the two fields exist to make. */
+            dir_table[i].ctime = fs_now();
+
             save_directory_to_disk();
             vfs_unlock(); return E_OK;
         }
@@ -756,7 +970,9 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
  * @param parent_id
  * @return int
  */
-int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, uint8_t parent_id) {
+int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
+    if (!fs_mounted) return E_NODEV;
+
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_WARN, "VFS", "fs_atomic_update: Blocked by IMMUTABLE security level");
         return E_ACCES;
@@ -817,9 +1033,17 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
         dir_table[orig_idx].start_sector = dir_table[tmp_idx].start_sector;
         dir_table[orig_idx].file_size = dir_table[tmp_idx].file_size;
 
+        /*
+         * The contents changed, so the modification time does. Everything else
+         * about the entry stays: this is the same file with new bytes in it, and
+         * taking the owner or the creation time from the temporary would make a
+         * write look like a new file to anything that asked.
+         */
+        dir_table[orig_idx].mtime = fs_now();
+
         dir_table[tmp_idx].start_sector = old_sector;
         dir_table[tmp_idx].file_size = old_size;
-        
+
         rwlock_release_write(&inode_locks[orig_idx]);
     }
     
@@ -836,7 +1060,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, ui
  * @param parent_id
  * @return int
  */
-int fs_get_entry_idx(const char *name, uint8_t parent_id) {
+int fs_get_entry_idx(const char *name, fs_id_t parent_id) {
     vfs_lock();
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used && 
@@ -855,9 +1079,14 @@ int fs_get_entry_idx(const char *name, uint8_t parent_id) {
  * @param parent_id
  * @return int
  */
-int fs_mkdir(const char *name, uint8_t parent_id) {
+int fs_mkdir(const char *name, fs_id_t parent_id) {
+    if (!fs_mounted) return E_NODEV;
+
     vfs_lock();
     if (current_sec_level == SEC_LEVEL_IMMUTABLE) { vfs_unlock(); return E_ROFS; }
+
+    /* Refused rather than truncated, as in fs_create_file_raw(). */
+    if (ft_strlen(name) >= MAX_FILENAME) { vfs_unlock(); return E_INVAL; }
 
     if (!fs_dir_exists(parent_id)) {
         klog_int(LOG_LEVEL_WARN, "VFS", "Rejected mkdir under a non-existent parent", parent_id);
@@ -885,14 +1114,21 @@ int fs_mkdir(const char *name, uint8_t parent_id) {
     ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
     safe_strcpy(dir_table[free_idx].filename, name, MAX_FILENAME);
     
-    dir_table[free_idx].file_size = 0; 
+    uint32_t current_uid = (current_task != 0) ? current_task->uid : 0;
+    uint32_t current_gid = (current_task != 0) ? current_task->gid : 0;
+    uint32_t now = fs_now();
+
+    dir_table[free_idx].file_size = 0;
     dir_table[free_idx].start_sector = 0;
-    dir_table[free_idx].file_type = 1;
-    dir_table[free_idx].entry_id = free_idx;
+    dir_table[free_idx].file_type = FT_DIR;
+    dir_table[free_idx].entry_id = (fs_id_t)free_idx;
     dir_table[free_idx].parent_id = parent_id;
     dir_table[free_idx].is_used = 1;
-uint32_t current_uid = (current_task != 0) ? current_task->uid : 0;
     dir_table[free_idx].owner_uid = current_uid;
+    dir_table[free_idx].owner_gid = current_gid;
+    dir_table[free_idx].mode = FS_MODE_DEFAULT_DIR;
+    dir_table[free_idx].ctime = now;
+    dir_table[free_idx].mtime = now;
 
     save_directory_to_disk();
     vfs_unlock(); return E_OK;
@@ -902,7 +1138,7 @@ uint32_t current_uid = (current_task != 0) ? current_task->uid : 0;
  * @brief fs_list_dir
  * @param parent_id
  */
-void fs_list_dir(uint8_t parent_id) {
+void fs_list_dir(fs_id_t parent_id) {
     vfs_lock();
     printk("Contents:\n----------------------------------------\n");
     int found = 0;

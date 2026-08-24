@@ -546,6 +546,81 @@ static void first_boot_setup(int etc_id) {
     vp = shadow_content; for (int i = 0; i < 1024; i++) vp[i] = 0;
 }
 
+/**
+ * @brief Gives one entry the mode it should have, if it does not already.
+ *
+ * The comparison is the point. fs_chmod() writes the whole directory table back
+ * to the disk, which is 96 sectors through a 64-sector cache, and doing that a
+ * dozen times on every boot to set values that were already right would be a
+ * measurable cost for no change at all. On a settled system this writes nothing.
+ *
+ * @param name Entry name.
+ * @param parent_id Directory holding it.
+ * @param mode Mode it should have.
+ */
+static void ensure_mode(const char *name, fs_id_t parent_id, uint16_t mode) {
+    int idx = fs_get_entry_idx(name, parent_id);
+
+    if (idx < 0) return;
+    if ((dir_table[idx].mode & FS_MODE_PERM_MASK) == (mode & FS_MODE_PERM_MASK)) return;
+
+    klog_int(LOG_LEVEL_INFO, "VFS", "Correcting the mode on a system path; entry", dir_table[idx].entry_id);
+    fs_chmod(dir_table[idx].entry_id, mode);
+}
+
+/**
+ * @brief Puts the system's own paths back to the permissions they must have.
+ *
+ * Runs on every boot rather than only when the entries are created, and that is
+ * a security requirement rather than tidiness. v0.9.0 stored a mode on every
+ * entry and enforced none of them, so everything it created took the default -
+ * `/etc/shadow` included, at 0644. A kernel that started enforcing modes and
+ * only stamped newly created entries would, the first time it mounted such a
+ * disk, be handing the password database to every user on it.
+ *
+ * So the rule is applied, not assumed. These are paths whose permissions belong
+ * to the operating system rather than to whoever last touched them.
+ */
+static void apply_system_modes(void) {
+    int etc_id = get_vfs_id("etc", 0);
+    int home_id = get_vfs_id("home", 0);
+
+    /* Readable and searchable by everyone, writable by root alone. */
+    ensure_mode("bin", 0, 0755);
+    ensure_mode("etc", 0, 0755);
+    ensure_mode("var", 0, 0755);
+    ensure_mode("dev", 0, 0755);
+    ensure_mode("home", 0, 0755);
+
+    /*
+     * /tmp is the one directory anybody may write in, which used to be true
+     * because check_vfs_access() matched the name "tmp" and is now true because
+     * the mode says so. There is no sticky bit yet, so a user can delete another
+     * user's temporary file; that is written down in SECURITY.md rather than
+     * quietly hoped about.
+     */
+    ensure_mode("tmp", 0, 0777);
+
+    /* Root's home is root's business. */
+    ensure_mode("root", 0, 0700);
+
+    if (etc_id >= 0) {
+        /* Everyone reads /etc/passwd, as everywhere - it carries no secrets.
+         * /etc/shadow carries all of them. */
+        ensure_mode("passwd", (fs_id_t)etc_id, 0644);
+        ensure_mode("shadow", (fs_id_t)etc_id, 0600);
+    }
+
+    if (home_id >= 0) {
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)home_id &&
+                dir_table[i].file_type == FT_DIR) {
+                ensure_mode(dir_table[i].filename, (fs_id_t)home_id, 0755);
+            }
+        }
+    }
+}
+
 static int init_filesystem_and_vfs(void) {
     init_kernel_timers();
     register_kernel_timer(1, alarm_demo_callback);
@@ -607,17 +682,29 @@ static int init_filesystem_and_vfs(void) {
         if (home_id != -1) {
             fs_mkdir("esduman", home_id);
             // Fix ownership: /home/esduman should be owned by esduman (UID 1000), not root
+            /* Ownership, and the group with it. The uid was set here from the
+             * start; the gid arrived with the v0.9.0 format and was left at
+             * root's, which only stopped mattering because the owner check wins
+             * before the group one is reached. */
             int esduman_dir_id = get_vfs_id("esduman", home_id);
             if (esduman_dir_id != -1) {
-                dir_table[esduman_dir_id].owner_uid = 1000;
+                fs_chown((fs_id_t)esduman_dir_id, 1000, 1000);
             }
         }
     }
 
+    apply_system_modes();
+
     int tmp_id = get_vfs_id("tmp", 0);
     if (tmp_id != -1) {
         klog(LOG_LEVEL_INFO, "VFS", "Cleaning /tmp on boot.");
-        for (int i = 0; i < 256; i++) { 
+        /*
+         * MAX_FILES_IN_DIR, not 256. This loop was written when the table held
+         * 256 entries and stayed at 256 when v0.9.0 doubled it, so anything in
+         * /tmp landing in a high slot survived the boot that was supposed to
+         * clear it - which is the opposite of what /tmp promises.
+         */
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
             if (dir_table[i].is_used == 1 && dir_table[i].parent_id == tmp_id) {
                 fs_delete(dir_table[i].filename, tmp_id);
             }
@@ -650,6 +737,8 @@ static int init_filesystem_and_vfs(void) {
                 fs_create_file_raw("date", date_elf, date_elf_len, bin_id);
                 fs_create_file_raw("stat", stat_elf, stat_elf_len, bin_id);
                 fs_create_file_raw("edit", edit_elf, edit_elf_len, bin_id);
+                fs_create_file_raw("chmod", chmod_elf, chmod_elf_len, bin_id);
+                fs_create_file_raw("chown", chown_elf, chown_elf_len, bin_id);
                 fs_create_file_raw("hello", hello_elf, hello_elf_len, bin_id);
                 fs_create_file_raw("clear", clear_elf, clear_elf_len, bin_id);
                 fs_create_file_raw("echo", echo_elf, echo_elf_len, bin_id);

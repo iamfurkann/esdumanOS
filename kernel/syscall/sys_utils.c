@@ -126,23 +126,82 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
 }
 
 /**
- * @brief Function check_vfs_access
+ * @brief Finds the directory table slot an entry id occupies.
+ *
+ * @param entry_id Entry to find.
+ * @return Slot index, or -1.
+ */
+static int slot_of_entry(int entry_id) {
+    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        if (dir_table[i].is_used && dir_table[i].entry_id == entry_id) return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief Decides whether the calling task may use a directory.
+ *
+ * Until v0.9.1 this compared names. "tmp" at the root was writable by anybody,
+ * an entry called "root" and owned by uid 0 was closed to everybody, "shadow"
+ * could not be read, and otherwise you could write what you owned. It worked,
+ * and it was the oldest compromise in the system: a file's permissions were a
+ * property of what it was called, so renaming a file changed who could touch it
+ * and creating one called "shadow" was a way to make something unreadable.
+ *
+ * v0.9.0 put a mode, an owner and a group on every entry. This reads them.
+ *
+ * The rule is the Unix one. Reaching an entry requires search permission on
+ * every directory above it, and then the operation itself requires read or
+ * write on the directory it happens in. fs_mode_allows() picks the class -
+ * owner, group, other - and the first class that matches decides, so an owner
+ * with no permission is refused rather than falling through to the group bits.
+ *
+ * One deliberate difference from Unix: the read case asks for r *and* x rather
+ * than x alone. A directory that is searchable but not readable - 0711 - lets a
+ * caller open a file whose name it already knows while refusing to list the
+ * directory, and this function is not told which of the two its caller is about
+ * to do. Asking for both is stricter than Unix, never looser, and no mode this
+ * system sets for itself distinguishes them.
+ *
+ * The bounded walk survives from the old implementation and for the old reason.
+ * fs_dir_exists() stops user space creating an entry whose parent does not
+ * exist, but the directory table is read off the disk and a crafted image can
+ * still contain a cycle. A chain longer than the table cannot be acyclic.
+ *
+ * @param entry_id Directory the operation happens in; 0 is the root.
+ * @param needs_write Non-zero when the operation will modify the directory.
+ * @return 1 when the task may proceed.
  */
 int check_vfs_access(int entry_id, int needs_write) {
-    if (current_task == 0) return 1; 
-    uint32_t my_uid = current_task->uid;
-    if (my_uid == 0) return 1;
+    if (current_task == 0) return 1;
 
-    int curr = entry_id;
-    int is_in_tmp = 0;
+    uint32_t uid = current_task->uid;
+    uint32_t gid = current_task->gid;
+
+    /* Root is not subject to the bits, as everywhere else. */
+    if (uid == 0) return 1;
+
+    int want = needs_write ? (FS_WANT_WRITE | FS_WANT_EXEC)
+                           : (FS_WANT_READ | FS_WANT_EXEC);
 
     /*
-     * Bounded walk. fs_dir_exists() now keeps user space from creating an entry
-     * whose parent does not exist, so a self-parented entry can no longer be
-     * made through the syscall interface - but the directory table is read
-     * straight off the disk, and a crafted or corrupted image can still contain
-     * a cycle. A chain longer than the table cannot be acyclic.
+     * The root directory owns no table entry, so it has no mode to read and its
+     * permissions are stated here instead: 0755 owned by root, which is what
+     * every Unix ships. A user who cannot write to / has /home and /tmp, which
+     * is the arrangement this is copying rather than a restriction invented now.
      */
+    if (entry_id == 0) return fs_mode_allows(0755, 0, 0, uid, gid, want);
+
+    int idx = slot_of_entry(entry_id);
+    if (idx < 0) return 0;
+
+    if (!fs_mode_allows(dir_table[idx].mode, dir_table[idx].owner_uid,
+                        dir_table[idx].owner_gid, uid, gid, want)) {
+        return 0;
+    }
+
+    /* And every directory on the way down to it has to have been searchable. */
+    int curr = dir_table[idx].parent_id;
     int hops = 0;
 
     while (curr != 0) {
@@ -151,50 +210,16 @@ int check_vfs_access(int entry_id, int needs_write) {
             return 0;
         }
 
-        int found = 0;
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
-            if (dir_table[i].entry_id == curr && dir_table[i].is_used) {
-                char *name = dir_table[i].filename;
-                
-                if (dir_table[i].parent_id == 0 && name[0] == 't' && name[1] == 'm' && name[2] == 'p' && name[3] == '\0') {
-                    is_in_tmp = 1;
-                }
-                
-                if (dir_table[i].owner_uid == 0 && name[0]=='r' && name[1]=='o' && name[2]=='o' && name[3]=='t' && name[4]=='\0') {
-                    return 0;
-                }
-                
-                curr = dir_table[i].parent_id;
-                found = 1;
-                break;
-            }
-        }
-        if (!found) break;
-    }
-    if (is_in_tmp) return 1;
+        int up = slot_of_entry(curr);
+        if (up < 0) break;
 
-    if (!needs_write) {
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
-            if (dir_table[i].entry_id == entry_id && dir_table[i].is_used) {
-                char *name = dir_table[i].filename;
-                if (dir_table[i].owner_uid == 0 && name[0]=='s' && name[1]=='h' && name[2]=='a' && 
-                    name[3]=='d' && name[4]=='o' && name[5]=='w' && name[6]=='\0') {
-                    return 0;
-                }
-                break;
-            }
+        if (!fs_mode_allows(dir_table[up].mode, dir_table[up].owner_uid,
+                            dir_table[up].owner_gid, uid, gid, FS_WANT_EXEC)) {
+            return 0;
         }
+        curr = dir_table[up].parent_id;
     }
 
-    if (needs_write) {
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
-            if (dir_table[i].entry_id == entry_id && dir_table[i].is_used) {
-                if (dir_table[i].owner_uid != my_uid) return 0;
-                break;
-            }
-        }
-    }
-    
     return 1;
 }
 

@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.9.0--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.9.1--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.9.0-alpha "Vouch"
+**Version:** 0.9.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -304,6 +304,17 @@ name field, which was 256 bytes of a 272-byte entry — at 64 it pays for all of
 twice as many entries, and still costs less memory than before. An image from an
 earlier release is recognised and refused rather than read as though it were this one.
 
+v0.9.1 makes the bits v0.9.0 stored decide. What granted or refused access until now
+compared names — `"tmp"` at the root was writable by anybody, an entry called `"root"`
+and owned by uid 0 was closed to everybody, `"shadow"` could not be read — so a file's
+permissions were a property of what it was called, and renaming one changed who could
+touch it. Access is now the Unix rule: search permission on every directory above the
+entry, then read or write on the directory the operation happens in, with the matching
+class deciding and no fallthrough to the next. `chmod` and `chown` arrived to set the
+bits, `ls -l` to show them, and the system's own paths are put back to the permissions
+they must have on every boot rather than only when they are created — because
+everything v0.9.0 wrote took the default `0644`, `/etc/shadow` included.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -312,7 +323,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 17 user-space programs and 33 shell builtins
+- 19 user-space programs and 33 shell builtins
 - 34 kernel self-test modules and CI pipeline
 
 **What to expect:**
@@ -332,7 +343,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 61 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 63 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -392,7 +403,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
-| **Programs** | 17 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat` |
+| **Programs** | 19 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -790,6 +801,38 @@ exit                  Exit the shell
 `echo` and `clear` are not builtins — they are ELF programs in `/bin`, reached
 through the same path as any other program. `echo` does not implement `-n`.
 
+**Tab completes, and Tab again walks.** The first press finishes a single match, or
+narrows to as much as the candidates agree on, or lists what there is. Pressing Tab
+again replaces the word with the next candidate and keeps going, wrapping at the end.
+Any other key ends the walk — the list belonged to one word in one state of the line.
+
+### Permissions
+
+Every file and directory carries a mode, an owner and a group, and as of v0.9.1 they
+are what decides access.
+
+```
+chmod 644 notes.txt        # owner reads and writes, everyone else reads
+chmod 700 private          # owner only
+chown 1000 notes.txt       # owner and group both become 1000 (root only)
+chown 1000:1000 notes.txt  # the same, said explicitly
+ls -l                      # mode, owner:group, size and modification time
+```
+
+Modes are octal only — no `u+x`. `chmod` is the owner's and root's; `chown` is root's
+alone, because giving a file away is how a user escapes a quota on a system that has
+one, and this restriction is easier to keep than to add back.
+
+The rule is the Unix one. Reaching a file needs search permission on every directory
+above it, and the operation then needs read or write on the directory it happens in.
+The matching class decides and only that class: an owner with no permission is refused
+rather than falling through to the group bits, which is what makes `chmod 077` mean
+what it says.
+
+The system's own paths are set at boot and put back if they drift: `/etc/shadow` is
+`0600`, `/tmp` is `0777`, `/root` is `0700`, and the rest of the top level is `0755`.
+Files are created `0644` and directories `0755`.
+
 ### The Editor
 
 `edit <file>` opens the system's text editor. It is modal, in the shape `vi` has: keys
@@ -925,10 +968,10 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
-| `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, and the on-disk format: that an entry is exactly 96 bytes, that the superblock's geometry leaves room for the regions it describes, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened |
+| `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes, that the superblock's geometry leaves room for the regions it describes, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), and that the system's own paths carry the permissions they must after a boot |
 | `test_memory.c` | Heap allocation, deallocation, read/write verification |
 | `test_pipe.c` | Pipe creation, ring buffer, EOF detection, syscall integration |
-| `test_security.c` | Authentication: wrong password, invalid UID, correct password |
+| `test_security.c` | Authentication: wrong password, invalid UID, correct password. The permission rule the VFS decides with: the three classes, that the matching one is the only one consulted so an owner with no permission is not passed to the group, that every bit asked for has to be granted, and that root is subject to none of it |
 | `test_passwd.c` | `/etc/passwd` protection: delete/overwrite/rename rejection |
 | `test_adversarial.c` | Pointer validation: NULL, kernel space, upper bounds |
 | `test_stress.c` | FD exhaustion (16 limit), long filename handling |
@@ -1212,10 +1255,8 @@ when it happened. Display does not — nobody reads their own files in UTC — s
 asks the clock for the offset the system is set to and puts it back on, printing
 `2026-08-24 12:00:00 +03` rather than the same instant as `09:00:00 UTC`.
 
-`st_mode` is reported and **not enforced**. The bits are stored on the entry and mean
-what they mean everywhere else, but access is still decided by `check_vfs_access()`,
-which compares names. Enforcing them, and giving `chmod` and `chown` something to do,
-is v0.9.1.
+`st_mode` is the permission bits, and as of v0.9.1 they are what decides access. `chmod`
+sets them, `chown` sets the owner and group, and `ls -l` shows both.
 
 ### IPC and Signals
 
@@ -1384,11 +1425,15 @@ The following are known constraints of the current implementation. These are doc
   default action for an unhandled signal is applied on the way out of a syscall, so a
   task spinning without one keeps its pending signal until it makes its next call. A
   registered handler is delivered at the next context switch either way.
-- **Permission bits are stored and reported but not enforced.** Every entry carries a
-  mode as of v0.9.0 and `stat` shows it, but `check_vfs_access()` still decides by
-  comparing an entry's name against `"tmp"`, `"root"` and `"shadow"`. There is no
-  `chmod` and no `chown`, because there would be nothing for them to change the
-  behaviour of. v0.9.1 replaces the name comparisons and adds both.
+- **There is no sticky bit on `/tmp`.** It is `0777`, so anyone may write in it — and
+  anyone may delete what somebody else wrote there. Real systems set the sticky bit to
+  restrict deletion to the owner; that is a separate mechanism and this does not have
+  it yet.
+- **A read asks for both read and search permission on the directory.** Unix lets a
+  `0711` directory be searched without being listed, so a caller can open a file whose
+  name it already knows. `check_vfs_access()` is not told which of the two its caller is
+  about to do, so it asks for both — stricter than Unix, never looser, and no mode this
+  system sets for itself distinguishes them.
 - **A disk written before v0.9.0 cannot be read, and is refused rather than converted.**
   The format changed and there is no converter: the kernel recognises an older image —
   the old format never used sector 0, so a zero superblock over a non-zero directory
@@ -1490,7 +1535,7 @@ Near-term priorities for the project, roughly in order:
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
-| P1 | Enforce the permission bits v0.9.0 started storing: replace the name comparisons in `check_vfs_access()`, and add `chmod` and `chown` |
+| P2 | A sticky bit on `/tmp`, so a user cannot delete another user's temporary file |
 | P2 | Setting the clock — the RTC is read and never written |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
@@ -1509,8 +1554,9 @@ VFS read/write path; salted password hashing, now PBKDF2-HMAC-SHA256; this sysca
 reference; moving the shell onto `fork`, which brought concurrent pipelines and job
 control in v0.5.2 and `SIGPIPE` in v0.5.3; ANSI escape code support in the terminal,
 which landed in v0.8.0 and had been sitting here as a P3 for two releases after it did;
-and the on-disk format, which grew a superblock, timestamps, an owner group and
-permission bits in v0.9.0.
+the on-disk format, which grew a superblock, timestamps, an owner group and permission
+bits in v0.9.0; and enforcing those bits, which retired the last of the name comparisons
+in v0.9.1.
 
 ---
 

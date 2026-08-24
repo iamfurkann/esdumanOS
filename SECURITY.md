@@ -8,6 +8,10 @@
 | 0.8.x   | :x:                |
 | ≤ 0.7.x | :x:                |
 
+Within 0.9.x, use **0.9.1 or later**. 0.9.0 stores permission bits and enforces none of
+them, and it creates `/etc/shadow` with the default `0644`; 0.9.1 both enforces the bits
+and corrects that file's mode on every boot, including on a disk written by 0.9.0.
+
 Only the current minor line is supported. This table said 0.4.x for five minor
 releases; it is the current line that matters, and it is 0.9.x.
 
@@ -66,14 +70,24 @@ described inaccurately is worse than one described plainly — in either directi
 
 ### File access control
 
-- **Permission bits are stored and reported but not enforced.** As of 0.9.0 every
-  directory entry carries a mode, an owner and a group, and `stat` reports them —
-  but `check_vfs_access()` still decides by comparing an entry's name against `"tmp"`,
-  `"root"` and `"shadow"`. Do not read a mode as a statement about who can open a file.
-  Enforcing them is 0.9.1.
+- **Permission bits decide access as of 0.9.1.** Every entry carries a mode, an owner
+  and a group, and `check_vfs_access()` reads them: search permission on every directory
+  above the entry, then read or write on the directory the operation happens in, with
+  the matching class — owner, group, other — deciding on its own and no fallthrough to
+  the next. Until 0.9.1 this compared names, so a file's permissions were a property of
+  what it was called and renaming one changed who could touch it.
+- **A read asks for read *and* search on the directory.** Unix allows a `0711` directory
+  to be searched without being listed; this check is not told whether its caller is
+  about to list or to look up a known name, so it asks for both. Stricter than Unix,
+  never looser.
+- **There is no sticky bit.** `/tmp` is `0777`, so a user can delete another user's file
+  there. Restricting deletion to the owner is a separate mechanism this does not have.
 - **There is no group database.** A task's group id follows its user id, so a file's
-  group is always its owner. The field is filled from the creating task rather than from
-  a constant, but it carries no independent meaning yet.
+  group is always its owner's. The group bits are read and honoured, but nothing can put
+  two users in one group for them to mean anything.
+- **`chown` is root-only.** Giving a file away is how a user gets out from under a quota
+  on a system that has one. This system has no quota to escape, and the restriction is
+  easier to keep now than to add back later.
 - **The directory table is read from the disk and largely trusted.** 0.9.0 added a
   superblock, so an image this kernel does not recognise is refused rather than read —
   which is what stops it writing its own tables over a foreign disk. Beyond the
@@ -123,8 +137,7 @@ Security fixes will be prioritized and released as patch versions when applicabl
 Please note that as a hobby/educational OS kernel, the security model is intentionally simplified. Reports about the known limitations listed above will be acknowledged but may not result in immediate changes.
 
 We welcome contributions that improve the security posture of esdumanOS. Currently open:
-- Enforcing the permission bits 0.9.0 started storing, and retiring the name comparisons
-  in `check_vfs_access()`
+- A sticky bit, so `/tmp` being world-writable does not also make it world-deletable
 - Deriving the disk key from a boot passphrase instead of a build-time constant
 - Persisting an entropy seed across boots
 - Adding stack canaries, in the kernel and in user-space programs
@@ -133,5 +146,6 @@ We welcome contributions that improve the security posture of esdumanOS. Current
   image cannot present a malformed tree in the first place
 
 Already done, so no longer needed: per-user password salting (PBKDF2-HMAC-SHA256 with a
-16-byte salt) and the entropy pool (interrupt-jitter sourced, with per-source budgets and
-an honest quality verdict).
+16-byte salt); the entropy pool (interrupt-jitter sourced, with per-source budgets and
+an honest quality verdict); and enforcing the permission bits, which in 0.9.1 retired
+the last of the name comparisons in `check_vfs_access()`.

@@ -1,6 +1,12 @@
 #include "syscall.h"
 #include "errno.h"
 #include "umalloc.h"
+#include "stat.h"
+#include "esdtime.h"
+/* For MAX_PATH, so the buffer ls -l builds a path in is bounded by the same
+ * number the kernel will accept rather than by a copy of it. fs.h pulls in
+ * nothing but types.h and declares no storage. */
+#include "fs.h"
 
 typedef unsigned int uint32_t;
 
@@ -752,6 +758,13 @@ int sys_get_dir_id(const char *name) { return syscall(29, (int)name, 0, 0); }
  */
 int sys_readdir(int dir_id, char *buf, int buf_size) { return syscall(44, dir_id, (int)buf, buf_size); }
 /**
+ * @brief Reports a path's metadata.
+ * @param path Path to describe.
+ * @param st Receives the metadata.
+ * @return E_OK, or a negative errno.
+ */
+int sys_stat(const char *path, esd_stat_t *st) { return syscall(SYSCALL_STAT, (int)path, (int)st, 0); }
+/**
  * @brief Creates a pipe.
  * @param pipefd Array to store the read and write file descriptors.
  * @return System call status.
@@ -884,6 +897,11 @@ static int read_escape_key(void);
  * behind by the one path that reprints it. */
 static void print_prompt(void);
 
+/* Also from the line editor. Walking the completion candidates rewrites the word
+ * in place, and redrawing a line that may have wrapped is exactly what this
+ * already does. */
+static void line_refresh(char *buf, int len, int pos);
+
 /**
  * @brief Reads a line from the user.
  *
@@ -935,13 +953,15 @@ int read_line(char *buf, int hide, int max_len) {
 void show_help(void) {
     printk("esdumanOS Shell — Available Commands:\n\n");
     printk("  File Operations:\n");
-    printk("    ls               List directory contents\n");
+    printk("    ls [-l] [dir]    List directory contents; -l adds mode, owner, size, time\n");
     printk("    cat [-nbEsTA] [f] Read and display file contents\n");
     /* Not a builtin, and listed anyway - as echo already is. A user who types
      * `help` and never finds out the system has an editor has been failed by the
      * help rather than by the editor. */
     printk("    edit [file]       Edit a file. Modal: i inserts, ESC returns, :w :q\n");
     printk("                      u undoes, / searches, n and N repeat it\n");
+    printk("    chmod [mode] [f]  Change permission bits, as an octal number\n");
+    printk("    chown [uid[:gid]] [f]  Change owner and group (root only)\n");
     printk("    cat_raw [file]    Show raw (HEX) disk dump (bypasses decryption)\n");
     printk("    write [f] [text]  Create/write a file\n");
     printk("    rm [file]         Delete a file\n");
@@ -1287,18 +1307,107 @@ int builtin_dmesg(char **args) {
     return 0;
 }
 
+/**
+ * @brief Writes the ten-character mode string everyone recognises.
+ *
+ * @param mode Permission bits.
+ * @param is_dir Non-zero for a directory.
+ * @param out At least 11 bytes.
+ */
+static void ls_mode_string(unsigned int mode, int is_dir, char *out) {
+    static const char bit[3] = { 'r', 'w', 'x' };
+
+    out[0] = is_dir ? 'd' : '-';
+    for (int c = 0; c < 3; c++) {
+        unsigned int cls = (mode >> (6 - c * 3)) & 7u;
+        for (int b = 0; b < 3; b++) {
+            out[1 + c * 3 + b] = (cls & (4u >> b)) ? bit[b] : '-';
+        }
+    }
+    out[10] = '\0';
+}
+
+/**
+ * @brief Prints a number right-aligned in a fixed width.
+ *
+ * @param value Number.
+ * @param width Columns; a longer number overflows rather than being cut.
+ */
+static void ls_print_num(unsigned int value, int width) {
+    char num[12];
+    int len = 0;
+
+    ft_itoa((int)value, num);
+    while (num[len]) len++;
+
+    for (int i = len; i < width; i++) printk(" ");
+    printk(num);
+}
+
+/**
+ * @brief Prints a stored timestamp as a local date, or dashes when it has none.
+ *
+ * @param epoch Seconds since the Unix epoch, UTC.
+ * @param tz Hours the system's clock is ahead of UTC.
+ */
+static void ls_print_time(unsigned int epoch, int tz) {
+    esd_time_t t;
+    char buf[6];
+
+    if (epoch == 0) { printk("      -         "); return; }
+
+    epoch = (unsigned int)((int)epoch + tz * 3600);
+    esd_time_from_epoch(epoch, &t);
+
+    ls_print_num(t.year, 4); printk("-");
+    buf[0] = (char)('0' + (t.month / 10) % 10); buf[1] = (char)('0' + t.month % 10);
+    buf[2] = '-';
+    buf[3] = (char)('0' + (t.day / 10) % 10);   buf[4] = (char)('0' + t.day % 10);
+    buf[5] = '\0';
+    printk(buf);
+
+    printk(" ");
+    buf[0] = (char)('0' + (t.hour / 10) % 10);  buf[1] = (char)('0' + t.hour % 10);
+    buf[2] = ':';
+    buf[3] = (char)('0' + (t.minute / 10) % 10); buf[4] = (char)('0' + t.minute % 10);
+    buf[5] = '\0';
+    printk(buf);
+}
+
 int builtin_ls(char **args) {
     int dir_id;
+    int long_form = 0;
+    const char *dir_arg = 0;
+    int tz = 0;
 
-    if (args[1]) {
-        dir_id = sys_get_dir_id(args[1]);
+    /*
+     * "ls -l", and only in the first position. There is no option parser here
+     * and one flag does not earn one; a second flag is when to write it.
+     */
+    if (args[1] && args[1][0] == '-' && args[1][1] == 'l' && args[1][2] == '\0') {
+        long_form = 1;
+        dir_arg = args[2];
+    } else {
+        dir_arg = args[1];
+    }
+
+    if (dir_arg) {
+        dir_id = sys_get_dir_id(dir_arg);
         if (dir_id < 0) {
-            printk("ls: "); printk(args[1]); printk(": No such directory\n");
+            printk("ls: "); printk(dir_arg); printk(": No such directory\n");
             return 1;
         }
     } else {
         dir_id = sys_get_dir_id(".");
         if (dir_id < 0) { printk("ls: cannot resolve the working directory\n"); return 1; }
+    }
+
+    if (long_form) {
+        /* Stored timestamps are UTC; shown ones are local, as in /bin/stat. The
+         * offset comes from the clock rather than a constant, so it follows
+         * /etc/timezone. */
+        esd_time_t now;
+        if (syscall(SYSCALL_TIME, (int)&now, 0, 0) == E_OK) tz = now.tz_offset_hours;
     }
 
     /* One call, one buffer. A directory holding more entries than fit is
@@ -1328,9 +1437,52 @@ int builtin_ls(char **args) {
         int is_dir = (name[nlen] == 1);
         name[nlen] = '\0';
 
-        printk(is_dir ? "[DIR]  " : "[FILE] ");
-        printk(name);
-        printk("\n");
+        if (long_form) {
+            /*
+             * readdir hands back a name and a type and nothing else, so the rest
+             * of the row comes from stat - one call per entry, which a directory
+             * of a few dozen can afford and which needs no new system call.
+             *
+             * The path is built rather than passed bare, because a bare name
+             * resolves against the working directory and this may be listing
+             * some other one.
+             */
+            char path[MAX_PATH];
+            esd_stat_t st;
+            int p = 0;
+
+            if (dir_arg) {
+                for (int i = 0; dir_arg[i] && p < MAX_PATH - 2; i++) path[p++] = dir_arg[i];
+                if (p > 0 && path[p - 1] != '/' && p < MAX_PATH - 2) path[p++] = '/';
+            }
+            for (int i = 0; name[i] && p < MAX_PATH - 1; i++) path[p++] = name[i];
+            path[p] = '\0';
+
+            if (sys_stat(path, &st) == E_OK) {
+                char modestr[11];
+
+                ls_mode_string(st.st_mode, is_dir, modestr);
+                printk(modestr);
+                printk(" ");
+                ls_print_num(st.st_uid, 5);
+                printk(":");
+                ls_print_num(st.st_gid, 5);
+                ls_print_num(st.st_size, 9);
+                printk("  ");
+                ls_print_time(st.st_mtime, tz);
+                printk("  ");
+            } else {
+                /* Named by readdir and not describable: say so in the row rather
+                 * than dropping the entry, which would make it look absent. */
+                printk("?????????         ?        ?         ?         ");
+            }
+            printk(name);
+            printk("\n");
+        } else {
+            printk(is_dir ? "[DIR]  " : "[FILE] ");
+            printk(name);
+            printk("\n");
+        }
 
         found = 1;
         off += nlen + 2;
@@ -1984,12 +2136,45 @@ static const char *builtin_commands[] = {
     0  // sentinel
 };
 
+/*
+ * Tab completion, and the state that lets Tab be pressed twice.
+ *
+ * The candidate list used to live on this function's stack, which was enough
+ * while one Tab did one thing. Walking the candidates means the second Tab has
+ * to know what the first one found, so the list, where in it we are, and where
+ * in the line the candidate goes all outlive the call.
+ *
+ * comp_replace_start is where the candidate is written, and it is not where the
+ * word starts: for "dir/na" the candidates are the names inside dir, so what
+ * gets replaced is everything after the last slash. Working that out once at
+ * gather time is what keeps the cycling from having to re-parse the line.
+ *
+ * Any key other than Tab clears all of this - see the input loop. A list
+ * gathered for one word means nothing for the next.
+ */
+#define COMP_MAX 32
+
+static char comp_matches[COMP_MAX][64];
+static int  comp_is_dir[COMP_MAX];
+static int  comp_count = 0;
+static int  comp_index = -1;         /**< -1 until the first candidate is placed. */
+static int  comp_replace_start = 0;  /**< Offset in the line the candidate replaces from. */
+static int  comp_active = 0;         /**< A list has been gathered and is still current. */
+
+/** @brief Forgets the gathered candidates, so the next Tab starts over. */
+static void completion_reset(void) {
+    comp_active = 0;
+    comp_count = 0;
+    comp_index = -1;
+}
+
 /**
- * @brief Performs tab completion on the current input buffer.
+ * @brief Gathers the candidates for the word the cursor is on.
  *
  * If cursor is at first word position, completes command names.
  * Otherwise, completes file/directory names in the current directory.
- * Single match: auto-completes. Multiple matches: lists them.
+ * Single match: auto-completes. Multiple comp_matches: extends to the common prefix
+ * and lists them, leaving the list for tab_cycle() to walk.
  *
  * @param buf Current input buffer.
  * @param idx Pointer to current cursor position in buffer.
@@ -1998,7 +2183,7 @@ static void handle_tab_completion(char *buf, int *idx) {
     // Find the start of the current word
     int word_start = *idx;
     while (word_start > 0 && buf[word_start - 1] != ' ') word_start--;
-    
+
     // Extract the partial word (prefix to match)
     /*
      * The copy was already clamped to 127; the terminator was not. A word
@@ -2012,23 +2197,20 @@ static void handle_tab_completion(char *buf, int *idx) {
     if (prefix_len < 0) prefix_len = 0;
     for (int i = 0; i < prefix_len; i++) prefix[i] = buf[word_start + i];
     prefix[prefix_len] = '\0';
-    
+
     // Determine if we're completing a command (first word) or a filename
     int is_command = (word_start == 0);
-    
-    // Collect matches
-    char matches[32][64];  // max 32 matches, 64 chars each
-    int match_count = 0;
-    int match_is_dir[32];  // track which matches are directories
-    
+
+    completion_reset();
+
     if (is_command) {
         // Match built-in commands
         for (int i = 0; builtin_commands[i] != 0; i++) {
             if (prefix_len == 0 || ft_strncmp(builtin_commands[i], prefix, prefix_len) == 0) {
-                if (match_count < 32) {
-                    ft_strncpy(matches[match_count], builtin_commands[i], 64);
-                    match_is_dir[match_count] = 0;
-                    match_count++;
+                if (comp_count < 32) {
+                    ft_strncpy(comp_matches[comp_count], builtin_commands[i], 64);
+                    comp_is_dir[comp_count] = 0;
+                    comp_count++;
                 }
             }
         }
@@ -2056,13 +2238,13 @@ static void handle_tab_completion(char *buf, int *idx) {
                 if (prefix_len == 0 || ft_strncmp(entry_name, prefix, prefix_len) == 0) {
                     // Check it's not already a builtin
                     int is_dup = 0;
-                    for (int m = 0; m < match_count; m++) {
-                        if (ft_strcmp(matches[m], entry_name) == 0) { is_dup = 1; break; }
+                    for (int m = 0; m < comp_count; m++) {
+                        if (ft_strcmp(comp_matches[m], entry_name) == 0) { is_dup = 1; break; }
                     }
-                    if (!is_dup && match_count < 32) {
-                        ft_strncpy(matches[match_count], entry_name, 64);
-                        match_is_dir[match_count] = 0;
-                        match_count++;
+                    if (!is_dup && comp_count < 32) {
+                        ft_strncpy(comp_matches[comp_count], entry_name, 64);
+                        comp_is_dir[comp_count] = 0;
+                        comp_count++;
                     }
                 }
                 // Skip past: name + type_byte + null
@@ -2114,21 +2296,28 @@ static void handle_tab_completion(char *buf, int *idx) {
             
             int nplen = ft_strlen(name_prefix);
             if (nplen == 0 || ft_strncmp(entry_name, name_prefix, nplen) == 0) {
-                if (match_count < 32) {
-                    ft_strncpy(matches[match_count], entry_name, 64);
-                    match_is_dir[match_count] = is_dir;
-                    match_count++;
+                if (comp_count < 32) {
+                    ft_strncpy(comp_matches[comp_count], entry_name, 64);
+                    comp_is_dir[comp_count] = is_dir;
+                    comp_count++;
                 }
             }
             off += nlen + 2;
         }
     }
     
-    if (match_count == 0) return;  // No matches
-    
-    if (match_count == 1) {
+    if (comp_count == 0) return;  // Nothing matched
+
+    /*
+     * Where a cycled candidate gets written. The candidates are bare names, so
+     * for "dir/na" this is the offset of the "na" rather than of the whole word
+     * - prefix_len was shifted past the last slash above for exactly this.
+     */
+    comp_replace_start = *idx - prefix_len;
+
+    if (comp_count == 1) {
         // Single match: auto-complete
-        char *match = matches[0];
+        char *match = comp_matches[0];
         int match_len = ft_strlen(match);
         // Erase the current prefix from display
         // Then write the full match
@@ -2138,7 +2327,7 @@ static void handle_tab_completion(char *buf, int *idx) {
             buf[(*idx)++] = match[i];
         }
         // Add trailing / for directories or space for files/commands
-        if (match_is_dir[0]) {
+        if (comp_is_dir[0]) {
             if (*idx < 254) {
                 printk("/");
                 buf[(*idx)++] = '/';
@@ -2149,38 +2338,75 @@ static void handle_tab_completion(char *buf, int *idx) {
                 buf[(*idx)++] = ' ';
             }
         }
+        /* One candidate is not something to walk through. */
+        completion_reset();
     } else {
-        // Multiple matches: find common prefix first
-        int common_len = ft_strlen(matches[0]);
-        for (int m = 1; m < match_count; m++) {
+        // Several candidates: find the common prefix first
+        int common_len = ft_strlen(comp_matches[0]);
+        for (int m = 1; m < comp_count; m++) {
             int k = 0;
-            while (k < common_len && matches[0][k] == matches[m][k] && matches[m][k] != '\0') k++;
+            while (k < common_len && comp_matches[0][k] == comp_matches[m][k] && comp_matches[m][k] != '\0') k++;
             common_len = k;
         }
-        
+
         // If common prefix is longer than what's typed, complete to it
         if (common_len > prefix_len) {
             for (int i = prefix_len; i < common_len && *idx < 254; i++) {
-                char ch[2] = { matches[0][i], '\0' };
+                char ch[2] = { comp_matches[0][i], '\0' };
                 printk(ch);
-                buf[(*idx)++] = matches[0][i];
+                buf[(*idx)++] = comp_matches[0][i];
             }
         } else {
-            // Show all matches
+            // Nothing more in common: show what there is to choose from
             printk("\n");
-            for (int m = 0; m < match_count; m++) {
-                printk(matches[m]);
-                if (match_is_dir[m]) printk("/");
+            for (int m = 0; m < comp_count; m++) {
+                printk(comp_matches[m]);
+                if (comp_is_dir[m]) printk("/");
                 printk("  ");
             }
-            
+
             // Redraw prompt and current input
             printk("\n");
             print_prompt();
             buf[*idx] = '\0';
             printk(buf);
         }
+
+        /* The list stays. Pressing Tab again walks it - see tab_cycle(). */
+        comp_active = 1;
     }
+}
+
+/**
+ * @brief Replaces the word with the next candidate.
+ *
+ * The second and every later Tab. The first one has already either finished the
+ * word or narrowed it as far as the candidates agree, so from here the only
+ * thing left to do is show them one at a time - which is what a terminal does
+ * and what pressing Tab twice is asking for.
+ *
+ * A directory candidate takes a trailing slash, so that carrying on typing
+ * descends into it. A file takes nothing: a trailing space would read as having
+ * finished the word, and the next Tab would be about something else.
+ *
+ * @param buf Input buffer.
+ * @param len Receives the new length.
+ * @param pos Receives the new cursor position.
+ */
+static void tab_cycle(char *buf, int *len, int *pos) {
+    comp_index = (comp_index + 1) % comp_count;
+
+    const char *pick = comp_matches[comp_index];
+    int n = comp_replace_start;
+
+    for (int i = 0; pick[i] && n < 253; i++) buf[n++] = pick[i];
+    if (comp_is_dir[comp_index] && n < 253) buf[n++] = '/';
+
+    buf[n] = '\0';
+    *len = n;
+    *pos = n;
+
+    line_refresh(buf, *len, *pos);
 }
 
 /**
@@ -2701,6 +2927,14 @@ void main(void) {
             if (r == E_INTR) { interrupted = 1; break; }
             if (r <= 0) continue;
 
+            /*
+             * Anything but Tab ends a walk through the candidates. The list was
+             * gathered for one word in one state of the line, and a keystroke -
+             * any keystroke, including an arrow that only moved the cursor -
+             * means the next Tab is asking a different question.
+             */
+            if (c != '\t') completion_reset();
+
             if (c == 27) {
                 int key = read_escape_key();
 
@@ -2782,14 +3016,21 @@ void main(void) {
                 /* Completion appends to the line, so it means nothing anywhere
                  * but at the end of it. */
                 if (pos == len) {
-                    cmd_buf[len] = '\0';
-                    handle_tab_completion(cmd_buf, &len);
-                    pos = len;
-                    /* Completion prints what it appended, and the branch that
-                     * lists candidates reprints the prompt through the same
-                     * function this uses - either way the cursor ends up after
-                     * the line. */
-                    line_cell = prompt_w + len;
+                    if (comp_active) {
+                        /* Second Tab and onwards: walk the list the first one
+                         * gathered. line_refresh() leaves the cursor where it
+                         * belongs, so there is no cell to fix up here. */
+                        tab_cycle(cmd_buf, &len, &pos);
+                    } else {
+                        cmd_buf[len] = '\0';
+                        handle_tab_completion(cmd_buf, &len);
+                        pos = len;
+                        /* Completion prints what it appended, and the branch
+                         * that lists candidates reprints the prompt through the
+                         * same function this uses - either way the cursor ends
+                         * up after the line. */
+                        line_cell = prompt_w + len;
+                    }
                 }
                 continue;
             }

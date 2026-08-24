@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1-alpha] - 2026-08-25
+
+v0.9.0 wrote a mode, an owner and a group onto every file and consulted none of them.
+That was deliberate and it was disclosed, but a field the system reports and nothing
+reads is exactly what this project spends its effort avoiding. This release reads them.
+
+What decided access until now was `check_vfs_access()`, and what it did was compare
+names: `"tmp"` at the root was writable by anybody, an entry called `"root"` and owned
+by uid 0 was closed to everybody, `"shadow"` could not be read, and otherwise you could
+write what you owned. It worked, and it made a file's permissions a property of what it
+was called — renaming a file changed who could touch it.
+
+### Added
+
+- **Permission bits decide.** The Unix rule, as it is: reaching an entry needs search
+  permission on every directory above it, and the operation then needs read or write on
+  the directory it happens in. The class that matches — owner, group, other — is the
+  only one consulted, so an owner with no permission is refused rather than falling
+  through to the group bits. That last part is the one people misremember, and it is
+  what `chmod 077` depends on.
+
+  One deliberate difference: the read case asks for `r` *and* `x` rather than `x` alone.
+  A directory that is searchable but not readable lets a caller open a file whose name
+  it already knows while refusing to list the directory, and this check is not told
+  which of the two its caller is about to do. Asking for both is stricter than Unix,
+  never looser.
+
+- **`chmod` and `chown`.** Octal modes only — symbolic ones are a parser and a lot of
+  behaviour to get subtly wrong, and they say nothing extra about nine bits. `chmod` is
+  the owner's and root's; `chown` is root's alone, because giving a file away is how a
+  user gets out from under a quota on a system that has one and this restriction is far
+  easier to keep now than to add back.
+
+- **`ls -l`** — mode string, owner and group, size and modification time. `readdir`
+  returns a name and a type and nothing else, so the rest of each row comes from one
+  `stat` per entry; a directory of a few dozen can afford it and it needs no new system
+  call. Times are shown in local time like `stat`'s.
+
+- **Tab walks the candidates.** Pressing Tab again moves to the next one and replaces
+  the word, wrapping at the end — what a terminal does. The first Tab is unchanged: it
+  completes a single match, or narrows to the common prefix, or lists what there is.
+  Any other key ends the walk, because the list was gathered for one word in one state
+  of the line.
+
+### Fixed
+
+- **The system's own paths get the permissions they must have, on every boot.**
+  `/etc/shadow` is `0600`, `/tmp` is `0777`, `/root` is `0700`, and the rest of the top
+  level is `0755`. This runs every boot rather than only when the entries are created,
+  and that is a security requirement rather than tidiness: everything v0.9.0 created
+  took the default `0644`, `/etc/shadow` included, so a kernel that began enforcing
+  modes and only stamped new entries would have handed the password database to every
+  user the first time it mounted such a disk.
+
+- **`/tmp` is cleared completely on boot again.** The loop that empties it was written
+  when the directory table held 256 entries and stayed at 256 when v0.9.0 doubled it, so
+  anything landing in a high slot survived the boot that was supposed to remove it. A
+  regression introduced in v0.9.0 and reported here rather than quietly corrected.
+
+- **`/home/<user>` gets its group as well as its owner**, and the change is written to
+  the disk. It was set by assigning into the directory table directly, which persisted
+  only because something later happened to save the table, and which indexed that table
+  with an entry id — correct today only because the two happen to coincide.
+
 ## [0.9.0-alpha] "Vouch" - 2026-08-24
 
 The disk says what it is. Until this release nothing on it did: `init_fs()` read the

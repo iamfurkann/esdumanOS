@@ -996,6 +996,98 @@ void sys_fstat(arch_regs_t *regs) {
 }
 
 /**
+ * @brief Resolves a path to the entry id it names, directories included.
+ *
+ * Shared by chmod and chown, and it handles "/", "." and ".." through
+ * resolve_dir_from_cwd() for the same reason sys_stat() does - the alternative
+ * is a second copy of the same walk that gets to disagree with the first.
+ *
+ * @param path Path already copied into kernel memory.
+ * @return Entry id, or a negative errno.
+ */
+static int entry_id_for_path(const char *path) {
+    char basename[MAX_FILENAME];
+    int parent_id, idx;
+
+    for (int k = 0; k < MAX_FILENAME; k++) basename[k] = '\0';
+
+    parent_id = split_from_cwd(path, basename);
+    if (parent_id < 0) return parent_id;
+
+    if ((basename[0] == '\0') ||
+        (basename[0] == '.' && basename[1] == '\0') ||
+        (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0')) {
+        int target = resolve_dir_from_cwd(path);
+
+        if (target < 0) return target;
+        /* The root owns no directory table entry, so it has nothing to carry a
+         * mode and nothing to change. */
+        if (target == 0) return E_PERM;
+        return target;
+    }
+
+    idx = fs_get_entry_idx(basename, (fs_id_t)parent_id);
+    if (idx < 0) return E_NOENT;
+    return dir_table[idx].entry_id;
+}
+
+/**
+ * @brief Changes a file's permission bits.
+ *
+ * The owner and root, and nobody else. A mode a stranger can rewrite is not a
+ * permission - and the check is on the *entry's* owner rather than on write
+ * access to it, because a file you can write is not a file you get to re-permit.
+ */
+void sys_chmod(arch_regs_t *regs) {
+    char path[MAX_PATH];
+    uint32_t mode = (uint32_t)regs->ecx;
+    int entry_id, idx;
+    uint32_t uid;
+
+    if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
+
+    entry_id = entry_id_for_path(path);
+    if (entry_id < 0) { regs->eax = entry_id; return; }
+
+    idx = dir_index_of_entry_id((fs_id_t)entry_id);
+    if (idx < 0) { regs->eax = E_NOENT; return; }
+
+    uid = current_task ? current_task->uid : 0;
+    if (uid != 0 && dir_table[idx].owner_uid != uid) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "chmod: not the owner");
+        regs->eax = E_PERM; return;
+    }
+
+    regs->eax = fs_chmod((fs_id_t)entry_id, (uint16_t)mode);
+}
+
+/**
+ * @brief Changes a file's owner and group.
+ *
+ * Root only. Giving a file away is how a user gets out from under their own
+ * quota on a system that has one; this system does not have one yet, and the
+ * restriction is far easier to keep now than to put back later.
+ */
+void sys_chown(arch_regs_t *regs) {
+    char path[MAX_PATH];
+    uint32_t new_uid = (uint32_t)regs->ecx;
+    uint32_t new_gid = (uint32_t)regs->edx;
+    int entry_id;
+
+    if (current_task && current_task->uid != 0) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "chown: root only");
+        regs->eax = E_PERM; return;
+    }
+
+    if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
+
+    entry_id = entry_id_for_path(path);
+    if (entry_id < 0) { regs->eax = entry_id; return; }
+
+    regs->eax = fs_chown((fs_id_t)entry_id, new_uid, new_gid);
+}
+
+/**
  * @brief Repositions the read offset of an open file.
  *
  * vfs_file_t.current_offset is the real cursor: fs_read_raw() reads and advances

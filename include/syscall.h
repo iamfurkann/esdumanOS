@@ -272,6 +272,30 @@
  */
 #define SYSCALL_POLL            63
 
+/**
+ * @brief Change a file's permission bits.
+ *
+ * ebx is a path, ecx is the new mode. Only the owner and root may change one,
+ * which is the same rule every Unix applies and for the same reason: a mode a
+ * stranger can rewrite is not a permission, it is a suggestion.
+ *
+ * The bits above the permission mask are ignored rather than refused. There are
+ * no set-user-id or sticky bits here yet, and a caller that sets one is asking
+ * for something this system has no meaning for - silently keeping only what
+ * exists is kinder than an error nobody can act on.
+ */
+#define SYSCALL_CHMOD           64
+
+/**
+ * @brief Change a file's owner and group.
+ *
+ * ebx is a path, ecx is the new uid, edx the new gid. **Root only**, and that is
+ * stricter than it strictly has to be: handing a file to somebody else is how a
+ * user escapes their own quota on systems that have one, and this system does
+ * not have one to escape yet. The restriction is easier to keep than to add back.
+ */
+#define SYSCALL_CHOWN           65
+
 // ==========================================================
 // Test-build-only syscalls (>= 200)
 //

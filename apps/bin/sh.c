@@ -878,6 +878,12 @@ void my_custom_handler(void) {
  * this prompt has to do about escape sequences: swallow them. */
 static int read_escape_key(void);
 
+/* Also from the line editor. Tab completion has to put the prompt back after it
+ * lists candidates, and it used to do that with its own copy of these lines -
+ * which meant the editor's idea of how wide the prompt is would have been left
+ * behind by the one path that reprints it. */
+static void print_prompt(void);
+
 /**
  * @brief Reads a line from the user.
  *
@@ -935,6 +941,7 @@ void show_help(void) {
      * `help` and never finds out the system has an editor has been failed by the
      * help rather than by the editor. */
     printk("    edit [file]       Edit a file. Modal: i inserts, ESC returns, :w :q\n");
+    printk("                      u undoes, / searches, n and N repeat it\n");
     printk("    cat_raw [file]    Show raw (HEX) disk dump (bypasses decryption)\n");
     printk("    write [f] [text]  Create/write a file\n");
     printk("    rm [file]         Delete a file\n");
@@ -2169,11 +2176,7 @@ static void handle_tab_completion(char *buf, int *idx) {
             
             // Redraw prompt and current input
             printk("\n");
-            printk(current_username);
-            printk("@"); printk(current_hostname); printk(" ");
-            printk(current_path);
-            if (current_uid == 0) printk(" # ");
-            else printk(" $ ");
+            print_prompt();
             buf[*idx] = '\0';
             printk(buf);
         }
@@ -2287,11 +2290,18 @@ static void read_startup_files(void) {
  * sends the sequences a terminal sends now, and this is the first thing in the
  * system to read them.
  *
- * One screen row. The redraw below moves the cursor with CUB, which cannot cross
- * a row boundary, so a line long enough to wrap past column 80 can still be
- * typed and run but is redrawn only on its last row. Commands that long are rare
- * and the alternative is tracking the wrap by hand for every edit; the limit is
- * written down rather than worked around.
+ * It used to be one screen row. The redraw moved the cursor with CUB, which
+ * cannot cross a row boundary, so a line that wrapped past column 80 could be
+ * typed and run but was redrawn only on its last row - the rest of it stayed on
+ * screen as whatever it had been. The wrap is tracked by hand now, and what made
+ * that cheap is that the geometry is not something to discover: the prompt is
+ * always printed after a newline, so it starts at column 0, and the terminal
+ * wraps the moment column 80 is written rather than deferring it. Prompt and
+ * line are therefore one run of cells, and cell n is at row n/80, column n%80.
+ *
+ * Nothing here asks which screen row it is on, and nothing needs to. Every move
+ * is relative, and when output scrolls the screen the whole run moves up with
+ * the cursor, so a relative move stays right across a scroll.
  */
 
 /** @brief Not a key this editor acts on: a lone Escape, or a sequence it ignores. */
@@ -2396,26 +2406,93 @@ static void ansi_move(int n, char dir) {
     printk(seq);
 }
 
+/** @brief Screen width. The terminal wraps here, and the arithmetic counts on it. */
+#define SHELL_COLS 80
+
 /**
- * @brief Prints the shell prompt.
+ * Where the cursor is, in cells from the first character of the prompt.
+ *
+ * One number rather than a row and a column, because a row on its own means
+ * nothing here: the run starts at column 0 of whatever row the prompt landed on,
+ * and every position in it follows from the count. Everything that prints or
+ * moves keeps this in step, which is what lets a move be worked out from where
+ * the cursor is to where it should be without asking the terminal anything.
+ */
+static int line_cell = 0;
+
+/** @brief Width of the prompt, so cell prompt_w is the first character typed. */
+static int prompt_w = 0;
+
+/**
+ * @brief Prints one piece of the prompt and counts it into the prompt's width.
+ *
+ * Printing and measuring in the same call, so that a piece cannot be added to
+ * the prompt without being added to its width. The prompt holds no escape
+ * sequences, so its bytes and its columns are the same number.
+ *
+ * @param s The piece.
+ */
+static void prompt_put(const char *s) {
+    printk(s);
+    prompt_w += ft_strlen(s);
+}
+
+/**
+ * @brief Prints the shell prompt and records where it leaves the cursor.
  *
  * Split out because the history has to put it back: recalling a line rewrites
- * everything from the start of the row, and the prompt is part of what was
- * there.
+ * everything from the start of the prompt, and the prompt is part of what was
+ * there. Tab completion reprints it too, and used to do so from a copy of these
+ * lines - which is now gone, because a second copy is a second width.
  */
 static void print_prompt(void) {
-    printk(current_username);
-    printk("@"); printk(current_hostname); printk(" ");
-    printk(current_path);
-    printk(current_uid == 0 ? " # " : " $ ");
+    prompt_w = 0;
+
+    prompt_put(current_username);
+    prompt_put("@");
+    prompt_put(current_hostname);
+    prompt_put(" ");
+    prompt_put(current_path);
+    prompt_put(current_uid == 0 ? " # " : " $ ");
+
+    line_cell = prompt_w;
+}
+
+/**
+ * @brief Moves the cursor to a cell of the prompt-and-line run.
+ *
+ * The rows are covered with CUU and CUD and the column with a CUB clamped to
+ * zero followed by a CUF, which is the one combination that can cross a row
+ * boundary - CUB alone stops at column 0 of the row it is already on, and that
+ * was the whole of the old limitation.
+ *
+ * @param to Destination cell, counted from the start of the prompt.
+ */
+static void cursor_to_cell(int to) {
+    int rows = (to / SHELL_COLS) - (line_cell / SHELL_COLS);
+
+    if (rows < 0)      ansi_move(-rows, 'A');
+    else if (rows > 0) ansi_move(rows, 'B');
+
+    /* SHELL_COLS is past any column the cursor can be in, so this lands on 0. */
+    ansi_move(SHELL_COLS, 'D');
+    ansi_move(to % SHELL_COLS, 'C');
+
+    line_cell = to;
 }
 
 /**
  * @brief Redraws the line from the cursor rightwards and returns to it.
  *
- * Used after anything that changed the text under or after the cursor. The EL
+ * Used after anything that changed the text under or after the cursor. The erase
  * matters as much as the reprint: a deletion leaves the old last character on
  * screen with nothing to overwrite it.
+ *
+ * ED rather than EL, and that is the wrap. A line that shrinks from three rows
+ * to two leaves its third row behind, and erasing to the end of the current row
+ * cannot reach it. Nothing below the line is ever anything but blank - the
+ * prompt is the last thing printed - so erasing to the bottom of the screen
+ * costs nothing and takes the stale rows with it.
  *
  * @param buf Line contents.
  * @param len Characters in the line.
@@ -2424,15 +2501,14 @@ static void print_prompt(void) {
 static void line_redraw_tail(char *buf, int len, int pos) {
     buf[len] = '\0';
     printk(&buf[pos]);
-    printk("\033[K");
-    ansi_move(len - pos, 'D');
+    line_cell = prompt_w + len;
+
+    printk("\033[J");
+    cursor_to_cell(prompt_w + pos);
 }
 
 /**
- * @brief Redraws the line and leaves the cursor where it belongs.
- *
- * Column 0 is reached with a CUB large enough to be clamped there rather than
- * with a carriage return, which this terminal does not implement.
+ * @brief Redraws the prompt and the whole line, cursor included.
  *
  * @param buf Line contents, null-terminated at len.
  * @param len Characters in the line.
@@ -2441,11 +2517,13 @@ static void line_redraw_tail(char *buf, int len, int pos) {
 static void line_refresh(char *buf, int len, int pos) {
     buf[len] = '\0';
 
-    ansi_move(999, 'D');
+    cursor_to_cell(0);
     print_prompt();
     printk(buf);
-    printk("\033[K");          /* whatever the line used to be longer by */
-    ansi_move(len - pos, 'D');
+    line_cell = prompt_w + len;
+
+    printk("\033[J");          /* whatever the line used to be longer by */
+    cursor_to_cell(prompt_w + pos);
 }
 
 /*
@@ -2626,16 +2704,19 @@ void main(void) {
             if (c == 27) {
                 int key = read_escape_key();
 
+                /* Every one of these moves by naming the cell it wants rather
+                 * than a number of columns, which is what makes stepping off the
+                 * end of a row land on the start of the next one. */
                 if (key == KEY_LEFT) {
-                    if (pos > 0) { pos--; ansi_move(1, 'D'); }
+                    if (pos > 0) { pos--; cursor_to_cell(prompt_w + pos); }
                 } else if (key == KEY_RIGHT) {
-                    if (pos < len) { pos++; ansi_move(1, 'C'); }
+                    if (pos < len) { pos++; cursor_to_cell(prompt_w + pos); }
                 } else if (key == KEY_HOME) {
-                    ansi_move(pos, 'D');
                     pos = 0;
+                    cursor_to_cell(prompt_w);
                 } else if (key == KEY_END) {
-                    ansi_move(len - pos, 'C');
                     pos = len;
+                    cursor_to_cell(prompt_w + pos);
                 } else if (key == KEY_DELETE) {
                     if (pos < len) {
                         for (int i = pos; i < len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
@@ -2687,7 +2768,11 @@ void main(void) {
                     for (int i = pos - 1; i < len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
                     len--;
                     pos--;
-                    printk("\b");
+                    /* Not the backspace character. It does step back over a wrap
+                     * and blank the cell it lands on, but the redraw below both
+                     * reprints from here and erases past the end anyway, so
+                     * moving by cell keeps one rule instead of two. */
+                    cursor_to_cell(prompt_w + pos);
                     line_redraw_tail(cmd_buf, len, pos);
                 }
                 continue;
@@ -2700,6 +2785,11 @@ void main(void) {
                     cmd_buf[len] = '\0';
                     handle_tab_completion(cmd_buf, &len);
                     pos = len;
+                    /* Completion prints what it appended, and the branch that
+                     * lists candidates reprints the prompt through the same
+                     * function this uses - either way the cursor ends up after
+                     * the line. */
+                    line_cell = prompt_w + len;
                 }
                 continue;
             }
@@ -2712,6 +2802,7 @@ void main(void) {
                 char str[2] = { c, '\0' };
                 printk(str);
                 pos++;
+                line_cell++;      /* the terminal wrapped it if it had to */
 
                 line_redraw_tail(cmd_buf, len, pos);
             }

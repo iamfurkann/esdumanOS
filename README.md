@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.8.3--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.8.4--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.8.3-alpha
+**Version:** 0.8.4-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -280,6 +280,16 @@ combinations on its commands, and Ctrl-C, Ctrl-D and Ctrl-Z already belong to th
 terminal. The arithmetic it runs on lives in a header so that the test suite can reach
 it, because a program in `/bin` has no link step and logic outside a header is logic
 nothing can assert about.
+
+v0.8.4 finishes both halves of that. The editor got `u` and `/`, which is the difference
+between something you can demonstrate and something you can write a file with: before it,
+the only way out of a mistake was `:q!` and the loss of everything since the last write.
+The undo log went into the same header the buffer lives in, so the suite can assert on it
+— an undo that is wrong hands back a file that is not the one the user had, and no screen
+can show you that. The shell, meanwhile, stopped drawing only the last row of a command
+that wrapped past column 80. Neither needed anything from the kernel: the terminal has
+had the sequences since v0.8.0, and what was missing was arithmetic on the other side of
+the system call.
 
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
@@ -776,12 +786,24 @@ does not exist yet is not an error — it is a new file, and `:w` writes it.
 |---|---|
 | **Moving** | `h` `j` `k` `l` or the arrows, `0` and `$` or Home and End, `gg` and `G` for the first and last line, Page Up and Page Down |
 | **Editing** | `i` insert here, `a` after the cursor, `A` at the end of the line, `o` and `O` open a line below or above, `x` delete a character, `dd` delete a line |
+| **Undoing** | `u` takes back the last thing you did |
+| **Searching** | `/<pattern>` finds it, `n` and `N` repeat forwards and backwards, `/` alone repeats the last pattern |
 | **Commands** | `:w` write, `:w <name>` write as, `:q` quit, `:q!` quit without writing, `:wq` both, `:<number>` jump to a line |
 | **Other** | Ctrl-L redraws, Ctrl-Z stops it and `fg` brings it back with the screen intact |
 
 Ctrl-C is declined: throwing away an unsaved buffer should take more than one key, and
 `:q!` is there for anyone who means it. A file is at most 64 KB, which is the most this
 file system will write back.
+
+`u` gives back a whole change rather than a byte: a sentence typed in insert mode is one
+thing you did, so one press takes all of it. Each command in normal mode is its own step.
+There is no redo — `u` keeps going backwards rather than toggling — and the log keeps 256
+changes and 8 KB of deleted text, past which the oldest changes are given up and the
+status line says so.
+
+Search is plain text, not a pattern language, and it wraps in both directions: the status
+line says when it went round the end, which is the only way to tell one match from the
+same match found again.
 
 A newline separates lines rather than ending them, so a file that ends in one shows an
 empty line after it — where `vi` would show only the text. That is the honest reading for
@@ -910,7 +932,7 @@ filtered run proves one module, not the tree.
 | `test_signal.c` | Handler registration and pending-signal bookkeeping |
 | `test_jobctl.c` | Stopping and continuing a task: the state it remembers, who is told, and what happens to the terminal |
 | `test_kbd.c` | Scancode translation: which keys become escape sequences, which are consumed, and that a sequence is written whole or not at all |
-| `test_edit.c` | The line arithmetic `/bin/edit` is built on: where a line starts and ends, what a vertical move keeps, and what deleting one takes with it |
+| `test_edit.c` | The line arithmetic `/bin/edit` is built on: where a line starts and ends, what a vertical move keeps, what deleting one takes with it, what a search finds and wraps past, and what undo gives back — including which changes it drops when its log runs out |
 | `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
@@ -1332,10 +1354,12 @@ The following are known constraints of the current implementation. These are doc
   default action for an unhandled signal is applied on the way out of a syscall, so a
   task spinning without one keeps its pending signal until it makes its next call. A
   registered handler is delivered at the next context switch either way.
-- **The line editor works within one screen row.** The cursor is moved with `CUB`, which
-  cannot cross a row boundary, so a command long enough to wrap past column 80 can still
-  be typed and run but is redrawn only on its last row. The alternative is tracking the
-  wrap by hand for every edit, and commands that long are rare.
+- **A wrapped command line is redrawn correctly only while its first row is on screen.**
+  The line editor tracks the wrap itself as of v0.8.4 and moves between rows with `CUU`
+  and `CUD`, but both clamp to the top of the visible screen, so a redraw cannot reach a
+  row that has scrolled above it. The line is capped at 254 characters and the prompt at
+  around thirty, which is four rows out of twenty-four — the case is unreachable in
+  practice rather than handled.
 - **Ctrl-Z at an idle prompt throws away the line being typed**, exactly as Ctrl-C
   does. The shell ignores the signal, but the read it is blocked in is still cut short
   and has no way to tell which signal cut it.

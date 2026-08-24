@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4-alpha] - 2026-08-24
+
+The editor became usable and the shell stopped lying about what you had typed. Nothing in
+the kernel changed for either of them: the terminal already had every sequence this
+needed, and what was missing was arithmetic on the other side of the system call.
+
+### Added
+
+- **Undo in `/bin/edit`, on `u`.** A log of changes and their reverse, and it gives back a
+  group at a time rather than a byte: a sentence typed in insert mode is one thing the
+  user did, so it comes back in one press. Each command in normal mode is its own group,
+  and `o` and `O` keep the line they opened together with the text typed onto it.
+
+  It lives in `include/editbuf.h` with the rest of the buffer, which is what makes it
+  testable — an undo that is wrong hands back a file that is not the one the user had, and
+  the only way to know it is right is to run it where no screen is involved. The log holds
+  256 changes and 8 KB of removed text; a session that exhausts either gives up its oldest
+  changes, never its newest, and says so on the status line.
+
+  Redo is deliberately absent. `u` repeats backwards, in the shape `vim` has, rather than
+  toggling the way `vi` does — a toggle punishes the second press.
+
+- **Search in `/bin/edit`: `/` to find, `n` and `N` to repeat.** Plain substrings, no
+  patterns; both directions wrap, and the status line says when they did. An empty pattern
+  after `/` repeats the last one. `:` and `/` read their line through the same function
+  rather than two copies of one.
+
+### Fixed
+
+- **A typed command line longer than the screen is wide is now redrawn in full.** It was
+  drawn only on its last row, because every redraw reached column zero with a CUB and CUB
+  stops at the start of the row it is on. Editing the middle of a wrapped line left the
+  rows above it showing whatever they had shown before.
+
+  The prompt is always printed after a newline, so it starts at column 0, and this
+  terminal wraps the moment column 80 is written rather than deferring it — which makes
+  prompt and line one run of cells where cell *n* is at row *n*/80, column *n*%80. Moves
+  are worked out in that arithmetic and made with CUU and CUD for the rows, so they cross
+  a row boundary. Nothing asks the terminal where it is, and nothing needs to: every move
+  is relative, and output that scrolls the screen moves the line and the cursor together.
+
+  The erase changed with it. A line shrinking from three rows to two leaves its third row
+  behind, and EL cannot reach it, so the redraw ends in ED — everything below the line is
+  blank anyway, the prompt being the last thing printed.
+
+- **Tab completion no longer keeps its own copy of the prompt.** Listing candidates
+  reprinted the prompt from a duplicate of those lines, so the line editor's idea of how
+  wide the prompt is would have been left behind by the one path that reprints it.
+
 ## [0.8.3-alpha] - 2026-08-23
 
 The thing the last three releases were for. v0.7.1 gave user space memory it could ask

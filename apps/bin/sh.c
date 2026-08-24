@@ -874,9 +874,20 @@ void my_custom_handler(void) {
     sys_sigreturn();
 }
 
+/* Defined with the line editor further down, and needed here for the one thing
+ * this prompt has to do about escape sequences: swallow them. */
+static int read_escape_key(void);
+
 /**
  * @brief Reads a line from the user.
- * 
+ *
+ * Deliberately not the line editor the command prompt uses. There is nothing to
+ * navigate in a password and nothing to recall, and moving a cursor through a
+ * field displayed as asterisks would be a way to get it wrong without being able
+ * to see it. Escape sequences are consumed and ignored - the arrow keys now send
+ * three bytes each, and two of them are printable, so a shell that let them
+ * through would put "[A" in the password.
+ *
  * @param buf Buffer to store the line.
  * @param hide Whether to hide characters (e.g., for passwords).
  * @param max_len Maximum length of the buffer.
@@ -898,6 +909,9 @@ int read_line(char *buf, int hide, int max_len) {
         /* Nothing readable this time round - end of input, or a read that
          * produced no byte. Unchanged from before. */
         if (r <= 0) continue;
+
+        /* Swallowed whole. See the note above the function. */
+        if (c == 27) { read_escape_key(); continue; }
 
         if (c == '\n' || c == '\r') { buf[idx] = '\0'; printk("\n"); return 0; }
         else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } }
@@ -2261,6 +2275,221 @@ static void read_startup_files(void) {
     }
 }
 
+/*
+ * The line editor.
+ *
+ * Until v0.8.2 the arrow keys reached no program at all, so a typed line could
+ * only ever grow at its end and the only correction was backspace. The keyboard
+ * sends the sequences a terminal sends now, and this is the first thing in the
+ * system to read them.
+ *
+ * One screen row. The redraw below moves the cursor with CUB, which cannot cross
+ * a row boundary, so a line long enough to wrap past column 80 can still be
+ * typed and run but is redrawn only on its last row. Commands that long are rare
+ * and the alternative is tracking the wrap by hand for every edit; the limit is
+ * written down rather than worked around.
+ */
+
+/** @brief Not a key this editor acts on: a lone Escape, or a sequence it ignores. */
+#define KEY_NONE   0
+#define KEY_UP     1
+#define KEY_DOWN   2
+#define KEY_RIGHT  3
+#define KEY_LEFT   4
+#define KEY_HOME   5
+#define KEY_END    6
+#define KEY_DELETE 7
+
+/*
+ * One byte of pushback.
+ *
+ * An escape sequence is read one byte at a time and there is no way to tell the
+ * Escape key from the start of one without waiting for the next byte. Waiting is
+ * fine; throwing that byte away is not, because a user who presses Escape and
+ * then types a letter would lose the letter. It is held here and taken by the
+ * next read instead.
+ */
+static int shell_pushback = -1;
+
+/**
+ * @brief Reads one byte, taking the pushed-back one first.
+ * @param c Receives the byte.
+ * @return 1 on a byte, or what the read reported.
+ */
+static int shell_read_char(char *c) {
+    if (shell_pushback >= 0) {
+        *c = (char)shell_pushback;
+        shell_pushback = -1;
+        return 1;
+    }
+    return sys_read_char(c);
+}
+
+/**
+ * @brief Reads the rest of an escape sequence and names the key it stood for.
+ *
+ * Called with the Escape already consumed. Anything not understood is swallowed
+ * rather than printed - a sequence this shell has no use for must leave no mark,
+ * which is the same rule the terminal's own parser follows on the way out.
+ *
+ * @return One of the KEY_ constants.
+ */
+static int read_escape_key(void) {
+    char c = 0;
+
+    if (shell_read_char(&c) <= 0) return KEY_NONE;
+
+    /* Not a control sequence at all: the Escape key, followed by whatever the
+     * user typed next. That byte is theirs and goes back. */
+    if (c != '[') { shell_pushback = (unsigned char)c; return KEY_NONE; }
+
+    if (shell_read_char(&c) <= 0) return KEY_NONE;
+
+    switch (c) {
+        case 'A': return KEY_UP;
+        case 'B': return KEY_DOWN;
+        case 'C': return KEY_RIGHT;
+        case 'D': return KEY_LEFT;
+        case 'H': return KEY_HOME;
+        case 'F': return KEY_END;
+        default:  break;
+    }
+
+    /* The numbered keys: a decimal parameter closed by '~'. */
+    if (c >= '0' && c <= '9') {
+        int n = 0;
+        while (c >= '0' && c <= '9') {
+            n = n * 10 + (c - '0');
+            if (shell_read_char(&c) <= 0) return KEY_NONE;
+        }
+        if (c != '~') return KEY_NONE;
+        if (n == 3) return KEY_DELETE;
+        /* 2 is Insert and 5 and 6 are the Page keys; nothing here acts on them. */
+    }
+
+    return KEY_NONE;
+}
+
+/**
+ * @brief Moves the cursor sideways by a column count.
+ * @param n Columns; zero or fewer does nothing.
+ * @param dir 'C' for right, 'D' for left.
+ */
+static void ansi_move(int n, char dir) {
+    if (n <= 0) return;
+
+    char seq[16];
+    char num[16];
+    int k = 0;
+
+    ft_itoa(n, num);
+    seq[k++] = 27;
+    seq[k++] = '[';
+    for (int i = 0; num[i] != '\0' && k < 13; i++) seq[k++] = num[i];
+    seq[k++] = dir;
+    seq[k] = '\0';
+
+    printk(seq);
+}
+
+/**
+ * @brief Prints the shell prompt.
+ *
+ * Split out because the history has to put it back: recalling a line rewrites
+ * everything from the start of the row, and the prompt is part of what was
+ * there.
+ */
+static void print_prompt(void) {
+    printk(current_username);
+    printk("@"); printk(current_hostname); printk(" ");
+    printk(current_path);
+    printk(current_uid == 0 ? " # " : " $ ");
+}
+
+/**
+ * @brief Redraws the line from the cursor rightwards and returns to it.
+ *
+ * Used after anything that changed the text under or after the cursor. The EL
+ * matters as much as the reprint: a deletion leaves the old last character on
+ * screen with nothing to overwrite it.
+ *
+ * @param buf Line contents.
+ * @param len Characters in the line.
+ * @param pos Cursor position within it.
+ */
+static void line_redraw_tail(char *buf, int len, int pos) {
+    buf[len] = '\0';
+    printk(&buf[pos]);
+    printk("\033[K");
+    ansi_move(len - pos, 'D');
+}
+
+/**
+ * @brief Redraws the line and leaves the cursor where it belongs.
+ *
+ * Column 0 is reached with a CUB large enough to be clamped there rather than
+ * with a carriage return, which this terminal does not implement.
+ *
+ * @param buf Line contents, null-terminated at len.
+ * @param len Characters in the line.
+ * @param pos Cursor position within it, 0 to len.
+ */
+static void line_refresh(char *buf, int len, int pos) {
+    buf[len] = '\0';
+
+    ansi_move(999, 'D');
+    print_prompt();
+    printk(buf);
+    printk("\033[K");          /* whatever the line used to be longer by */
+    ansi_move(len - pos, 'D');
+}
+
+/*
+ * Command history.
+ *
+ * A fixed ring of the last few lines, which is the same shape and the same size
+ * as the job table for the same reason: a shell that grew either without bound
+ * would be a shell that could be made to run out of memory by holding a key
+ * down.
+ *
+ * hist_view is how far back the user has walked: 0 is the line being typed, and
+ * anything else is an entry. The line being typed is saved when they first walk
+ * away from it, so that walking back returns it rather than an empty line.
+ */
+#define MAX_HISTORY 8
+
+static char history[MAX_HISTORY][256];
+static int history_count = 0;
+static int history_next = 0;
+
+/**
+ * @brief Records a line, unless it is empty or repeats the last one.
+ * @param line The line as entered.
+ */
+static void history_add(const char *line) {
+    if (line[0] == '\0') return;
+
+    if (history_count > 0) {
+        int last = (history_next + MAX_HISTORY - 1) % MAX_HISTORY;
+        if (ft_strcmp(history[last], line) == 0) return;
+    }
+
+    ft_strncpy(history[history_next], line, 255);
+    history[history_next][255] = '\0';
+    history_next = (history_next + 1) % MAX_HISTORY;
+    if (history_count < MAX_HISTORY) history_count++;
+}
+
+/**
+ * @brief Fetches an entry counted backwards from the most recent.
+ * @param back 1 is the most recent, history_count the oldest.
+ * @return The line, or 0 when there is no such entry.
+ */
+static const char *history_at(int back) {
+    if (back < 1 || back > history_count) return 0;
+    return history[(history_next + MAX_HISTORY - back) % MAX_HISTORY];
+}
+
 /**
  * @brief Main entry point for the shell process.
  *
@@ -2365,19 +2594,20 @@ void main(void) {
         jobs_reap();
 
         printk("\n");
-        printk(current_username);
-        printk("@"); printk(current_hostname); printk(" ");
-        printk(current_path); 
-        
-        if (current_uid == 0) printk(" # ");
-        else printk(" $ ");
+        print_prompt();
 
-        int idx = 0;
+        int len = 0;              /* characters in the line */
+        int pos = 0;              /* where the cursor sits within them */
         int interrupted = 0;
+        int hist_view = 0;        /* 0 is the line being typed */
+        char hist_saved[256];
 
-    while (1) {
+        hist_saved[0] = '\0';
+        cmd_buf[0] = '\0';
+
+        while (1) {
             char c = 0;
-            int r = sys_read_char(&c);
+            int r = shell_read_char(&c);
 
             /*
              * Ctrl-C at the prompt. The half-typed line is thrown away and the
@@ -2389,11 +2619,97 @@ void main(void) {
             if (r == E_INTR) { interrupted = 1; break; }
             if (r <= 0) continue;
 
-            if (c == '\n' || c == '\r') { cmd_buf[idx] = '\0'; printk("\n"); break; }
-            else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } }
-            else if (c == '\t') { cmd_buf[idx] = '\0'; handle_tab_completion(cmd_buf, &idx); }
-            else if (c >= 32 && c <= 126 && idx < 254) {
-                char str[2] = {c, '\0'}; printk(str); cmd_buf[idx++] = c;
+            if (c == 27) {
+                int key = read_escape_key();
+
+                if (key == KEY_LEFT) {
+                    if (pos > 0) { pos--; ansi_move(1, 'D'); }
+                } else if (key == KEY_RIGHT) {
+                    if (pos < len) { pos++; ansi_move(1, 'C'); }
+                } else if (key == KEY_HOME) {
+                    ansi_move(pos, 'D');
+                    pos = 0;
+                } else if (key == KEY_END) {
+                    ansi_move(len - pos, 'C');
+                    pos = len;
+                } else if (key == KEY_DELETE) {
+                    if (pos < len) {
+                        for (int i = pos; i < len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
+                        len--;
+                        line_redraw_tail(cmd_buf, len, pos);
+                    }
+                } else if (key == KEY_UP || key == KEY_DOWN) {
+                    /*
+                     * The line being typed is saved on the way out and restored
+                     * on the way back, so that walking through the history and
+                     * returning does not cost the user what they had started.
+                     */
+                    int moved = 0;
+
+                    if (key == KEY_UP && hist_view < history_count) {
+                        if (hist_view == 0) {
+                            cmd_buf[len] = '\0';
+                            ft_strncpy(hist_saved, cmd_buf, 255);
+                            hist_saved[255] = '\0';
+                        }
+                        hist_view++;
+                        moved = 1;
+                    } else if (key == KEY_DOWN && hist_view > 0) {
+                        hist_view--;
+                        moved = 1;
+                    }
+
+                    if (moved) {
+                        const char *line = (hist_view == 0) ? hist_saved
+                                                            : history_at(hist_view);
+                        if (line == 0) line = "";
+
+                        ft_strncpy(cmd_buf, line, 255);
+                        cmd_buf[255] = '\0';
+                        len = ft_strlen(cmd_buf);
+                        if (len > 254) len = 254;
+                        pos = len;
+
+                        line_refresh(cmd_buf, len, pos);
+                    }
+                }
+                continue;
+            }
+
+            if (c == '\n' || c == '\r') { cmd_buf[len] = '\0'; printk("\n"); break; }
+
+            if (c == '\b') {
+                if (pos > 0) {
+                    for (int i = pos - 1; i < len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
+                    len--;
+                    pos--;
+                    printk("\b");
+                    line_redraw_tail(cmd_buf, len, pos);
+                }
+                continue;
+            }
+
+            if (c == '\t') {
+                /* Completion appends to the line, so it means nothing anywhere
+                 * but at the end of it. */
+                if (pos == len) {
+                    cmd_buf[len] = '\0';
+                    handle_tab_completion(cmd_buf, &len);
+                    pos = len;
+                }
+                continue;
+            }
+
+            if (c >= 32 && c <= 126 && len < 254) {
+                for (int i = len; i > pos; i--) cmd_buf[i] = cmd_buf[i - 1];
+                cmd_buf[pos] = c;
+                len++;
+
+                char str[2] = { c, '\0' };
+                printk(str);
+                pos++;
+
+                line_redraw_tail(cmd_buf, len, pos);
             }
         }
 
@@ -2404,7 +2720,12 @@ void main(void) {
             last_exit_status = 130;
             continue;
         }
-        if (idx == 0) continue;
+        if (len == 0) continue;
+
+        /* Recorded before the line is taken apart: the parser writes null bytes
+         * into cmd_buf at every && and ||, so by the time anything runs there is
+         * no whole line left to remember. */
+        history_add(cmd_buf);
 
         char *current_cmd = cmd_buf;
         int skip_execution = 0;

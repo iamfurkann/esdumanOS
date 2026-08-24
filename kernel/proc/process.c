@@ -1046,11 +1046,13 @@ void stop_task(process_t *victim, int sig_num) {
         victim->pending_signals &= ~(1u << sig_num);
     }
 
-    /* DEBUG rather than INFO, which is the level the screen shows. Stopping and
-     * continuing are routine and user-initiated - a line of kernel log over the
-     * prompt on every Ctrl-Z is noise, and the record is still in the ring for
-     * dmesg. */
-    klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Stopped by signal: PID", victim->pid);
+    /* Kept, not printed. Stopping is routine and the user did it on purpose; a
+     * line of kernel log over the prompt on every Ctrl-Z says nothing they do not
+     * already know, and over a full-screen program it lands in the middle of the
+     * display. This was demoted to DEBUG for that in v0.8.1, which was the wrong
+     * tool: one threshold gates the ring as well as the console, so the record
+     * was not hidden but discarded - gone from dmesg too. */
+    klog_record_int(LOG_LEVEL_INFO, "SIGNAL", "Stopped by signal: PID", victim->pid);
 
     /*
      * Tell the parent, and tell it the same way reap_task() does.
@@ -1170,7 +1172,7 @@ void continue_task(process_t *task) {
     }
 
     task->stopped_wait_reason = WAIT_NONE;
-    klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Continued by signal: PID", task->pid);
+    klog_record_int(LOG_LEVEL_INFO, "SIGNAL", "Continued by signal: PID", task->pid);
 }
 
 /**
@@ -1766,16 +1768,11 @@ void send_user_signal(int target_pid, int sig_num) {
                      * signalled child with. exit_code is masked to 8 bits on the
                      * exit() path, and 128 + 15 still fits. */
                     p->exit_code = 128 + sig_num;
-                    /* DEBUG rather than INFO, which is the level the console
-                     * shows. A process ending because the user pressed Ctrl-C is
-                     * the user's own doing, and a line of kernel log over the
-                     * prompt every time is noise - over a full-screen program it
-                     * is worse than noise. The cost is real and worth saying: a
-                     * DEBUG record at the default threshold is discarded rather
-                     * than hidden, so it is not in the ring for dmesg either.
-                     * Separating the console level from the ring level is the
-                     * honest fix and belongs to a release about the log. */
-                    klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Terminated by signal: PID", p->pid);
+                    /* Kept at INFO and not printed. A process ending because the
+                     * user pressed Ctrl-C is the user's own doing and the "^C" is
+                     * already on screen; the log line adds nothing and lands in
+                     * the middle of a full-screen program's display. */
+                    klog_record_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by signal: PID", p->pid);
                     reap_task(p);
                     return;
                 }
@@ -1952,7 +1949,7 @@ void apply_default_signal_action(arch_regs_t *regs) {
             curr->pending_signals &= ~(1 << i);
             curr->exit_code = 128 + i;
 
-            klog_int(LOG_LEVEL_DEBUG, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
+            klog_record_int(LOG_LEVEL_INFO, "SIGNAL", "Terminated by its own signal: PID", curr->pid);
             exit_current_process(regs);
             return;
         }

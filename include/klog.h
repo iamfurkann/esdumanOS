@@ -122,11 +122,37 @@ void klog_hex(int level, const char *module, const char *message, uint32_t hex_v
  * print a green "[OK] subsystem up" line of their own, and logging them through
  * klog() would print them a second time in a different shape.
  *
+ * Also for an event that should be kept and should not be watched. Stopping a
+ * job, continuing it and ending one with a signal are all things the user did on
+ * purpose and can see the result of; a line of kernel log over the prompt says
+ * nothing they do not already know, and over a full-screen program it lands in
+ * the middle of the display.
+ *
+ * This is the tool for that, and lowering the level is not. There is one
+ * threshold and it gates the ring as well as the console, so a record demoted to
+ * DEBUG to keep it off the screen is a record that is discarded rather than
+ * hidden - gone from dmesg too. Record it at the level it deserves and do not
+ * print it.
+ *
  * @param level Severity.
  * @param module Subsystem name.
  * @param message The text.
  */
 void klog_record(int level, const char *module, const char *message);
+
+/**
+ * @brief Records a line with an integer value, without printing it.
+ *
+ * klog_record() with the tail klog_int() appends, for the same reason: most of
+ * the events worth keeping quietly are about a particular process, and the pid
+ * is the whole of what makes the record useful afterwards.
+ *
+ * @param level Severity.
+ * @param module Subsystem name.
+ * @param message The text.
+ * @param val The integer value to append.
+ */
+void klog_record_int(int level, const char *module, const char *message, int val);
 
 /**
  * @brief Records a message that came from a user-space program.

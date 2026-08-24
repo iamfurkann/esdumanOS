@@ -174,6 +174,40 @@ void run_kbd_tests(void) {
     assert_key(SC_PGUP, "\033[5~", "[KBD] and without Shift it reaches the program");
 
     /* ------------------------------------------------------------------
+     * The controller's fake shift.
+     *
+     * A real keyboard does not send what one would expect for Shift with an
+     * extended key: the controller cancels the shift first and restores it
+     * afterwards, so Shift with Page Up arrives as E0 AA, E0 49 - the AA being a
+     * shift release the user never performed. Acting on it leaves the modifier
+     * clear at exactly the moment the key that needs it arrives, which is how
+     * scrollback on Shift with the Page keys shipped in v0.8.2 unable to work at
+     * all. The prefix is the whole of the distinction: a real shift release has
+     * no E0 before it.
+     * ------------------------------------------------------------------ */
+    kbd_drain();
+    keyboard_handle_scancode(SC_SHIFT_DOWN);
+
+    keyboard_handle_scancode(0xE0);
+    keyboard_handle_scancode(0xAA);          /* fake release: must change nothing */
+    keyboard_handle_scancode(0xE0);
+    keyboard_handle_scancode(SC_PGUP);
+    kbd_take(got, sizeof(got));
+
+    KTEST_ASSERT(got[0] == '\0',
+                 "[STRICT] [KBD] the controller's fake shift release does not cancel a held Shift");
+
+    keyboard_handle_scancode(0xE0);
+    keyboard_handle_scancode(0x2A);          /* fake press: must change nothing either */
+    keyboard_handle_scancode(SC_SHIFT_UP);
+
+    kbd_press(SC_PGUP, got, sizeof(got));
+    KTEST_ASSERT(ft_strcmp(got, "\033[5~") == 0,
+                 "[STRICT] [KBD] and a real Shift release still ends the scrollback binding");
+
+    terminal_scroll_down();
+
+    /* ------------------------------------------------------------------
      * A key release produces nothing at all.
      * ------------------------------------------------------------------ */
     kbd_press(SC_A | 0x80, got, sizeof(got));

@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3-alpha] - 2026-08-23
+
+The thing the last three releases were for. v0.7.1 gave user space memory it could ask
+for, v0.8.0 taught the terminal to take orders, v0.8.1 made a program something you could
+put down and pick up again, and v0.8.2 gave the keyboard the keys to move a cursor with.
+None of them had a consumer. This one is it.
+
+### Added
+
+- **`/bin/edit`, a modal text editor.** In the shape `vi` has: keys are commands until
+  `i` puts it in insert mode and Escape brings it back. `h j k l` and the arrows move,
+  `0` `$` Home and End go to the ends of a line, `gg` and `G` to the ends of the file;
+  `i a A o O` insert, `x` and `dd` delete; `:w` writes, `:q` quits, `:q!` discards,
+  `:wq` does both and `:<number>` jumps to a line. Ctrl-L redraws.
+
+  Modal rather than modeless because of what this system has, not out of nostalgia:
+  there is no Alt and nothing past F3, so a nano-shaped editor would have to spend
+  Ctrl-letter combinations on its commands — and Ctrl-C, Ctrl-D and Ctrl-Z are already
+  the terminal's, which is exactly the set such an editor wants for quit, save and cut.
+
+  Ctrl-C is declined, because throwing away an unsaved buffer should take more than one
+  key. Ctrl-Z is not: stopping the editor and bringing it back with `fg` is what the job
+  control releases were for, and it catches `SIGCONT` to repair the screen the shell drew
+  on while it was away — the delivery v0.8.2 added exists for exactly this.
+
+  A file is at most 64 KB, which is the most `MAX_FILE_WRITE_BYTES` will write back. The
+  buffer is one allocation of that size through `umalloc()`, which at that size takes a
+  mapping of its own — the first real user of the `mmap` v0.7.1 added.
+
+- **`include/editbuf.h`**, the line arithmetic the editor is built on, header-only and
+  pure. It makes no system calls and touches no globals, which is what lets the test
+  suite include it: `/bin/edit` is a freestanding translation unit with no link step, so
+  logic that is not in a header is logic the suite cannot reach. `umalloc.h` is
+  header-only for the same reason.
+
+### Fixed
+
+- **Scrollback on Shift with the Page keys never worked.** It shipped that way in v0.8.2
+  and could not have worked on any keyboard: pressing an extended key while Shift is held
+  makes the controller cancel the shift first and restore it afterwards, so Shift with
+  Page Up arrives as `E0 AA`, `E0 49` — the `AA` being a shift *release* the user never
+  performed. The driver acted on it and then tested the modifier a byte later, so it was
+  always clear at the moment it mattered. A real shift has no `E0` in front of it, which
+  is the whole of the distinction; the fake ones are thrown away now.
+
+- **The terminal refreshes once per write, not once per escape sequence.** It repainted
+  all 80 by 24 cells for every completed sequence and reprogrammed the hardware cursor
+  for every printable character. A shell writing a prompt never noticed; a program
+  drawing a screen could not survive it — one editor frame came to roughly fifty full
+  repaints and seven thousand port writes, and under emulation each of those port writes
+  is a trap out of the guest. What the screen looks like halfway through a write is
+  something nobody can see, so the refresh is now owed and paid once at the end. Every
+  program gets it, `printk()` included.
+
+- **A record kept off the console is no longer a record thrown away.** `klog_record()`
+  writes to the ring without printing, and it now has an integer form. Four signal
+  records that had been demoted to `DEBUG` to keep them off the screen are back at
+  `INFO` and silent: there is one threshold and it gates the ring as well as the console,
+  so demoting a record to hide it discarded it instead — gone from `dmesg` too. Lowering
+  the level was the wrong tool and this is the right one.
+
+### Known issues
+
+- **No undo.** An editor without one is an editor you have to be careful with; `:q!` is
+  the whole of the recovery.
+- **No search, no yank and no put.** `dd` deletes a line and nothing holds it afterwards.
+- **A line longer than the screen scrolls sideways** rather than wrapping, and the file
+  is capped at 64 KB — both are what the terminal and the file system can do.
+- **A file that ends in a newline shows an empty line after it**, where `vi` would show
+  only the text. A newline separates lines here rather than ending them, which is the
+  honest reading for a buffer that is the file's bytes: pressing Enter at the end of the
+  last line produces exactly that newline, and hiding the resulting line would hide the
+  one thing the key just did.
+- **Ctrl-Z still does not reach the guest under `-display curses`.** Stopping the editor
+  from a curses session needs the QEMU monitor's `sendkey ctrl-z`.
+
 ## [0.8.2-alpha] - 2026-08-23
 
 v0.8.0 taught the terminal to take orders and said plainly that nothing in user space

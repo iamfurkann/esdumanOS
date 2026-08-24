@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.8.2--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.8.3--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.8.2-alpha
+**Version:** 0.8.3-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -270,6 +270,17 @@ is the only honest way to tell the Escape key from the first byte of a sequence 
 timer, and `SIGTTIN`, which parks a background job that tries to read the terminal instead
 of letting it race the shell for every keystroke.
 
+v0.8.3 is what those were for. `/bin/edit` is the first program here to draw a full
+screen, and it is the first consumer of every one of them: the escape sequences v0.8.0
+taught the terminal, the memory v0.7.1 let a program ask for, the keys v0.8.2 gave the
+keyboard, and the stop and continue v0.8.1 made a job survive. It is modal in the shape
+`vi` has, which is a decision about this machine rather than about taste - there is no
+Alt and nothing past F3, so a modeless editor would have to spend Ctrl-letter
+combinations on its commands, and Ctrl-C, Ctrl-D and Ctrl-Z already belong to the
+terminal. The arithmetic it runs on lives in a header so that the test suite can reach
+it, because a program in `/bin` has no link step and logic outside a header is logic
+nothing can assert about.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -278,8 +289,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 16 user-space programs and 33 shell builtins
-- 33 kernel self-test modules and CI pipeline
+- 17 user-space programs and 33 shell builtins
+- 34 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -357,7 +368,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
-| **Programs** | 16 standalone ELF binaries: `sh`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat` |
+| **Programs** | 17 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -365,7 +376,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 33 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 34 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 54 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -755,6 +766,32 @@ exit                  Exit the shell
 `echo` and `clear` are not builtins — they are ELF programs in `/bin`, reached
 through the same path as any other program. `echo` does not implement `-n`.
 
+### The Editor
+
+`edit <file>` opens the system's text editor. It is modal, in the shape `vi` has: keys
+are commands until `i` puts it in insert mode, and Escape brings it back. A file that
+does not exist yet is not an error — it is a new file, and `:w` writes it.
+
+| | |
+|---|---|
+| **Moving** | `h` `j` `k` `l` or the arrows, `0` and `$` or Home and End, `gg` and `G` for the first and last line, Page Up and Page Down |
+| **Editing** | `i` insert here, `a` after the cursor, `A` at the end of the line, `o` and `O` open a line below or above, `x` delete a character, `dd` delete a line |
+| **Commands** | `:w` write, `:w <name>` write as, `:q` quit, `:q!` quit without writing, `:wq` both, `:<number>` jump to a line |
+| **Other** | Ctrl-L redraws, Ctrl-Z stops it and `fg` brings it back with the screen intact |
+
+Ctrl-C is declined: throwing away an unsaved buffer should take more than one key, and
+`:q!` is there for anyone who means it. A file is at most 64 KB, which is the most this
+file system will write back.
+
+A newline separates lines rather than ending them, so a file that ends in one shows an
+empty line after it — where `vi` would show only the text. That is the honest reading for
+an editor whose buffer is the file's bytes: pressing Enter at the end of the last line
+produces exactly that newline, and a screen that did not show the new line would be
+hiding the one thing the key just did.
+
+It is the first program here to draw a full screen, and therefore the first consumer of
+the escape sequences v0.8.0 taught the terminal and the keys v0.8.2 taught the keyboard.
+
 **Operators:** Pipes (`cmd1 | cmd2 | cmd3`, up to four stages), output redirection
 (`cmd > file`), chaining (`cmd1 && cmd2`, `cmd1 || cmd2`).
 
@@ -873,6 +910,7 @@ filtered run proves one module, not the tree.
 | `test_signal.c` | Handler registration and pending-signal bookkeeping |
 | `test_jobctl.c` | Stopping and continuing a task: the state it remembers, who is told, and what happens to the terminal |
 | `test_kbd.c` | Scancode translation: which keys become escape sequences, which are consumed, and that a sequence is written whole or not at all |
+| `test_edit.c` | The line arithmetic `/bin/edit` is built on: where a line starts and ends, what a vertical move keeps, and what deleting one takes with it |
 | `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |

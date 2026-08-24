@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2-alpha] - 2026-08-23
+
+v0.8.0 taught the terminal to take orders and said plainly that nothing in user space
+sent it any. The consumer is a text editor, and an editor could not be written: the
+arrow keys reached no program at all, a program could not tell the Escape key from the
+start of an escape sequence, and one that had been stopped and resumed had no way to
+learn it must redraw. This release is the input half, and the shell is its first user.
+
+### Added
+
+- **The navigation keys reach programs.** The keyboard sends what a terminal sends —
+  `ESC [ A` through `ESC [ D` for the arrows, `ESC [ H` and `ESC [ F` for Home and End,
+  and the numbered forms for Insert, Delete and the Page keys. Until now the arrows were
+  bound to the scrollback and the rest landed on zero entries in the layout tables and
+  were dropped without trace.
+
+  A sequence is placed in the input ring whole or not at all. A reader handed the first
+  two bytes of an arrow key has no way to know the rest was dropped: it waits for a byte
+  that is not coming, or takes the next unrelated key as the tail of the sequence.
+
+- **The shell edits the line.** Left and right move within it and typing inserts where
+  the cursor is, Home and End jump to the ends, Delete removes forward. Up and down walk
+  the last eight commands, and the line being typed is saved when you walk away from it.
+  This is the first thing in the system to use the escape sequences v0.8.0 taught the
+  terminal to draw.
+
+- **`POLL` (63) asks whether a read would block.** One byte both ends the Escape key and
+  begins a sequence, and there is no timer fine enough to tell them apart by how long the
+  next byte takes. Asking whether a byte is already waiting does tell them apart, and it
+  is the only question a program can ask that does not consume a byte it may have to give
+  back. End of file counts as "would not block": a read that returns zero has returned.
+
+- **`SIGTTIN` (21) stops a background job that reads the terminal.** There is one input
+  ring and every blocked reader is woken when a key arrives, so such a job did not share
+  the keyboard with the shell — it raced it for each keystroke, and half of what the user
+  typed vanished into a job they had deliberately put out of the way. Stopping loses
+  nothing: `jobs` shows it and `fg` gives it the terminal it was asking for.
+
+- **`SIGCONT` is delivered to a process that registered a handler.** Being runnable again
+  is the whole of the default action, but a program that draws has to repair what the
+  shell wrote over its screen while it was stopped, and there was no moment at which it
+  could find out that it had been.
+
+### Changed
+
+- **Scrollback moved from the arrow keys to Shift with the Page keys**, which is where
+  every terminal emulator puts it. It had the arrows because nothing else wanted them;
+  something does now, and a key the driver consumes is a key no program will ever see.
+
+- **A process ending by signal no longer prints a line of kernel log.** Those records
+  moved from `INFO`, which the console shows, to `DEBUG`. A process ending because the
+  user pressed Ctrl-C is the user's own doing, and over a full-screen program the line
+  lands in the middle of the display. The cost is worth stating: a `DEBUG` record at the
+  default threshold is discarded rather than hidden, so it is not in the ring for `dmesg`
+  either. Separating the console level from the ring level is the honest fix and belongs
+  to a release about the log.
+
+### Known issues
+
+- **The line editor works within one screen row.** The cursor is moved with `CUB`, which
+  cannot cross a row boundary, so a command long enough to wrap past column 80 can still
+  be typed and run but is redrawn only on its last row.
+- **`SIGTTOU` does not exist.** A background job that *writes* to the terminal still
+  does, interleaving its output with whatever the shell is drawing.
+- **A task that catches or ignores `SIGTTIN` reads from the background as before.** POSIX
+  returns `EIO` there; a program that went to the trouble of catching the signal has said
+  it knows what it is doing.
+- **The Escape key does nothing at the prompt**, and the key pressed after it is held for
+  one round while the shell decides whether a sequence is starting. Nothing is lost — the
+  byte is put back — but a lone Escape has no effect of its own.
+
 ## [0.8.1-alpha] - 2026-08-22
 
 v0.8.0 gave the user a way to stop what they had just started. This one gives them a

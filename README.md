@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.8.1--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.8.2--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.8.1-alpha
+**Version:** 0.8.2-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -258,6 +258,18 @@ what lets the shell own a foreground command the way it already owned a pipeline
 without a pid there was no group to put it in, no way to hand it the terminal, and
 nothing to name when the user stopped it.
 
+v0.8.2 gives the keyboard the other half of what v0.8.0 gave the screen. The terminal
+could be told where to draw and no key could tell a program where to move: the arrows
+were bound to the scrollback and Home, End, Delete and the Page keys landed on zero
+entries in the layout tables and were dropped without trace. They send the sequences a
+terminal sends now, whole or not at all, and scrollback moves to Shift with the Page keys
+because a key the driver consumes is a key no program will ever see. The shell is the
+first user — the line grows a cursor, and the last eight commands come back with the up
+arrow. Two more things an interactive program needs arrived with them: `POLL` (63), which
+is the only honest way to tell the Escape key from the first byte of a sequence without a
+timer, and `SIGTTIN`, which parks a background job that tries to read the terminal instead
+of letting it race the shell for every keystroke.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -267,7 +279,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 16 user-space programs and 33 shell builtins
-- 32 kernel self-test modules and CI pipeline
+- 33 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -285,7 +297,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 60 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 61 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -353,7 +365,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 32 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 33 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 54 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -647,7 +659,8 @@ sure what the current build produces.
 | Key | Action |
 |-----|--------|
 | F1 / F2 / F3 | Switch between virtual terminals |
-| Up / Down Arrow | Scroll terminal history |
+| Shift-PgUp / Shift-PgDn | Scroll terminal history |
+| Arrows, Home, End, Delete, PgUp, PgDn | Sent to the program as escape sequences |
 | AltGr | Access Turkish keyboard layout characters |
 | Ctrl-D | End input for a program reading the keyboard (`cat`, `grep`, `head`, `wc`) |
 | Ctrl-C | Interrupt the foreground job — every process in it, not just one |
@@ -655,6 +668,17 @@ sure what the current build produces.
 
 Ctrl with a letter produces that letter's control code, which is how Ctrl-D becomes the
 end-of-file byte. Ctrl with anything else is passed through unchanged.
+
+The navigation keys send what a terminal sends: `ESC [ A` through `ESC [ D` for the
+arrows, `ESC [ H` and `ESC [ F` for Home and End, and `ESC [ 2 ~`, `ESC [ 3 ~`,
+`ESC [ 5 ~`, `ESC [ 6 ~` for Insert, Delete and the Page keys. A sequence is placed in the
+input ring whole or not at all, because a reader handed half of one would wait for a byte
+that is not coming.
+
+**Scrollback moved off the arrow keys in v0.8.2.** It had them because nothing else
+wanted them; the arrows are now the only way a program can be told where to move, and a
+key the driver consumes is a key no program will ever see. Shift with the Page keys is
+where every terminal emulator puts scrollback.
 
 Ctrl-C and Ctrl-Z are consumed by the driver rather than delivered as bytes: they name
 the foreground process group and send it a signal. A program that wants the interrupt
@@ -737,6 +761,13 @@ through the same path as any other program. `echo` does not implement `-n`.
 Four stages is a process budget rather than a preference: an external stage costs two
 tasks, because the forked child runs the program through `exec()`, which creates a task of
 its own. A fifth is refused with a message, as are a bare `|` and a backgrounded pipeline.
+
+**Editing the line.** The left and right arrows move within the line and typing inserts
+where the cursor is; Home and End jump to the ends, Delete removes forward and Backspace
+back. The up and down arrows walk the last eight commands, and the line being typed is
+kept while you do, so walking back returns it rather than an empty prompt. The password
+prompt deliberately has none of this — there is nothing to navigate in a field displayed
+as asterisks.
 
 A command word containing a `/` is a path and is never matched against the builtin table,
 so `rm` is the builtin and `/bin/rm` is the program of that name.
@@ -841,6 +872,7 @@ filtered run proves one module, not the tree.
 | `test_process.c` | Scheduler, live-frame detection, rwlocks, syscall restart, idle task |
 | `test_signal.c` | Handler registration and pending-signal bookkeeping |
 | `test_jobctl.c` | Stopping and continuing a task: the state it remembers, who is told, and what happens to the terminal |
+| `test_kbd.c` | Scancode translation: which keys become escape sequences, which are consumed, and that a sequence is written whole or not at all |
 | `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
@@ -992,6 +1024,7 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | 60 | `SETPGID` | Place a process in a process group; the caller may move itself or a child |
 | 61 | `TCSETPGRP` | Hand the terminal to a process group, which is what Ctrl-C reaches |
 | 62 | `GETPGID` | Read a process's group |
+| 63 | `POLL` | Whether a read on a descriptor would block: 1 no, 0 yes. End of file counts as "no" |
 | 99 | `YIELD` | Voluntarily yield the CPU |
 
 `TIME` fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space the
@@ -1110,11 +1143,15 @@ Four signals terminate a process that has not handled them: `SIGKILL` (9), `SIGT
 (15), `SIGPIPE` (13) and `SIGINT` (2). The exit status is 128 plus the signal number, so
 a `wait()` reporting 141 means the child was killed writing to a broken pipe.
 
-One signal stops it instead: `SIGTSTP` (20), which is what Ctrl-Z sends. A stopped
-process keeps its memory, its descriptors and the instruction it was on, and `SIGCONT`
-(18) puts it back. `SIGCONT` is acted on where it is sent rather than delivered — a
-stopped process never reaches a delivery point of its own — and so it is the one signal
-a program cannot catch.
+Two stop it instead: `SIGTSTP` (20), which is what Ctrl-Z sends, and `SIGTTIN` (21),
+which a background job gets for trying to read the terminal. A stopped process keeps its
+memory, its descriptors and the instruction it was on, and `SIGCONT` (18) puts it back.
+
+`SIGCONT` is acted on where it is sent rather than where it is delivered, because a
+stopped process never reaches a delivery point of its own. A process that registered a
+handler is told as well, once it is running again: the default action needs no delivery,
+but a full-screen program has to redraw what the shell wrote over its display while it
+was away, and there is no other moment it could learn to.
 
 Every other signal is recorded and dropped when no handler is registered.
 
@@ -1257,21 +1294,25 @@ The following are known constraints of the current implementation. These are doc
   default action for an unhandled signal is applied on the way out of a syscall, so a
   task spinning without one keeps its pending signal until it makes its next call. A
   registered handler is delivered at the next context switch either way.
-- **A job continued with `bg` competes with the shell for the keyboard** if it reads
-  standard input. Unix answers this with `SIGTTIN`, which stops a background process
-  that tries to read the terminal rather than letting it take the user's keystrokes;
-  that signal does not exist here yet.
+- **The line editor works within one screen row.** The cursor is moved with `CUB`, which
+  cannot cross a row boundary, so a command long enough to wrap past column 80 can still
+  be typed and run but is redrawn only on its last row. The alternative is tracking the
+  wrap by hand for every edit, and commands that long are rare.
 - **Ctrl-Z at an idle prompt throws away the line being typed**, exactly as Ctrl-C
   does. The shell ignores the signal, but the read it is blocked in is still cut short
   and has no way to tell which signal cut it.
-- **There is no `SIGSTOP`.** Stopping is `SIG_TSTP` only, and `SIG_TSTP` is catchable —
-  which is what lets the shell and init decline it. An uncatchable stop would reach
-  init the same way and there would be nothing either of them could do about it.
+- **There is no `SIGSTOP`.** Stopping is `SIG_TSTP` and `SIG_TTIN`, and both are
+  catchable — which is what lets the shell and init decline them. An uncatchable stop
+  would reach init the same way and there would be nothing either of them could do
+  about it.
 - **`SIGPIPE` is the only signal a program receives without asking.** `SIGKILL`,
   `SIGTERM` and `SIGTSTP` still have to be sent with `kill` or a key. There is no
-  `SIGCHLD`, no `SIGALRM` delivered to user space, `SIGCONT` is acted on where it is
-  sent rather than delivered, and there is no way to block a signal rather than
-  ignoring it — the disposition is one of handler, default or ignore, with no mask.
+  `SIGCHLD`, no `SIGALRM` delivered to user space, `SIGCONT` reaches a program only if
+  it registered a handler, and there is no way to block a signal rather than ignoring
+  it — the disposition is one of handler, default or ignore, with no mask.
+- **`SIGTTOU` does not exist.** A background job that *writes* to the terminal still
+  does, interleaving its output with whatever the shell is drawing. Only reading is
+  stopped, which is the half that made the shell unusable.
 - **`meminfo`, `hexdump`, `stack` and `free` print from inside the kernel**, so their
   output goes to the screen whatever the calling process's descriptor 1 points at. They
   cannot be piped or redirected: `meminfo > mem.txt` creates an empty file. `ls` and

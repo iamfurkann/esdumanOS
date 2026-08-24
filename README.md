@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.8.4--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.9.0--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.8.4-alpha
+**Version:** 0.9.0-alpha "Vouch"
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -291,6 +291,19 @@ that wrapped past column 80. Neither needed anything from the kernel: the termin
 had the sequences since v0.8.0, and what was missing was arithmetic on the other side of
 the system call.
 
+v0.9.0 "Vouch" makes the disk say what it is. Nothing on it ever did: the directory
+table and the allocation table were read out of their sectors and used as they were,
+with no magic number, no version and no check — so a kernel could not tell one of its
+own images from an older one, from a disk belonging to something else, or from noise.
+A superblock in sector 0 answers that now, and it carries the geometry too, so a later
+layout change needs different values there rather than a new version of anything. The
+format change is the one thing that cannot be taken back, so everything it was short of
+went in together: permission bits, a group, creation and modification times, and entry
+ids wide enough to stop capping the file system at 256 files. The room came from the
+name field, which was 256 bytes of a 272-byte entry — at 64 it pays for all of it, for
+twice as many entries, and still costs less memory than before. An image from an
+earlier release is recognised and refused rather than read as though it were this one.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -305,7 +318,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 **What to expect:**
 - This is not production-ready software
 - You may encounter kernel panics, deadlocks, or unexpected behavior
-- Resource limits are intentionally constrained (16 processes, 2 MB disk, 128 MB RAM)
+- Resource limits are intentionally constrained (16 processes, 2 MB disk, 128 MB RAM,
+  512 file system entries, 64-character file names)
 - No networking, no GUI, no dynamic linking
 
 ---
@@ -348,7 +362,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates |
+| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. A superblock in sector 0 carries a magic number, a format version and the geometry the disk was laid out with; an unrecognised disk is refused rather than read. 512 entries of 96 bytes, each with an owner, a group, permission bits and creation and modification times |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
 | **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()` |
 | **DevFS** | `/dev/null`, `/dev/random`, `/dev/urandom` and `/dev/kmsg` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically, and `/dev/kmsg` streams log records with a per-process cursor |
@@ -541,7 +555,7 @@ unattended and so creates both accounts with the password `test`.
 | `mtools` | 4.0+ | FAT filesystem utilities (used by grub-mkrescue) |
 | `qemu-system-i386` | 5.0+ | x86 emulation |
 | `openssl` | 1.1+ | Build-time ELF encryption tooling |
-| `python3` | 3.6+ | Test and tooling scripts |
+| `python3` | 3.6+ | Not used by anything in this repository as of v0.9.0; kept in the install commands below because some distributions' GRUB image tooling wants it |
 
 The host may be 64-bit; `gcc-multilib` is what lets a 64-bit compiler emit the
 32-bit objects this kernel is built from, and it is what CI uses. A 32-bit host
@@ -911,7 +925,7 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
-| `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution |
+| `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, and the on-disk format: that an entry is exactly 96 bytes, that the superblock's geometry leaves room for the regions it describes, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened |
 | `test_memory.c` | Heap allocation, deallocation, read/write verification |
 | `test_pipe.c` | Pipe creation, ring buffer, EOF detection, syscall integration |
 | `test_security.c` | Authentication: wrong password, invalid UID, correct password |
@@ -937,7 +951,7 @@ filtered run proves one module, not the tree.
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
 | `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()` |
-| `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall |
+| `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall, and the conversions to and from the Unix epoch — checked against each other across sixty years, with the leap rules asserted as rules rather than as dates worked out by hand |
 
 The Ring 3 payload (`tests/user/ktest_user.c`) runs after these and reports its
 results back through a dedicated syscall. It is the only part of the suite that
@@ -1185,8 +1199,23 @@ user space. Two points are worth stating plainly:
   write to the disk can make `stat` report a wrong size; the read that follows
   fails, but the size on its own proves nothing.
 
-There is no `st_mtime`. The on-disk directory entry carries no timestamps and the
-RTC is not wired into the VFS, so any time reported here would be invented.
+`st_mtime` and `st_ctime` arrived with the v0.9.0 format, as seconds since the Unix
+epoch **in UTC**. `st_mtime` moves when the contents change and `st_ctime` when the entry
+does, so a rename touches the second and not the first. Zero means the field was never
+set, which nothing on a disk this kernel will mount can be — it refuses older formats —
+and it is reported as zero rather than as a date that would read like an answer.
+
+The syscall reports UTC and `stat` displays local time, with the offset printed
+alongside. Storage has to be UTC or the count is not an epoch: two files stamped either
+side of a timezone change would otherwise compare by what the clock said rather than by
+when it happened. Display does not — nobody reads their own files in UTC — so `/bin/stat`
+asks the clock for the offset the system is set to and puts it back on, printing
+`2026-08-24 12:00:00 +03` rather than the same instant as `09:00:00 UTC`.
+
+`st_mode` is reported and **not enforced**. The bits are stored on the entry and mean
+what they mean everywhere else, but access is still decided by `check_vfs_access()`,
+which compares names. Enforcing them, and giving `chmod` and `chown` something to do,
+is v0.9.1.
 
 ### IPC and Signals
 
@@ -1313,8 +1342,9 @@ The following are known constraints of the current implementation. These are doc
 |----------|-------|
 | Maximum processes | 16 (`MAX_TASKS`) |
 | File descriptors per process | 32 (`MAX_FD_PER_TASK`) |
-| Files in directory table | 256 (`MAX_FILES_IN_DIR`) |
-| Maximum filename length | 256 bytes (`MAX_FILENAME`) |
+| Files in directory table | 512 (`MAX_FILES_IN_DIR`) |
+| Maximum filename length | 64 bytes (`MAX_FILENAME`) |
+| Maximum path length | 256 bytes (`MAX_PATH`) |
 | Maximum disk size (FAT) | 2 MB (4096 sectors) |
 | Physical memory supported | 128 MB |
 | Pipe buffer size | 4 KB (`PIPE_SIZE`) |
@@ -1354,6 +1384,20 @@ The following are known constraints of the current implementation. These are doc
   default action for an unhandled signal is applied on the way out of a syscall, so a
   task spinning without one keeps its pending signal until it makes its next call. A
   registered handler is delivered at the next context switch either way.
+- **Permission bits are stored and reported but not enforced.** Every entry carries a
+  mode as of v0.9.0 and `stat` shows it, but `check_vfs_access()` still decides by
+  comparing an entry's name against `"tmp"`, `"root"` and `"shadow"`. There is no
+  `chmod` and no `chown`, because there would be nothing for them to change the
+  behaviour of. v0.9.1 replaces the name comparisons and adds both.
+- **A disk written before v0.9.0 cannot be read, and is refused rather than converted.**
+  The format changed and there is no converter: the kernel recognises an older image —
+  the old format never used sector 0, so a zero superblock over a non-zero directory
+  region can only be one thing — prints what happened, and writes nothing to it. Every
+  release ships a fresh `disk.img`, and `make run` starts from a blank one.
+- **There is no group database.** A task's `gid` starts equal to its `uid` and follows
+  it, so the group on a file is always its owner's. The field exists because the format
+  needs one and because a value taken from the creating task is a better answer than a
+  plausible-looking constant, not because groups mean anything yet.
 - **A wrapped command line is redrawn correctly only while its first row is on screen.**
   The line editor tracks the wrap itself as of v0.8.4 and moves between rows with `CUU`
   and `CUD`, but both clamp to the top of the visible screen, so a redraw cannot reach a
@@ -1446,8 +1490,8 @@ Near-term priorities for the project, roughly in order:
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
+| P1 | Enforce the permission bits v0.9.0 started storing: replace the name comparisons in `check_vfs_access()`, and add `chmod` and `chown` |
 | P2 | Setting the clock — the RTC is read and never written |
-| P3 | ANSI escape code support in terminal |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1462,8 +1506,11 @@ padding; supervisor-only kernel page permissions with `CR0.WP` enabled; address
 space teardown on exit with frame reclamation; ELF segment address validation
 (plus a fuzzer); BSS zeroing in the bootloader; block cache integration into the
 VFS read/write path; salted password hashing, now PBKDF2-HMAC-SHA256; this syscall
-reference; and moving the shell onto `fork`, which brought concurrent pipelines and job
-control in v0.5.2 and `SIGPIPE` in v0.5.3.
+reference; moving the shell onto `fork`, which brought concurrent pipelines and job
+control in v0.5.2 and `SIGPIPE` in v0.5.3; ANSI escape code support in the terminal,
+which landed in v0.8.0 and had been sitting here as a P3 for two releases after it did;
+and the on-disk format, which grew a superblock, timestamps, an owner group and
+permission bits in v0.9.0.
 
 ---
 

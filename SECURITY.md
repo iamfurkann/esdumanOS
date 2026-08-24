@@ -4,13 +4,16 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.4.x   | :white_check_mark: |
-| 0.3.x   | :x:                |
-| 0.2.x   | :x:                |
-| 0.1.x   | :x:                |
+| 0.9.x   | :white_check_mark: |
+| 0.8.x   | :x:                |
+| ≤ 0.7.x | :x:                |
 
-Only the current minor line is supported. Releases before 0.4.2 carry known
-memory-safety defects fixed in that patch and should not be used.
+Only the current minor line is supported. This table said 0.4.x for five minor
+releases; it is the current line that matters, and it is 0.9.x.
+
+Releases before 0.4.2 carry known memory-safety defects fixed in that patch and should
+not be used at all. Everything between 0.4.2 and 0.8.4 works but is unsupported, and
+0.9.0 will not read a disk written by any of them — see below.
 
 ## ⚠️ Important Notice
 
@@ -48,9 +51,36 @@ described inaccurately is worse than one described plainly — in either directi
 ### Memory and process protection
 
 - No ASLR (Address Space Layout Randomization).
-- No stack canaries in user-space programs. The kernel has stack protection.
-- No W^X for user pages.
+- **No stack canaries anywhere.** This said "none in user-space programs; the kernel has
+  stack protection", which was misleading in both halves: nothing is built with
+  `-fstack-protector`, kernel or user. What does exist is a guard page mapped below every
+  user stack, so a stack that grows past its allocation faults instead of running into
+  whatever is beneath it.
+- **No W^X for user pages, and it is not expressible here.** 32-bit paging without PAE
+  has no per-page execute bit at all, so a user page is readable, writable and
+  executable because the hardware offers no way to say otherwise. This is a property of
+  the paging mode rather than something left unimplemented.
+- Kernel pages are supervisor-only and `CR0.WP` is enabled, so a write through a
+  read-only mapping faults in Ring 0 as well as Ring 3.
 - Single address-space-per-process isolation only; no capability or MAC system.
+
+### File access control
+
+- **Permission bits are stored and reported but not enforced.** As of 0.9.0 every
+  directory entry carries a mode, an owner and a group, and `stat` reports them —
+  but `check_vfs_access()` still decides by comparing an entry's name against `"tmp"`,
+  `"root"` and `"shadow"`. Do not read a mode as a statement about who can open a file.
+  Enforcing them is 0.9.1.
+- **There is no group database.** A task's group id follows its user id, so a file's
+  group is always its owner. The field is filled from the creating task rather than from
+  a constant, but it carries no independent meaning yet.
+- **The directory table is read from the disk and largely trusted.** 0.9.0 added a
+  superblock, so an image this kernel does not recognise is refused rather than read —
+  which is what stops it writing its own tables over a foreign disk. Beyond the
+  superblock's geometry, though, the entries themselves are not validated: a crafted
+  image can still contain a parent chain that loops, which is why the access walk is
+  bounded by the table size rather than by reaching the root.
+- Root (uid 0) bypasses these checks entirely, as it does on any Unix.
 
 ### Other
 
@@ -93,11 +123,14 @@ Security fixes will be prioritized and released as patch versions when applicabl
 Please note that as a hobby/educational OS kernel, the security model is intentionally simplified. Reports about the known limitations listed above will be acknowledged but may not result in immediate changes.
 
 We welcome contributions that improve the security posture of esdumanOS. Currently open:
+- Enforcing the permission bits 0.9.0 started storing, and retiring the name comparisons
+  in `check_vfs_access()`
 - Deriving the disk key from a boot passphrase instead of a build-time constant
 - Persisting an entropy seed across boots
-- Adding stack canaries to user-space programs
+- Adding stack canaries, in the kernel and in user-space programs
 - Implementing ASLR
-- W^X enforcement for user pages
+- Validating the directory table on mount beyond the superblock's geometry, so a crafted
+  image cannot present a malformed tree in the first place
 
 Already done, so no longer needed: per-user password salting (PBKDF2-HMAC-SHA256 with a
 16-byte salt) and the entropy pool (interrupt-jitter sourced, with per-source budgets and

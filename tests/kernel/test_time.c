@@ -9,6 +9,14 @@
  * where the defect was, and which rtc_apply_timezone() exists as a separate
  * function to expose.
  *
+ * As of v0.9.0 it also covers the conversions between that broken-down form and
+ * seconds since the Unix epoch, which the disk format needs to stamp a file with
+ * a time two programs can compare. Date arithmetic is the kind of code that looks
+ * right: a leap year rule that is wrong is invisible three years out of four, and
+ * the century case comes round once in a lifetime - so the rules are asserted as
+ * rules, and the two conversions are checked against each other across sixty
+ * years rather than at a handful of dates.
+ *
  * This file is part of the esdumanOS test suite.
  */
 #include "ktest.h"
@@ -22,6 +30,139 @@ static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
     return ret;
+}
+
+/**
+ * @brief Builds a UTC time with every field set, for the epoch conversions.
+ */
+static esd_time_t utc_at(int year, int month, int day, int hour, int min, int sec) {
+    esd_time_t t;
+    t.year = (uint16_t)year;
+    t.month = (uint8_t)month;
+    t.day = (uint8_t)day;
+    t.hour = (uint8_t)hour;
+    t.minute = (uint8_t)min;
+    t.second = (uint8_t)sec;
+    t.tz_offset_hours = 0;
+    return t;
+}
+
+/**
+ * @brief Verifies the conversions between broken-down time and the epoch.
+ *
+ * Expected behavior:
+ * - Known instants convert to their known counts.
+ * - The two conversions are inverses across a long span of dates.
+ * - The offset the fields carry is taken back out, so an epoch is UTC.
+ *
+ * Edge cases covered:
+ * - The leap year rules, all three of them, tested as rules rather than as
+ *   epochs somebody worked out by hand.
+ * - An offset that carries the time out of its own day.
+ * - A date before the epoch, which has no count.
+ */
+static void run_epoch_tests(void) {
+    esd_time_t t, back;
+
+    /* ------------------------------------------------------------------
+     * Instants whose counts are not in dispute.
+     * ------------------------------------------------------------------ */
+    t = utc_at(1970, 1, 1, 0, 0, 0);
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 0,
+                 "[TIME] the epoch itself is zero seconds after the epoch");
+
+    t = utc_at(1970, 1, 2, 0, 0, 0);
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 86400,
+                 "[TIME] and the next day is one day after it");
+
+    t = utc_at(2000, 1, 1, 0, 0, 0);
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 946684800u,
+                 "[STRICT] [TIME] the start of 2000 is where everyone else puts it");
+
+    t = utc_at(2024, 2, 29, 0, 0, 0);
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 1709164800u,
+                 "[STRICT] [TIME] and so is a leap day");
+
+    t = utc_at(2038, 1, 19, 3, 14, 7);
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 2147483647u,
+                 "[STRICT] [TIME] the second a signed count would run out is reached, not skipped");
+
+    /* ------------------------------------------------------------------
+     * The leap year rules, as rules.
+     *
+     * Written as the distance from the 28th of February to the 1st of March,
+     * which is two days in a leap year and one otherwise. Asserting epochs
+     * somebody computed by hand would only prove the hand agreed with itself.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(esd_days_from_civil(2024, 3, 1) - esd_days_from_civil(2024, 2, 28) == 2,
+                 "[TIME] a year divisible by four has a 29th of February");
+    KTEST_ASSERT(esd_days_from_civil(2023, 3, 1) - esd_days_from_civil(2023, 2, 28) == 1,
+                 "[TIME] and a year that is not does not");
+    KTEST_ASSERT(esd_days_from_civil(1900, 3, 1) - esd_days_from_civil(1900, 2, 28) == 1,
+                 "[STRICT] [TIME] a century year is not a leap year");
+    KTEST_ASSERT(esd_days_from_civil(2000, 3, 1) - esd_days_from_civil(2000, 2, 28) == 2,
+                 "[STRICT] [TIME] unless it divides by four hundred, and 2000 did");
+    KTEST_ASSERT(esd_days_from_civil(2100, 3, 1) - esd_days_from_civil(2100, 2, 28) == 1,
+                 "[STRICT] [TIME] which 2100 will not, and that is the one nobody is alive to have seen");
+
+    /* ------------------------------------------------------------------
+     * The two conversions are inverses. Stepping by a prime number of hours
+     * so the walk lands on every weekday, every month length and both sides
+     * of a leap day rather than on a repeating pattern of them.
+     * ------------------------------------------------------------------ */
+    {
+        int mismatches = 0;
+
+        for (uint32_t e = 0; e < 2100000000u; e += 9857779u) {
+            esd_time_from_epoch(e, &back);
+            if (esd_time_to_epoch(&back) != e) mismatches++;
+        }
+        KTEST_ASSERT(mismatches == 0,
+                     "[STRICT] [TIME] every instant from 1970 to 2036 survives a round trip");
+    }
+
+    esd_time_from_epoch(946684800u, &back);
+    KTEST_ASSERT(back.year == 2000 && back.month == 1 && back.day == 1 &&
+                 back.hour == 0 && back.minute == 0 && back.second == 0,
+                 "[TIME] a count converts back to the date it came from");
+    KTEST_ASSERT(back.tz_offset_hours == 0,
+                 "[STRICT] [TIME] and says it is UTC, because that is what it is");
+
+    esd_time_from_epoch(1709164800u - 1u, &back);
+    KTEST_ASSERT(back.year == 2024 && back.month == 2 && back.day == 28 &&
+                 back.hour == 23 && back.minute == 59 && back.second == 59,
+                 "[STRICT] [TIME] the second before a leap day is the day before it");
+
+    /* ------------------------------------------------------------------
+     * The offset comes back out. Two files stamped in different timezones
+     * have to compare by when it happened, not by what the clock said.
+     * ------------------------------------------------------------------ */
+    {
+        esd_time_t east = utc_at(2026, 8, 24, 12, 0, 0);
+        esd_time_t here = utc_at(2026, 8, 24, 9, 0, 0);
+
+        east.tz_offset_hours = 3;
+        KTEST_ASSERT(esd_time_to_epoch(&east) == esd_time_to_epoch(&here),
+                     "[STRICT] [TIME] noon three hours east of UTC is nine o'clock UTC");
+    }
+
+    t = utc_at(2026, 8, 24, 1, 0, 0);
+    t.tz_offset_hours = 3;
+    esd_time_from_epoch(esd_time_to_epoch(&t), &back);
+    KTEST_ASSERT(back.year == 2026 && back.month == 8 && back.day == 23 && back.hour == 22,
+                 "[STRICT] [TIME] and an offset that leaves the day takes the date with it");
+
+    /* ------------------------------------------------------------------
+     * Before the epoch there is no count to give.
+     * ------------------------------------------------------------------ */
+    t = utc_at(1969, 12, 31, 23, 59, 59);
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 0,
+                 "[STRICT] [TIME] a date before the epoch has no count and does not wrap to a huge one");
+
+    t = utc_at(1970, 1, 1, 1, 0, 0);
+    t.tz_offset_hours = 3;
+    KTEST_ASSERT(esd_time_to_epoch(&t) == 0,
+                 "[STRICT] [TIME] nor does one the offset pushes before it");
 }
 
 /**
@@ -254,4 +395,6 @@ void run_time_tests(void) {
     rtc_set_tz_offset(saved_offset);
     KTEST_ASSERT(rtc_get_tz_offset() == saved_offset,
                  "[TIME] the offset the system booted with is restored");
+
+    run_epoch_tests();
 }

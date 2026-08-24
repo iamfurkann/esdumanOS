@@ -254,6 +254,28 @@ static int quitting = 0;
 static char message[80];
 
 /*
+ * The undo log.
+ *
+ * 256 records and 8 KB of removed text. The records are the cheap half - a run
+ * of typing collapses into one - and the arena is what a dd on a long line
+ * spends, so the two are sized for different things. Neither is a limit the
+ * user meets by editing normally; a session that does exhaust them gives up its
+ * oldest changes rather than its newest, and says so.
+ *
+ * A pointer, so that a failed allocation is a working editor without undo
+ * rather than an editor that will not start. eb_undo_* take a null log and do
+ * the edit without recording it.
+ */
+#define EDIT_UNDO_RECS  256
+#define EDIT_UNDO_ARENA 8192
+
+static ebundo_t undo_store;
+static ebundo_t *undo = 0;
+
+/** @brief The last pattern searched for, so n and N have something to repeat. */
+static char last_pattern[64];
+
+/*
  * One byte of pushback, for the same reason the shell keeps one: an escape
  * sequence is read a byte at a time, and a byte read to find out whether a
  * sequence was starting has to go somewhere when it turns out one was not.
@@ -518,26 +540,33 @@ static int save_file(const char *name) {
 /* ------------------------------------------------------------------------- */
 
 /**
- * @brief Reads a command after ':' and acts on it.
+ * @brief Reads a line typed on the status row after a leading character.
  *
- * The line is edited on the status row with the same two keys the rest of the
- * system uses for it - backspace deletes, Escape abandons - and nothing more:
- * a command line is a handful of characters and giving it a cursor of its own
- * would be a second line editor to keep correct.
+ * The line is edited with the same two keys the rest of the system uses for it -
+ * backspace deletes, Escape abandons - and nothing more: this is a handful of
+ * characters and giving it a cursor of its own would be a second line editor to
+ * keep correct.
+ *
+ * Shared by ':' and '/' rather than written twice. They differ in the character
+ * shown at the front and in what is done with the answer, which is not enough to
+ * be two functions.
+ *
+ * @param lead Character shown at the start of the row.
+ * @param out Receives the line, null-terminated.
+ * @param max Capacity of out including the terminator.
+ * @return 1 when the line was entered, 0 when it was abandoned.
  */
-static void command_line(void) {
-    char cmd[64];
+static int read_prompt_line(char lead, char *out, int max) {
     int n = 0;
 
-    cmd[0] = '\0';
-    message[0] = '\0';
+    out[0] = '\0';
 
     for (;;) {
         frame_len = 0;
         fb_goto(24, 1);
         fb_reverse();
-        fb_put(':');
-        fb_bytes(cmd, n);
+        fb_put(lead);
+        fb_bytes(out, n);
         fb_clear_eol();
         fb_plain();
         fb_goto(24, n + 2);
@@ -545,15 +574,26 @@ static void command_line(void) {
 
         int k = read_key();
 
-        if (k == 27) { render(); return; }                 /* abandoned */
+        if (k == 27) return 0;                             /* abandoned */
         if (k == K_NONE) continue;
-        if (k == '\n' || k == '\r') break;
-        if (k == '\b') { if (n > 0) n--; cmd[n] = '\0'; continue; }
-        if (k >= 32 && k <= 126 && n < (int)sizeof(cmd) - 1) {
-            cmd[n++] = (char)k;
-            cmd[n] = '\0';
+        if (k == '\n' || k == '\r') return 1;
+        if (k == '\b') { if (n > 0) n--; out[n] = '\0'; continue; }
+        if (k >= 32 && k <= 126 && n < max - 1) {
+            out[n++] = (char)k;
+            out[n] = '\0';
         }
     }
+}
+
+/**
+ * @brief Reads a command after ':' and acts on it.
+ */
+static void command_line(void) {
+    char cmd[64];
+
+    message[0] = '\0';
+
+    if (!read_prompt_line(':', cmd, (int)sizeof(cmd))) { render(); return; }
 
     /* :w, :w name, :q, :q!, :wq, and a line number to jump to. */
     if (cmd[0] == 'w') {
@@ -587,10 +627,67 @@ static void command_line(void) {
         cursor = eb_goto_line(&buf, e_atoi(cmd));
         want_col = 0;
     } else {
-        e_strcpy(message, "not a command: try :w, :q, :q! or a line number", sizeof(message));
+        e_strcpy(message, "not a command: try :w, :q, :q!, / or a line number", sizeof(message));
     }
 
     if (!quitting) { scroll_to_cursor(); render(); }
+}
+
+/**
+ * @brief Moves the cursor to the next or previous match of the last pattern.
+ *
+ * Whether the search wrapped is worked out here rather than reported by the
+ * buffer: a forward search that lands at or before where it started went round
+ * the end, and there is no other way to arrive there.
+ *
+ * @param forward Non-zero to search forwards.
+ */
+static void search_step(int forward) {
+    int found;
+
+    if (last_pattern[0] == '\0') {
+        e_strcpy(message, "no pattern: use / to search", sizeof(message));
+        return;
+    }
+
+    found = forward ? eb_find_next(&buf, last_pattern, cursor)
+                    : eb_find_prev(&buf, last_pattern, cursor);
+
+    if (found < 0) {
+        e_strcpy(message, "pattern not found: ", sizeof(message));
+        {
+            int m = e_strlen(message);
+            e_strcpy(&message[m], last_pattern, (int)sizeof(message) - m);
+        }
+        return;
+    }
+
+    if (forward ? (found <= cursor) : (found >= cursor)) {
+        e_strcpy(message, forward ? "search wrapped to the top"
+                                  : "search wrapped to the bottom", sizeof(message));
+    }
+
+    cursor = found;
+    want_col = eb_col(&buf, cursor);
+}
+
+/**
+ * @brief Reads a pattern after '/' and jumps to its first match.
+ */
+static void search_line(void) {
+    char pat[64];
+
+    message[0] = '\0';
+
+    if (!read_prompt_line('/', pat, (int)sizeof(pat))) { render(); return; }
+
+    /* An empty pattern repeats the last one, which is what makes pressing / and
+     * Enter mean "again" rather than "forget what I was looking for". */
+    if (pat[0] != '\0') e_strcpy(last_pattern, pat, sizeof(last_pattern));
+
+    search_step(1);
+    scroll_to_cursor();
+    render();
 }
 
 /**
@@ -602,6 +699,50 @@ static void move_line(int down) {
 
     if (target < 0) return;
     cursor = eb_clamp_to_line(&buf, target, want_col);
+}
+
+/**
+ * @brief Enters insert mode, opening the change group the whole run shares.
+ *
+ * Everything typed until Escape records into this one group, so u gives back the
+ * sentence rather than the letter. That is the difference between an undo a
+ * person uses and one they stop pressing.
+ */
+static void enter_insert(void) {
+    eb_undo_group(undo);
+    mode = MODE_INSERT;
+}
+
+/**
+ * @brief Takes back the newest group of changes.
+ */
+static void undo_key(void) {
+    int back = eb_undo_apply(&buf, undo);
+
+    if (back < 0) {
+        e_strcpy(message, undo ? "nothing to undo"
+                               : "undo is unavailable: there was no memory for the log",
+                 sizeof(message));
+        return;
+    }
+
+    if (back > buf.len) back = buf.len;
+    cursor = back;
+    want_col = eb_col(&buf, cursor);
+
+    /*
+     * Still dirty, whichever way the undo went. The buffer having been written
+     * once does not mean it matches the file now, and the only undo that would
+     * leave it matching is one that lands exactly on the state that was saved -
+     * which this does not know, and guessing wrong would lose the file.
+     */
+    dirty = 1;
+
+    if (undo->lost) {
+        e_strcpy(message, "undo history was trimmed: the oldest changes are gone",
+                 sizeof(message));
+        undo->lost = 0;
+    }
 }
 
 /**
@@ -660,43 +801,58 @@ static void normal_key(int k) {
             want_col = 0;
             break;
 
-        case 'i': mode = MODE_INSERT; break;
+        case 'i': enter_insert(); break;
 
         case 'a':
             if (cursor < eb_line_end(&buf, cursor)) cursor++;
-            mode = MODE_INSERT;
+            enter_insert();
             break;
 
         case 'A':
             cursor = eb_line_end(&buf, cursor);
-            mode = MODE_INSERT;
+            enter_insert();
             break;
 
+        /* The group is opened before the newline goes in, so that the line this
+         * opens and everything typed onto it come back together. Splitting them
+         * would leave u undoing the text and then the blank line it was on. */
         case 'o':
+            enter_insert();
             cursor = eb_line_end(&buf, cursor);
-            if (eb_insert(&buf, cursor, '\n')) { cursor++; dirty = 1; }
-            mode = MODE_INSERT;
+            if (eb_undo_insert(&buf, undo, cursor, '\n', cursor)) { cursor++; dirty = 1; }
             break;
 
         case 'O':
+            enter_insert();
             cursor = eb_line_start(&buf, cursor);
-            if (eb_insert(&buf, cursor, '\n')) dirty = 1;
-            mode = MODE_INSERT;
+            if (eb_undo_insert(&buf, undo, cursor, '\n', cursor)) dirty = 1;
             break;
 
         case 'x': case K_DEL:
-            if (cursor < eb_line_end(&buf, cursor) && eb_delete(&buf, cursor)) dirty = 1;
+            eb_undo_group(undo);
+            if (cursor < eb_line_end(&buf, cursor) &&
+                eb_undo_delete(&buf, undo, cursor, cursor)) dirty = 1;
             break;
 
         case 'd':
             if (was_d) {
-                cursor = eb_delete_line(&buf, cursor);
+                eb_undo_group(undo);
+                cursor = eb_undo_delete_line(&buf, undo, cursor, cursor);
                 want_col = 0;
                 dirty = 1;
             } else {
                 pending_d = 1;
             }
             break;
+
+        case 'u': undo_key(); break;
+
+        case '/':
+            search_line();
+            return;
+
+        case 'n': search_step(1); break;
+        case 'N': search_step(0); break;
 
         case ':':
             command_line();
@@ -726,12 +882,15 @@ static void insert_key(int k) {
             break;
 
         case '\b':
-            if (cursor > 0 && eb_delete(&buf, cursor - 1)) { cursor--; dirty = 1; }
+            if (cursor > 0 && eb_undo_delete(&buf, undo, cursor - 1, cursor)) {
+                cursor--;
+                dirty = 1;
+            }
             want_col = eb_col(&buf, cursor);
             break;
 
         case K_DEL:
-            if (eb_delete(&buf, cursor)) dirty = 1;
+            if (eb_undo_delete(&buf, undo, cursor, cursor)) dirty = 1;
             break;
 
         case K_LEFT:  if (cursor > 0) cursor--; want_col = eb_col(&buf, cursor); break;
@@ -742,13 +901,13 @@ static void insert_key(int k) {
         case K_END:   cursor = eb_line_end(&buf, cursor); want_col = eb_col(&buf, cursor); break;
 
         case '\n': case '\r':
-            if (eb_insert(&buf, cursor, '\n')) { cursor++; dirty = 1; }
+            if (eb_undo_insert(&buf, undo, cursor, '\n', cursor)) { cursor++; dirty = 1; }
             want_col = 0;
             break;
 
         default:
             if (k >= 32 && k <= 126) {
-                if (eb_insert(&buf, cursor, (char)k)) { cursor++; dirty = 1; }
+                if (eb_undo_insert(&buf, undo, cursor, (char)k, cursor)) { cursor++; dirty = 1; }
                 else e_strcpy(message, "the file is full: 64 KB is the most that can be written",
                               sizeof(message));
                 want_col = eb_col(&buf, cursor);
@@ -791,11 +950,28 @@ void main(void) {
     buf.cap = EDIT_MAX_BYTES + 1;
     message[0] = '\0';
     filename[0] = '\0';
+    last_pattern[0] = '\0';
 
     if (buf.data == 0) {
         puts_raw("edit: not enough memory for the buffer\n");
         syscall(1, 1, 0, 0);
         while (1) { }
+    }
+
+    /*
+     * The undo log, and the editor opens without one rather than refusing to
+     * open. Losing undo is losing a convenience; losing the editor is losing the
+     * only way to write a file on this system. The eb_undo_* calls take a null
+     * log and do the edit without recording it, so nothing below has to ask.
+     */
+    undo_store.recs = (ebrec_t *)umalloc(EDIT_UNDO_RECS * (int)sizeof(ebrec_t));
+    undo_store.arena = (char *)umalloc(EDIT_UNDO_ARENA);
+
+    if (undo_store.recs != 0 && undo_store.arena != 0) {
+        undo_store.rec_cap = EDIT_UNDO_RECS;
+        undo_store.arena_cap = EDIT_UNDO_ARENA;
+        undo = &undo_store;
+        eb_undo_reset(undo);
     }
 
     /* One argument, a file name. A missing file is not an error: it is a new

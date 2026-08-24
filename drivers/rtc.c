@@ -7,6 +7,7 @@
 #include "kernel.h"
 #include "tty.h"
 #include "esdtime.h"
+#include "errno.h"
 #define CMOS_ADDRESS 0x70
 #define CMOS_DATA 0x71
 
@@ -204,6 +205,99 @@ void rtc_read_utc(esd_time_t *out) {
     out->minute = (uint8_t)minute;
     out->second = (uint8_t)second;
     out->tz_offset_hours = 0;
+}
+
+/**
+ * @brief Writes a value to a specific RTC register.
+ *
+ * @param reg The register to write.
+ * @param value The value.
+ */
+static void set_RTC_register(int reg, uint8_t value) {
+    outb(CMOS_ADDRESS, reg);
+    outb(CMOS_DATA, value);
+}
+
+/**
+ * @brief Converts a binary value to the packed decimal the chip may want.
+ *
+ * @param v 0-99.
+ * @return The same number with each decimal digit in its own nibble.
+ */
+static uint8_t rtc_to_bcd(uint8_t v) {
+    return (uint8_t)(((v / 10) << 4) | (v % 10));
+}
+
+/**
+ * @brief Sets the hardware clock, in UTC.
+ *
+ * The clock could be read and not set until v0.9.2 - `date` printed whatever the
+ * machine had come up with and there was no way to correct it. This is the read
+ * path run backwards, deliberately so: it asks register B what format the chip
+ * is in and writes that format, rather than putting the chip into the one that
+ * would be convenient. A driver that reconfigures the hardware to suit itself
+ * leaves the machine changed after it is done with it.
+ *
+ * Updates are halted for the write. Bit 7 of register B stops the chip advancing
+ * the registers, which matters because the seven values are written one at a
+ * time: a tick landing between the hour and the day would leave the clock
+ * holding a moment that never happened.
+ *
+ * @param t Time to set, in UTC; year 2000 to 2099.
+ * @return E_OK, or E_INVAL when the fields are not a date this can store.
+ */
+int rtc_set_utc(const esd_time_t *t) {
+    if (t == 0) return E_INVAL;
+
+    if (t->year < 2000 || t->year > 2099) return E_INVAL;
+    if (t->month < 1 || t->month > 12) return E_INVAL;
+    if (t->day < 1 || t->day > rtc_days_in_month(t->month, t->year)) return E_INVAL;
+    if (t->hour > 23 || t->minute > 59 || t->second > 59) return E_INVAL;
+
+    uint8_t second = t->second;
+    uint8_t minute = t->minute;
+    uint8_t hour   = t->hour;
+    uint8_t day    = t->day;
+    uint8_t month  = t->month;
+    uint8_t year   = (uint8_t)(t->year - 2000);
+
+    while (get_update_in_progress_flag());
+
+    uint8_t regB = get_RTC_register(0x0B);
+
+    /* Bit 1 clear means the chip keeps 12-hour time, with bit 7 marking PM. */
+    if (!(regB & 0x02)) {
+        uint8_t pm = (hour >= 12) ? 0x80 : 0x00;
+        uint8_t h12 = hour % 12;
+
+        if (h12 == 0) h12 = 12;
+        hour = (uint8_t)(h12 | pm);
+    }
+
+    /* Bit 2 clear means the values are BCD rather than binary. The PM bit rides
+     * above the digits and must not be packed with them. */
+    if (!(regB & 0x04)) {
+        second = rtc_to_bcd(second);
+        minute = rtc_to_bcd(minute);
+        day    = rtc_to_bcd(day);
+        month  = rtc_to_bcd(month);
+        year   = rtc_to_bcd(year);
+        hour   = (uint8_t)(rtc_to_bcd((uint8_t)(hour & 0x7F)) | (hour & 0x80));
+    }
+
+    /* Halt the update cycle, write, let it run again. */
+    set_RTC_register(0x0B, (uint8_t)(regB | 0x80));
+
+    set_RTC_register(0x00, second);
+    set_RTC_register(0x02, minute);
+    set_RTC_register(0x04, hour);
+    set_RTC_register(0x07, day);
+    set_RTC_register(0x08, month);
+    set_RTC_register(0x09, year);
+
+    set_RTC_register(0x0B, regB);
+
+    return E_OK;
 }
 
 /**

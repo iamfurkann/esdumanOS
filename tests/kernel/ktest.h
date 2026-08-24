@@ -171,6 +171,8 @@ void run_pgroup_tests(void);
 void run_jobctl_tests(void);
 /** @brief Keyboard: what each key puts in the input ring, and what it does not. */
 void run_kbd_tests(void);
+/** @brief Edit buffer: the line arithmetic /bin/edit is built on. */
+void run_edit_tests(void);
 void run_process_tests(void);
 void run_signal_tests(void);
 void run_reap_tests(void);

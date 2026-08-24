@@ -931,6 +931,10 @@ void show_help(void) {
     printk("  File Operations:\n");
     printk("    ls               List directory contents\n");
     printk("    cat [-nbEsTA] [f] Read and display file contents\n");
+    /* Not a builtin, and listed anyway - as echo already is. A user who types
+     * `help` and never finds out the system has an editor has been failed by the
+     * help rather than by the editor. */
+    printk("    edit [file]       Edit a file. Modal: i inserts, ESC returns, :w :q\n");
     printk("    cat_raw [file]    Show raw (HEX) disk dump (bypasses decryption)\n");
     printk("    write [f] [text]  Create/write a file\n");
     printk("    rm [file]         Delete a file\n");

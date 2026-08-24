@@ -206,6 +206,24 @@ int main() {
     run_static_test("apps/bin/date.c", "syscall(55,", "date.c -> Uses SYSCALL_TIME (55) rather than a fixed string", &fail_count);
     run_static_test("apps/bin/date.c", "syscall(42,", "date.c -> Uses SYSCALL_GET_ARGS (42) to read -u", &fail_count);
 
+    /*
+     * edit.c tests.
+     *
+     * The full-screen program, and the only one that reads the keyboard a byte
+     * at a time and asks whether another is waiting. POLL (63) is the check
+     * worth pinning: without it the editor cannot tell the Escape key from the
+     * first byte of an arrow, and losing the call would leave a modal editor
+     * whose most-pressed key blocks until the next one.
+     */
+    run_static_test("apps/bin/edit.c", "syscall(63,", "edit.c -> Uses SYSCALL_POLL (63) to tell ESC from a sequence", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(3,", "edit.c -> Uses SYSCALL_READ (3)", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(4,", "edit.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(40,", "edit.c -> Uses SYSCALL_OPEN (40)", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(38,", "edit.c -> Uses SYSCALL_CLOSE (38)", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(8,", "edit.c -> Uses SYSCALL_CREATE_FILE (8) for a file that does not exist yet", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(24,", "edit.c -> Uses SYSCALL_SIGNAL_REG (24) to decline the interrupt and catch the continue", &fail_count);
+    run_static_test("apps/bin/edit.c", "syscall(1,", "edit.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
     // sh.c tests
     run_static_test("apps/bin/sh.c", "syscall(5,", "sh.c -> Uses SYSCALL_EXEC (5) for external apps", &fail_count);
     run_static_test("apps/bin/sh.c", "SYSCALL_OPEN", "sh.c -> Uses SYSCALL_OPEN (40)", &fail_count);

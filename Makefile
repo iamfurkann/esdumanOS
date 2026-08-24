@@ -63,6 +63,7 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/wc_elf_data.c \
 			src/resources/date_elf_data.c \
 			src/resources/stat_elf_data.c \
+			src/resources/edit_elf_data.c \
 			fs/bcache.c \
             fs/vfs.c \
             fs/crypto_fs.c \
@@ -107,6 +108,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_tty.c \
             tests/kernel/test_jobctl.c \
             tests/kernel/test_kbd.c \
+            tests/kernel/test_edit.c \
             tests/kernel/test_process.c \
 			tests/kernel/test_signal.c \
 			tests/kernel/test_reap.c \
@@ -386,6 +388,9 @@ apps/bin/date.elf: apps/bin/date.c
 apps/bin/stat.elf: apps/bin/stat.c
 	$(CC) $(USER_CFLAGS) apps/bin/stat.c -o apps/bin/stat.elf
 
+apps/bin/edit.elf: apps/bin/edit.c include/editbuf.h
+	$(CC) $(USER_CFLAGS) apps/bin/edit.c -o apps/bin/edit.elf
+
 
 # Ring 3 half of the kernel self-test suite. Built, encrypted and embedded the
 # same way as the /bin programs, but only linked into $(TEST_BIN).
@@ -527,6 +532,12 @@ src/resources/stat_elf_data.c: apps/bin/stat.elf tools/encrypt_tool
 	@./tools/encrypt_tool apps/bin/stat.elf apps/bin/stat_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i apps/bin/stat_encrypted.elf | \
 	sed 's/apps_bin_stat_encrypted_elf/stat_elf/g' > src/resources/stat_elf_data.c
+
+src/resources/edit_elf_data.c: apps/bin/edit.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/edit.elf apps/bin/edit_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/edit_encrypted.elf | \
+	sed 's/apps_bin_edit_encrypted_elf/edit_elf/g' > src/resources/edit_elf_data.c
 
 
 test:

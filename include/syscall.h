@@ -55,8 +55,17 @@
 #define SYSCALL_CREATE_FILE     8
 /** @brief List files in current directory */
 #define SYSCALL_LIST_FILES      9
-/** @brief Output file contents to console */
-#define SYSCALL_CAT_FILE        11
+/*
+ * 11 was SYSCALL_CAT_FILE, removed in v0.9.2.
+ *
+ * It printed a file's contents from the kernel, so anything reading it could not
+ * pipe or redirect them - and it had no caller at all: the shell's `cat` opens
+ * the file and writes it itself, which is why `cat` worked and this did not.
+ * Dead and wrong at once.
+ *
+ * The number is left free rather than reused. What becomes of it is part of
+ * freezing the ABI at 1.0, along with the gap at 99 where YIELD sits.
+ */
 /** @brief Remove a file */
 #define SYSCALL_RM_FILE         22
 /** @brief Move or rename a file */
@@ -110,8 +119,18 @@
 // Syscall numbers 30-32 are reserved for future crypto API.
 /** @brief Set system security level */
 #define SYSCALL_SET_SEC_LEVEL   33
-/** @brief Output raw file contents bypassing text formatting */
-#define SYSCALL_CAT_RAW         34
+/**
+ * @brief Read an open file's stored bytes, without decrypting them.
+ *
+ * read() against the stored form: same descriptor, same offset, same shape -
+ * ebx a descriptor, ecx a buffer, edx a size, bytes back in eax.
+ *
+ * This was SYSCALL_CAT_RAW until v0.9.2, which took a path and printed the whole
+ * file as hex from the kernel, where nothing could pipe or redirect it. What the
+ * call uniquely offered was bypassing decryption; opening, looping and
+ * formatting are a program's work and are done in one now.
+ */
+#define SYSCALL_READ_RAW        34
 /** @brief Set user ID of current process */
 #define SYSCALL_SETUID          35
 /** @brief Create an IPC pipe */
@@ -295,6 +314,19 @@
  * not have one to escape yet. The restriction is easier to keep than to add back.
  */
 #define SYSCALL_CHOWN           65
+
+/**
+ * @brief Set the wall clock.
+ *
+ * ebx is an esd_time_t in user memory, holding the time as the caller reads it -
+ * that is, with tz_offset_hours saying what the fields are adjusted by. The
+ * kernel takes the offset back out and writes UTC, because that is what the chip
+ * holds and what every reader of it assumes.
+ *
+ * Root only. A clock a user can move is a clock that says nothing about when a
+ * file was written.
+ */
+#define SYSCALL_SETTIME         66
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

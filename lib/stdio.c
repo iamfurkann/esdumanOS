@@ -224,6 +224,37 @@ int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args) {
     return offset;
 }
 
+/**
+ * @brief Appends formatted text to a buffer that is being built up.
+ *
+ * The counterpart to printk() for output that is going to a caller rather than
+ * to the screen. It takes the length so far and returns the new one, so a run of
+ * these reads like the run of printk() calls it replaces and no call has to work
+ * out where the previous one stopped.
+ *
+ * Bounded at both ends: nothing is written once the buffer is full, and
+ * kvsnprintf() terminates whatever it does write.
+ *
+ * @param buf Destination.
+ * @param cap Capacity, terminator included.
+ * @param used Characters already in the buffer.
+ * @param format Format string.
+ * @param ... Arguments.
+ * @return The new length, excluding the terminator.
+ */
+int kbprintf(char *buf, uint32_t cap, uint32_t used, const char *format, ...) {
+    va_list args;
+    int n;
+
+    if (!buf || cap == 0 || used >= cap - 1) return (int)used;
+
+    va_start(args, format);
+    n = kvsnprintf(buf + used, cap - used, format, args);
+    va_end(args);
+
+    return (int)used + n;
+}
+
 // =========================================================================
 // KERNEL LOG FUNCTION
 // =========================================================================

@@ -7,6 +7,9 @@
  * number the kernel will accept rather than by a copy of it. fs.h pulls in
  * nothing but types.h and declares no storage. */
 #include "fs.h"
+/* For STACK_DUMP_BUF: the kernel renders its diagnostics into a buffer this
+ * process supplies, and the size a whole stack dump needs is stated once. */
+#include "stack.h"
 
 typedef unsigned int uint32_t;
 
@@ -286,17 +289,13 @@ int sys_create_file(const char *name, const char *content) { return syscall(8, (
  */
 int sys_delete_file(const char *name) { return syscall(22, (int)name, 0, 0); }
 /**
- * @brief Reads a file content via system call.
- * @param name File name.
- * @return System call status.
+ * @brief Reads an open file's stored bytes, without decrypting them.
+ * @param fd Open descriptor.
+ * @param buf Destination.
+ * @param size Bytes wanted.
+ * @return Bytes read, 0 at the end, or a negative errno.
  */
-int sys_cat_file(const char *name) { return syscall(11, (int)name, 0, 0); }
-/**
- * @brief Reads raw file content via system call.
- * @param name File name.
- * @return System call status.
- */
-int sys_cat_raw_file(const char *name) { return syscall(34, (int)name, 0, 0); } // 34 = SYSCALL_CAT_RAW 
+int sys_read_raw(int fd, void *buf, int size) { return syscall(SYSCALL_READ_RAW, fd, (int)buf, size); }
 /**
  * @brief Renames a file via system call.
  * @param old_name Current name.
@@ -990,14 +989,17 @@ void show_help(void) {
     printk("    bg [%n]           Continue a stopped job in the background\n");
     printk("    wait              Block until every background job has finished\n");
     printk("    hexdump [addr]    Show memory dump at address\n");
+    printk("    date [-u]         Show the date and time; -u for UTC\n");
+    printk("    date -s \"YYYY-MM-DD HH:MM:SS\"  Set the clock (root only)\n");
     printk("    help              Show this help menu\n");
     printk("\n  Settings:\n");
     printk("    layout tr|us      Set keyboard layout\n");
     printk("    lockdown          Switch system to safe mode\n");
     printk("    clear             Clear the screen\n");
-    printk("\n  Operators: | (pipe, two stages), > (redirect), && (AND), || (OR)\n");
+    printk("\n  Operators: | (pipe, up to four stages), > (redirect), && (AND), || (OR)\n");
     printk("  Note: > and | cannot be combined in one command.\n");
     printk("  Ctrl-D ends input for a program reading the keyboard (cat, grep, head, wc).\n");
+    printk("  Tab completes; press it again to walk the candidates.\n");
 }
 
 /**
@@ -1224,6 +1226,83 @@ static int dmesg_line_level(const char *line, int len) {
  * @param args Argument vector; args[1] is an optional flag.
  * @return Exit status.
  */
+/*
+ * Kernel diagnostics render into this and the shell writes it.
+ *
+ * They printed from the kernel until v0.9.2, which meant `meminfo > file` wrote
+ * an empty file and reported success: the bytes went to the screen and never
+ * reached this process's descriptor 1. The kernel fills a buffer now and the
+ * writing is the shell's, which is what puts the output in the pipeline.
+ *
+ * One buffer, because only one of them runs at a time. The stack dump is the
+ * largest at 2 KB and everything else fits inside that.
+ */
+static char diag_buf[STACK_DUMP_BUF];
+
+/**
+ * @brief Writes what a kernel diagnostic rendered, and reports how it went.
+ *
+ * @param n Bytes the syscall reported, or a negative errno.
+ * @param what Command name, for the error line.
+ * @return Exit status.
+ */
+static int emit_diag(int n, const char *what) {
+    if (n < 0) {
+        printk(what);
+        printk(n == E_PERM ? ": root only\n" : ": failed\n");
+        return 1;
+    }
+    if (n > 0) syscall(SYSCALL_WRITE, 1, (int)diag_buf, n);
+    return 0;
+}
+
+/**
+ * @brief Prints a file's stored bytes as hex, decryption bypassed.
+ *
+ * The kernel used to do all of this - open, read, format, print - and printed it
+ * where nothing could catch it. Only the part that needs privilege is a syscall
+ * now: reading the stored form rather than the decrypted one.
+ *
+ * The hex is built a chunk at a time and written a chunk at a time. Three bytes
+ * per input byte through a syscall each would be sixty-five thousand calls for a
+ * full-sized file.
+ *
+ * @param args Argument vector; args[1] is the file.
+ * @return Exit status.
+ */
+int builtin_cat_raw(char **args) {
+    static const char hexd[] = "0123456789abcdef";
+    unsigned char chunk[256];
+    char hex[256 * 3];
+    int n, status = 0;
+
+    if (!args[1]) { printk("Usage: cat_raw <file>\n"); return 1; }
+
+    int fd = sys_open(args[1]);
+    if (fd < 0) {
+        printk("cat_raw: "); printk(args[1]); printk(": cannot open\n");
+        return 1;
+    }
+
+    printk("--- "); printk(args[1]); printk(" [PHYSICAL DISK HEX DUMP] ---\n");
+
+    while ((n = sys_read_raw(fd, chunk, sizeof(chunk))) > 0) {
+        int k = 0;
+
+        for (int i = 0; i < n; i++) {
+            hex[k++] = hexd[chunk[i] >> 4];
+            hex[k++] = hexd[chunk[i] & 0x0F];
+            hex[k++] = ' ';
+        }
+        syscall(SYSCALL_WRITE, 1, (int)hex, k);
+    }
+    if (n < 0) status = 1;
+
+    printk("\n----------------------------------\n");
+    sys_close(fd);
+    return status;
+}
+
 int builtin_dmesg(char **args) {
     int min_level = -1;
     int clear_after = 0;
@@ -1646,13 +1725,25 @@ void execute_command(char **args) {
         last_exit_status = syscall(SYSCALL_SYNC, 0, 0, 0) == E_OK ? 0 : 1;
     }
     else if (ft_strcmp(args[0], "lockdown") == 0) { last_exit_status = syscall(13, 0, 0, 0) < 0 ? 1 : 0; }
-    else if (ft_strcmp(args[0], "stack") == 0) { last_exit_status = syscall(14, 0, 0, 0) < 0 ? 1 : 0; }
-    else if (ft_strcmp(args[0], "meminfo") == 0) { last_exit_status = syscall(15, 0, 0, 0) < 0 ? 1 : 0; }
-    else if (ft_strcmp(args[0], "testmalloc") == 0) { last_exit_status = syscall(16, 0, 0, 0) < 0 ? 1 : 0; }
+    /* These three render into diag_buf and this writes it, so they can be piped
+     * and redirected like anything else. See emit_diag(). */
+    else if (ft_strcmp(args[0], "stack") == 0) {
+        last_exit_status = emit_diag(syscall(14, (int)diag_buf, sizeof(diag_buf), 0), "stack");
+    }
+    else if (ft_strcmp(args[0], "meminfo") == 0) {
+        last_exit_status = emit_diag(syscall(15, (int)diag_buf, sizeof(diag_buf), 0), "meminfo");
+    }
+    else if (ft_strcmp(args[0], "testmalloc") == 0) {
+        last_exit_status = emit_diag(syscall(16, (int)diag_buf, sizeof(diag_buf), 0), "testmalloc");
+    }
     else if (ft_strcmp(args[0], "hexdump") == 0) {
         if (args[1]) {
-            syscall(17, hex_to_int(args[1]), 0, 0); 
-        } 
+            /* Address in ebx, the buffer to render into in ecx. The keyboard
+             * branch below always wrote through this process and was never
+             * affected. */
+            last_exit_status = emit_diag(
+                syscall(17, hex_to_int(args[1]), (int)diag_buf, sizeof(diag_buf)), "hexdump");
+        }
         else {
             char chunk[16];
             int bytes_read;
@@ -1717,8 +1808,7 @@ void execute_command(char **args) {
     }
     else if (ft_strcmp(args[0], "exit") == 0) { printk("exit\n"); syscall(1, 0, 0, 0); while(1); }
     else if (ft_strcmp(args[0], "cat_raw") == 0) {
-        if (args[1]) last_exit_status = (sys_cat_raw_file(args[1]) == E_OK) ? 0 : 1;
-        else { printk("Usage: cat_raw <file>\n"); last_exit_status = 1; }
+        last_exit_status = builtin_cat_raw(args);
     }
     else if (ft_strcmp(args[0], "kill") == 0) {
         /*

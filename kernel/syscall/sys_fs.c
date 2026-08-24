@@ -1169,88 +1169,47 @@ void sys_list_files(arch_regs_t *regs) {
 }
 
 /**
- * @brief Function sys_cat_raw
+ * @brief Reads an open file's stored bytes, without decrypting them.
+ *
+ * This replaces sys_cat_raw(), which took a path, read the whole file and
+ * printed it as hex from the kernel - so `cat_raw f > dump` wrote an empty file
+ * and `cat_raw f | grep` fed an empty pipe. Rendering it into a buffer instead
+ * would not have been enough either: 64 KB of file is 192 KB of hex text, which
+ * is not something to hand back in one call.
+ *
+ * So the primitive changed rather than its output. What cat_raw uniquely did was
+ * bypass the decryption layer; everything else about it - opening, looping,
+ * formatting - is work a program can do, and now does. This is read() against
+ * the stored form, with the same descriptor, the same offset and the same
+ * shape, and the hex belongs to whoever wanted hex.
  */
-void sys_cat_raw(arch_regs_t *regs) {
-    char target_file[MAX_FILENAME];
-    if (!copy_user_string(target_file, (const char *)regs->ebx, sizeof(target_file))) { regs->eax = E_FAULT; return; }
+void sys_read_raw(arch_regs_t *regs) {
+    int fd = (int)regs->ebx;
+    void *buf = (void *)regs->ecx;
+    int size = (int)regs->edx;
 
-    char basename[MAX_FILENAME];
-    int resolved = split_from_cwd(target_file, basename);
-    if (resolved < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
-    fs_id_t parent_id = (fs_id_t)resolved;
+    if (!validate_fd(fd) || size < 0) { regs->eax = E_INVAL; return; }
+    if (size == 0) { regs->eax = 0; return; }
+    if (!validate_user_writable_pointer(buf, (size_t)size)) { regs->eax = E_FAULT; return; }
 
-    vfs_file_t file;
+    file_descriptor_t *desc = &current_task->fd_table[fd];
 
-    if (fs_open(basename, parent_id, &file) == 0) {
-        int file_idx = fs_get_entry_idx(basename, parent_id);
-        if (file_idx != -1) {
-            if (!check_vfs_access(dir_table[file_idx].entry_id, 0)) {
-                printk("Error: No permission to read file '%s'!\n", target_file);
-                regs->eax = E_ACCES;
-                return;
-            }
-        }
-        printk("--- %s [PHYSICAL DISK HEX DUMP] ---\n", file.filename);
-        uint8_t chunk[256];
-        // Signed: fs_read_raw() reports errors as a negative value, and storing
-        // that in an unsigned made it read as ~4 billion - the loop below then
-        // walked gigabytes past a 256-byte stack buffer.
-        int bytes;
-        file.current_offset = 0;
+    /*
+     * Only a real file. Reading a pipe or a device "raw" means nothing - there
+     * is no stored form to bypass - and the alternative is a call that quietly
+     * behaves like read() for two of the three types.
+     */
+    if (desc->type != FD_TYPE_FILE || desc->ptr == 0) { regs->eax = E_BADF; return; }
 
-        while ((bytes = fs_read_raw(&file, chunk, 256)) > 0) {
-            for (int i = 0; i < bytes; i++) {
-                printk("%x ", chunk[i]);
-            }
-        }
-        printk("\n----------------------------------\n");
-    } else {
-        printk("Error: '%s' not found!\n", target_file);
-    }
-}
+    uint8_t *kernel_buf = (uint8_t *)kmalloc((uint32_t)size);
+    if (!kernel_buf) { regs->eax = E_NOMEM; return; }
 
-/**
- * @brief Function sys_cat_file
- */
-void sys_cat_file(arch_regs_t *regs) {
-    char target_file[MAX_FILENAME];
-    if (!copy_user_string(target_file, (const char *)regs->ebx, sizeof(target_file))) { regs->eax = E_FAULT; return; }
+    int ret = fs_read_raw((vfs_file_t *)desc->ptr, kernel_buf, (uint32_t)size);
 
-    char basename[MAX_FILENAME];
-    int resolved = split_from_cwd(target_file, basename);
-    if (resolved < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
-    fs_id_t parent_id = (fs_id_t)resolved;
+    if (ret > 0 && copy_to_user(buf, kernel_buf, (size_t)ret) != E_OK) ret = E_FAULT;
 
-    vfs_file_t file;
-
-    if (fs_open(basename, parent_id, &file) == 0) {
-        int file_idx = fs_get_entry_idx(basename, parent_id);
-        if (file_idx != -1) {
-            if (!check_vfs_access(dir_table[file_idx].entry_id, 0)) {
-                printk("Error: Permission denied!\n");
-                regs->eax = E_ACCES;
-                return;
-            }
-        }
-        printk("--- %s ---\n", file.filename);
-        uint8_t chunk[256];
-        // Signed for the same reason as sys_cat_raw(); fs_read() can now return
-        // E_ACCES when the master key has been destroyed.
-        int bytes;
-        file.current_offset = 0;
-        while ((bytes = fs_read(&file, chunk, 256)) > 0) {
-            for (int i = 0; i < bytes; i++) {
-                if (chunk[i] != '\r' && chunk[i] != '\b' && chunk[i] != '\0') {
-                    char temp[2] = { chunk[i], '\0' }; 
-                    printk("%s", temp);
-                }
-            }
-        }
-        printk("\n");
-    } else {
-        printk("Error: '%s' not found!\n", target_file);
-    }
+    kfree(kernel_buf);
+    regs->eax = ret;
 }
 
 /**

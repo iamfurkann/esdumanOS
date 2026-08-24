@@ -587,28 +587,97 @@ void sys_get_args(arch_regs_t *regs) {
 
 /* ── DEBUGGING AND MEMORY QUERIES ──────────────────────────── */
 
+/*
+ * Output that belongs to whoever asked for it.
+ *
+ * These four printed with printk() until v0.9.2, which put their output on the
+ * screen and nowhere else. `meminfo > file` produced an empty file and reported
+ * success; `stack | grep` fed an empty pipe. Nothing was wrong with what they
+ * computed - the answer simply never reached the caller's descriptor 1.
+ *
+ * They render into a buffer the caller supplies and return its length; the
+ * caller writes it. The shape is sys_readdir's - buffer in ebx, capacity in ecx,
+ * bytes back in eax - and the loop stays in the shell for the reason dmesg's
+ * does: a write into a full pipe blocks, and a blocked syscall resumes by
+ * re-running from the trap, so a kernel-side dump that blocked halfway would
+ * start over and emit everything twice.
+ *
+ * A buffer too small truncates rather than failing. The caller asked for what
+ * would fit and got it.
+ */
+
 /**
- * @brief Function sys_stack_dump
+ * @brief Copies rendered text to the caller's buffer and reports its length.
+ *
+ * @param regs Register frame; eax receives the length or a negative errno.
+ * @param ubuf Caller's buffer, already validated.
+ * @param ucap Its capacity.
+ * @param text Rendered text.
+ * @param n Its length.
+ */
+static void deliver_text(arch_regs_t *regs, void *ubuf, uint32_t ucap, const char *text, int n) {
+    if (n < 0) n = 0;
+    if ((uint32_t)n > ucap) n = (int)ucap;
+
+    if (n > 0 && copy_to_user(ubuf, text, (size_t)n) != E_OK) {
+        regs->eax = E_FAULT;
+        return;
+    }
+    regs->eax = n;
+}
+
+/**
+ * @brief Checks the caller may run a diagnostic and gave somewhere to put it.
+ *
+ * @param regs Register frame; eax receives the errno on refusal.
+ * @param ubuf Caller's buffer.
+ * @param ucap Its capacity.
+ * @return 1 when the call may proceed.
+ */
+static int diag_ready(arch_regs_t *regs, void *ubuf, uint32_t ucap) {
+    if (current_task->uid != 0) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for this command.");
+        regs->eax = E_PERM;
+        return 0;
+    }
+    if (ucap == 0) { regs->eax = E_INVAL; return 0; }
+    if (!validate_user_writable_pointer(ubuf, ucap)) { regs->eax = E_FAULT; return 0; }
+    return 1;
+}
+
+/**
+ * @brief Renders the kernel stack into the caller's buffer.
+ *
+ * The rendering is staged on the heap rather than on the kernel stack: the dump
+ * is 20 rows of 78 characters, and 2 KB of an 8 KB kernel stack is not something
+ * to spend inside a syscall that an interrupt may land on top of. It is also the
+ * stack being dumped, so a buffer there would show up in its own output.
  */
 void sys_stack_dump(arch_regs_t *regs) {
-    if (current_task->uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for this command.");
-        regs->eax = E_PERM; 
-        return; 
-    }
-    print_kernel_stack();
-    regs->eax = 0;
+    void *ubuf = (void *)regs->ebx;
+    uint32_t ucap = (uint32_t)regs->ecx;
+
+    if (!diag_ready(regs, ubuf, ucap)) return;
+
+    char *text = (char *)kmalloc(STACK_DUMP_BUF);
+    if (!text) { regs->eax = E_NOMEM; return; }
+
+    int n = format_kernel_stack(text, STACK_DUMP_BUF);
+
+    deliver_text(regs, ubuf, ucap, text, n);
+    kfree(text);
 }
 
 /**
  * @brief Function sys_meminfo
  */
 void sys_meminfo(arch_regs_t *regs) {
-    if (current_task->uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for this command.");
-        regs->eax = E_PERM; 
-        return; 
-    }
+    void *ubuf = (void *)regs->ebx;
+    uint32_t ucap = (uint32_t)regs->ecx;
+    char text[160];
+    int n;
+
+    if (!diag_ready(regs, ubuf, ucap)) return;
     /*
      * "Free" stopped being a complete answer when fork() started sharing pages
      * instead of duplicating them: almost nothing is spent at the fork itself,
@@ -619,51 +688,62 @@ void sys_meminfo(arch_regs_t *regs) {
      * shell and a forked child share a few dozen pages, not a few dozen
      * megabytes.
      */
-    printk("RAM: Total %d MB | Free %d MB | Shared %d KB\n",
-           pmm_get_total_memory() / (1024 * 1024),
-           pmm_get_free_memory() / (1024 * 1024),
-           (pmm_get_shared_frames() * PAGE_SIZE) / 1024);
-    regs->eax = 0;
+    n = kbprintf(text, sizeof(text), 0, "RAM: Total %d MB | Free %d MB | Shared %d KB\n",
+                 pmm_get_total_memory() / (1024 * 1024),
+                 pmm_get_free_memory() / (1024 * 1024),
+                 (pmm_get_shared_frames() * PAGE_SIZE) / 1024);
+
+    deliver_text(regs, ubuf, ucap, text, n);
 }
 
 /**
  * @brief Function sys_test_malloc
  */
 void sys_test_malloc(arch_regs_t *regs) {
-    if (current_task->uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for this command.");
-        regs->eax = E_PERM; 
-        return; 
-    }
+    void *ubuf = (void *)regs->ebx;
+    uint32_t ucap = (uint32_t)regs->ecx;
+    char text[160];
+    int n = 0;
+
+    if (!diag_ready(regs, ubuf, ucap)) return;
+
     char *w = (char *)kmalloc(50);
-    if (w) { 
-        w[0] = '4'; w[1] = '2'; w[2] = '\0'; 
-        printk("Allocated: 0x%x, Size: %d\n", (uint32_t)w, kmalloc_size(w)); 
-        kfree(w); 
+    if (w) {
+        w[0] = '4'; w[1] = '2'; w[2] = '\0';
+        n = kbprintf(text, sizeof(text), 0, "Allocated: 0x%x, Size: %d\n",
+                     (uint32_t)w, kmalloc_size(w));
+        kfree(w);
+    } else {
+        n = kbprintf(text, sizeof(text), 0, "Allocation of 50 bytes failed\n");
     }
-    regs->eax = 0;
+
+    deliver_text(regs, ubuf, ucap, text, n);
 }
 
 /**
  * @brief Function sys_hexdump
  */
 void sys_hexdump(arch_regs_t *regs) {
-    if (!validate_user_pointer((const void *)regs->ebx, 64)) { 
-        regs->eax = E_FAULT; 
-        return; 
-    }
-    if (current_task->uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: ROOT permission is required for this command.");
-        regs->eax = E_PERM; 
-        return; 
-    }
+    const void *target = (const void *)regs->ebx;
+    void *ubuf = (void *)regs->ecx;
+    uint32_t ucap = (uint32_t)regs->edx;
     uint8_t data[64];
-    if (copy_from_user(data, (const void *)regs->ebx, sizeof(data)) != E_OK) {
-        regs->eax = E_FAULT;
-        return;
-    }
-    print_hexdump((uint32_t)data, sizeof(data));
-    regs->eax = E_OK;
+    char text[512];
+    int n;
+
+    if (!diag_ready(regs, ubuf, ucap)) return;
+
+    if (!validate_user_pointer(target, sizeof(data))) { regs->eax = E_FAULT; return; }
+    if (copy_from_user(data, target, sizeof(data)) != E_OK) { regs->eax = E_FAULT; return; }
+
+    /*
+     * The address in the rendering is the staging copy's, not the caller's,
+     * which is what it has always shown - the dump is of bytes copied in, and
+     * the kernel has no business printing a user address it did not read from.
+     */
+    n = format_hexdump(text, sizeof(text), (uint32_t)data, (int)sizeof(data));
+
+    deliver_text(regs, ubuf, ucap, text, n);
 }
 
 /**

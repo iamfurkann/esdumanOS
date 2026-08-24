@@ -18,6 +18,41 @@
 int printk(const char *format, ...);
 
 /**
+ * @brief Formats into a buffer, as printk() does into the screen.
+ *
+ * Exported as of v0.9.2 because commands stopped printing their output from the
+ * kernel. A syscall that prints cannot be piped or redirected - the bytes go to
+ * the screen and never reach the caller's descriptor 1 - so the ones that
+ * produced output now fill a buffer the caller wrote, and this is what they fill
+ * it with.
+ *
+ * @param buf Destination.
+ * @param size Capacity, terminator included.
+ * @param format Format string.
+ * @param args Arguments.
+ * @return Characters written, excluding the terminator.
+ */
+int kvsnprintf(char *buf, uint32_t size, const char *format, va_list args);
+
+/**
+ * @brief Appends formatted text to a buffer that is being built up.
+ *
+ * Takes the length so far and returns the new one, so a run of these reads like
+ * the run of printk() calls it replaces without any of them having to think
+ * about where the last one stopped. Never writes past the capacity and never
+ * leaves the buffer unterminated; once full, further calls add nothing and
+ * return the length unchanged.
+ *
+ * @param buf Destination.
+ * @param cap Capacity, terminator included.
+ * @param used Characters already in the buffer.
+ * @param format Format string.
+ * @param ... Arguments.
+ * @return The new length, excluding the terminator.
+ */
+int kbprintf(char *buf, uint32_t cap, uint32_t used, const char *format, ...);
+
+/**
  * @brief Kernel helper to output a single character.
  * 
  * @param c The character to output.

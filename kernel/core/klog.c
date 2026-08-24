@@ -320,6 +320,22 @@ void klog_record(int level, const char *module, const char *message) {
 }
 
 /**
+ * @brief Records a line with an integer value, without printing it.
+ *
+ * @param level Severity.
+ * @param module Subsystem name.
+ * @param message The text.
+ * @param val Appended after a space.
+ */
+void klog_record_int(int level, const char *module, const char *message, int val) {
+    if (level < current_log_level) return;
+
+    char num_str[16];
+    klog_itoa(val, num_str);
+    klog_emit(level, module, message, num_str, 0);
+}
+
+/**
  * @brief klog
  * @param level
  * @param module

@@ -234,6 +234,23 @@ void keyboard_handle_scancode(uint8_t scancode) {
       e0_mode = 0;
       if (scancode == 0x38) { altgr_pressed = 1; return; }
       else if (scancode == (0x38 | 0x80)) { altgr_pressed = 0; return; }
+
+      /*
+       * The controller's fake shift, and it has to be thrown away.
+       *
+       * Pressing an extended key while Shift is held does not send what one
+       * would expect. The controller cancels the shift first and puts it back
+       * afterwards, so Shift with Page Up arrives as E0 AA, E0 49, and the
+       * release as E0 C9, E0 2A - the AA being a shift *release* that the user
+       * never performed. Treating it as one leaves shift_pressed clear at
+       * exactly the moment the key that needed it arrives, which is why
+       * scrollback on Shift with the Page keys could never have worked: the
+       * modifier was cancelled a byte before it was tested.
+       *
+       * A real shift press or release has no E0 in front of it, so the prefix is
+       * the whole of the distinction.
+       */
+      if (scancode == 0x2A || scancode == 0xAA) return;
     }
 
     if (scancode & 0x80) {

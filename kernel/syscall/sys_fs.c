@@ -238,9 +238,15 @@ void sys_write(arch_regs_t *regs) {
     }
 
     if (desc->type == FD_TYPE_CONSOLE) {
-        for(int i=0; i<size; i++) terminal_putchar(kernel_buf[i]);
+        /*
+         * One write, one refresh. The loop that used to be here paid for a full
+         * repaint on every completed escape sequence and reprogrammed the
+         * hardware cursor on every character - which a shell printing a prompt
+         * never noticed and a program drawing a screen could not survive.
+         */
+        terminal_write_batch((const char *)kernel_buf, (size_t)size);
         regs->eax = size;
-    } 
+    }
     else if (desc->type == FD_TYPE_PIPE) {
         int ret = pipe_write((pipe_t *)desc->ptr, kernel_buf, size);
         if (ret == E_AGAIN) {

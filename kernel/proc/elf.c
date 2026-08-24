@@ -27,7 +27,7 @@ static const uint8_t zero_page[4096] = {0};
  * @param parent_id ID of the parent directory.
  * @return The task index on success, or a negative error code on failure.
  */
-int load_and_exec_elf(const char *filename, uint8_t parent_id)
+int load_and_exec_elf(const char *filename, fs_id_t parent_id)
 {
     /*
      * LOCKDOWN is documented as blocking new task creation, but nothing

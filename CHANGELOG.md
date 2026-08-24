@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-alpha] "Vouch" - 2026-08-24
+
+The disk says what it is. Until this release nothing on it did: `init_fs()` read the
+directory table and the allocation table out of their sectors and used whatever was
+there, with no magic number, no version and no check of any kind. A kernel could not
+tell one of its own images from an older one, from a disk belonging to something else,
+or from two megabytes of noise — and that gap kept itself open, because without a
+version field the *next* format change could not have recognised these disks either.
+
+This is the one change that cannot be undone, so everything the format was short of
+went in at once: permission bits, a group, two timestamps, and entry ids wide enough
+to stop capping the file system at 256 files.
+
+### Added
+
+- **A superblock, in sector 0.** Magic, format version, and the geometry the file
+  system was laid out with — where the directory table starts and how many sectors it
+  occupies, where the allocation table starts, where data begins, how big an entry is,
+  how many sectors to a cluster. A mounted file system is read with the geometry its
+  superblock records rather than with the constants this build was compiled with, so
+  changing the layout later does not need a new version number at all.
+
+  Sector 0 was empty before, reserved for a partition table that has not arrived yet.
+  It still is: the superblock is the file system's, and v0.10.0 gets the argument about
+  who owns sector 0 when partitions land.
+
+- **`mode`, `owner_gid`, `mtime` and `ctime` on every entry.** Files are created 0644,
+  directories 0755, owner and group from the creating task. `mtime` moves when the
+  contents change and `ctime` when the entry does — a rename touches the second and not
+  the first, which is the whole reason there are two.
+
+  **Nothing enforces the mode yet.** `check_vfs_access()` still decides by comparing
+  names against `"tmp"`, `"root"` and `"shadow"`, and replacing it is what v0.9.1 is
+  for. A mode that is recorded truthfully and not yet consulted is a smaller lie than
+  one invented at the moment something asks for it, and `stat` says which it is.
+
+- **An epoch.** `esdtime.h` said there was no epoch anything in this system agreed on,
+  and when it was written that was true — the consumers were `date(1)` and the log, and
+  both want the fields broken down. A file's timestamp is the consumer that does not:
+  every question anybody asks of one is a comparison. The broken-down form stays and
+  the conversions sit beside it, header-only and pure so the suite can call them
+  directly. It runs out in 2106, which is written down rather than worked around.
+
+- **`stat` reports the group, the mode and both times**, the times as dates rather
+  than as the counts they are stored as. A timestamp of zero prints as a dash, not as
+  1970: a field that was never set has no time, and the start of the epoch is a real
+  instant that would read like one.
+
+  Stored in UTC, displayed in local time with the offset alongside. Storage has to be
+  UTC or the count is not an epoch — two files stamped either side of a timezone change
+  would compare by what the clock said rather than by when it happened. Display does
+  not, so `stat` asks the clock for the offset the system is set to and puts it back on.
+
+### Changed
+
+- **An entry is 96 bytes, down from 272, and there are 512 of them instead of 256.**
+  The name field was 256 bytes of a 272-byte entry — 94% of the format spent on
+  something nothing had ever filled past a few dozen characters. At 64 it pays for
+  every field above *and* for twice as many entries, and the directory table costs 48 KB
+  of kernel memory where it used to cost 68 KB.
+
+- **`entry_id` and `parent_id` are 16 bits.** The file system was capped at 256 entries
+  because the field was one byte, which is not a limit anybody chose. They have a name
+  now, `fs_id_t`, so the next widening is one line instead of eighty-five.
+
+- **`MAX_FILENAME` and `MAX_PATH` are different constants.** They were the same one,
+  so shortening the name would have quietly shortened every path buffer with it. A name
+  is one component and a path is all of them.
+
+- **A name too long is refused, not shortened.** Both the VFS and the path resolver used
+  to truncate: at 256 bytes that took a name nobody would type, and at 64 it takes an
+  ordinary long one — where the result is not an error but a *different file*, created
+  under a name the user did not ask for, and two long names sharing a prefix becoming
+  one file.
+
+- **An unrecognised disk is refused, and nothing is written to it.** An image from
+  v0.8.4 or earlier is recognisable exactly because the old format never used sector 0,
+  so a zero superblock over a non-zero directory region can only be one thing. Handed
+  one, this kernel would otherwise have read 272-byte entries as 96-byte ones, found a
+  directory tree that was not there, and written its own tables over the user's files.
+
+### Removed
+
+- **`tools/mkfs.py`, and the host Python test lane that existed to run it.** The tool
+  wrote a format with a 32-byte name field that no version in years has used, and its
+  one caller was `tests/host/python/test_mkfs.py`, which asserted that a Python function
+  had produced a 2 MB file and nothing else about it.
+
+  It had also become actively wrong: `write_disk()` puts a message in sector 0, which is
+  where the superblock now lives, so the image it produced would be declined by the
+  kernel it is supposed to make disks for. And it wrote `disk.img` into the working
+  directory, meaning `make test` overwrote the real one.
+
+  Rewriting it to emit a valid v0.9.0 image was the alternative and was rejected: the
+  kernel formats a blank disk itself on first boot, so nothing needs the tool, and a
+  Python copy of the format would be a second definition to keep in step with `fs.h`.
+  With its only test gone the `make test` Python lane ran zero tests, which
+  `unittest discover` reports as a failure, so the lane goes with it.
+
 ## [0.8.4-alpha] - 2026-08-24
 
 The editor became usable and the shell stopped lying about what you had typed. Nothing in

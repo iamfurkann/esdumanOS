@@ -89,7 +89,7 @@ static int derive_file_iv(const uint8_t key[32], uint8_t iv_out[16]) {
  * @param parent_id The ID of the parent directory.
  * @return Status code (e.g., E_OK or error).
  */
-int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, const uint8_t key[32], uint8_t parent_id) {
+int fs_create_encrypted(const char *name, const uint8_t *data, uint32_t len, const uint8_t key[32], fs_id_t parent_id) {
     uint32_t payload_len = 40 + len;
     uint32_t padded_len = (payload_len + 15) & ~15;
     uint32_t total_len = 16 + padded_len;

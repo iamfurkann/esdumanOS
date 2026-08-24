@@ -2,6 +2,8 @@
 #define ELF_H
 
 #include "types.h"
+/* For fs_id_t: the program to run is named relative to a directory entry. */
+#include "fs.h"
 
 /**
  * @brief Magic number identifying an Executable and Linkable Format (ELF) file.
@@ -55,7 +57,7 @@ typedef struct {
  * @param parent_id The entry ID of the parent directory where the file resides.
  * @return Usually does not return on success; returns a negative error code on failure.
  */
-int load_and_exec_elf(const char *filename, uint8_t parent_id);
+int load_and_exec_elf(const char *filename, fs_id_t parent_id);
 
 /**
  * @brief Validates an in-memory 32-bit i386 ELF executable before loading it.

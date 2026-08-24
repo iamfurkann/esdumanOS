@@ -124,7 +124,7 @@ static void load_timezone(void) {
      * this file and has no declaration to be called through from up here. */
     int etc_id = fs_get_entry_idx("etc", 0);
     if (etc_id < 0) return;
-    if (fs_open("timezone", (uint8_t)etc_id, &f) != E_OK) return;
+    if (fs_open("timezone", (fs_id_t)etc_id, &f) != E_OK) return;
 
     uint8_t raw[64];
     int got = fs_read(&f, raw, sizeof(raw) - 1);
@@ -176,7 +176,7 @@ static void load_timezone(void) {
  * @param parent_id
  * @return int
  */
-int get_vfs_id(const char *name, uint8_t parent_id) {
+int get_vfs_id(const char *name, fs_id_t parent_id) {
     int idx = fs_get_entry_idx(name, parent_id);
     if (idx != -1) return dir_table[idx].entry_id;
     return -1;

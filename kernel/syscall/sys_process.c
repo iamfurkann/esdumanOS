@@ -293,7 +293,7 @@ void sys_wait(arch_regs_t *regs) {
  *             pid for EXEC_NOWAIT, or a negative errno.
  */
 void sys_exec(arch_regs_t *regs) {
-    char target_path[MAX_FILENAME];
+    char target_path[MAX_PATH];
     if (!copy_user_string(target_path, (const char *)regs->ebx, sizeof(target_path))) {
         regs->eax = E_FAULT; 
         return; 
@@ -303,7 +303,7 @@ void sys_exec(arch_regs_t *regs) {
      * from the PCB. It used to come from regs->ecx, which meant the caller chose
      * where its own lookup started.
      */
-    uint8_t calling_dir_id = current_task ? current_task->cwd_id : 0;
+    fs_id_t calling_dir_id = current_task ? current_task->cwd_id : 0;
 
     char temp_args[128];
     for (int k = 0; k < 128; k++) temp_args[k] = '\0';

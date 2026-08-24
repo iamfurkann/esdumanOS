@@ -10,15 +10,15 @@
  * "-I include" (see USER_CFLAGS in the Makefile), so there is one definition
  * rather than a copy on each side that could drift.
  *
- * Field order is chosen so the struct has no padding holes at -m32: five 32-bit
- * words, then two bytes and a 16-bit tail that together fill one more word.
+ * Field order is chosen so the struct has no padding holes at -m32: eight 32-bit
+ * words, then a 16-bit field and two bytes that together fill one more.
  * copy_to_user() moves it as a flat block, so a hole would leak whatever the
  * kernel stack happened to hold there.
  *
- * There is deliberately no st_mtime. disk_file_entry_t carries no timestamps
- * (see fs.h) and the RTC is not wired into the VFS at all, so any time reported
- * here would be invented. When the on-disk format grows a real one, this struct
- * can grow with it.
+ * It said there was deliberately no st_mtime, because disk_file_entry_t carried
+ * no timestamps and anything reported here would have been invented - and that
+ * when the format grew a real one, this struct could grow with it. v0.9.0 is
+ * that release, and it did.
  */
 typedef struct {
     /**
@@ -45,16 +45,39 @@ typedef struct {
     /** Owning user id. */
     uint32_t st_uid;
 
+    /** Owning group id. There is no group database, so it tracks the uid. */
+    uint32_t st_gid;
+
     /** Entry id of the containing directory; the root is 0 and is its own parent. */
     uint32_t st_parent;
+
+    /**
+     * Seconds since the Unix epoch, UTC, when the contents were last written.
+     *
+     * Zero means the entry predates the timestamp, which nothing on a disk this
+     * kernel will mount can - it refuses older formats - but zero is the honest
+     * answer for a field that was never set rather than a plausible-looking date.
+     */
+    uint32_t st_mtime;
+
+    /** Seconds since the Unix epoch, UTC, when the entry was created. */
+    uint32_t st_ctime;
+
+    /**
+     * Permission bits.
+     *
+     * Recorded and reported; nothing consults them yet. Access is still decided
+     * by check_vfs_access(), which compares names, and replacing it is what
+     * v0.9.1 is for. Reporting a mode that is really stored is not the same as
+     * claiming it is enforced, and the README says which is which.
+     */
+    uint16_t st_mode;
 
     /** FT_REGULAR or FT_DIR, as defined in fs.h. */
     uint8_t st_type;
 
     /** 1 when the bytes on disk are ciphertext. */
     uint8_t st_encrypted;
-
-    uint16_t st_reserved;
 } esd_stat_t;
 
 /**

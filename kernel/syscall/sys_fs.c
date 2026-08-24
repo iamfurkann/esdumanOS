@@ -67,7 +67,7 @@ static int copy_user_string(char *destination, const char *source, size_t max_le
  * @return Parent directory entry id, or a negative errno.
  */
 static int split_from_cwd(const char *path, char *basename) {
-    uint8_t base = current_task ? current_task->cwd_id : 0;
+    fs_id_t base = current_task ? current_task->cwd_id : 0;
     return vfs_resolve_path(path, base, basename);
 }
 /**
@@ -486,7 +486,7 @@ void sys_close(arch_regs_t *regs) {
  * @brief Function sys_open
  */
 void sys_open(arch_regs_t *regs) {
-    char path[MAX_FILENAME];
+    char path[MAX_PATH];
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
     char basename[MAX_FILENAME];
     for (int k = 0; k < MAX_FILENAME; k++) basename[k] = '\0';
@@ -577,7 +577,7 @@ void sys_open(arch_regs_t *regs) {
  * @brief Function sys_create_file
  */
 void sys_create_file(arch_regs_t *regs) {
-    char filename[MAX_FILENAME];
+    char filename[MAX_PATH];
     char *content = (char *)kmalloc(4096);
     if (!content) { regs->eax = E_NOMEM; return; }
     if (!copy_user_string(filename, (const char *)regs->ebx, sizeof(filename)) ||
@@ -589,12 +589,12 @@ void sys_create_file(arch_regs_t *regs) {
     int parent_id = split_from_cwd(filename, basename);
     if (parent_id < 0 || basename[0] == '\0') { kfree(content); regs->eax = E_NOENT; return; }
 
-    if (!check_vfs_access((uint8_t)parent_id, 1)) {
+    if (!check_vfs_access((fs_id_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: No write access to this location!");
         kfree(content);
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_create_file(basename, (uint8_t *)content, ft_strlen(content), (uint8_t)parent_id);
+    regs->eax = fs_create_file(basename, (uint8_t *)content, ft_strlen(content), (fs_id_t)parent_id);
     kfree(content);
 }
 
@@ -602,25 +602,25 @@ void sys_create_file(arch_regs_t *regs) {
  * @brief Function sys_rm_file
  */
 void sys_rm_file(arch_regs_t *regs) {
-    char filename[MAX_FILENAME];
+    char filename[MAX_PATH];
     if (!copy_user_string(filename, (const char *)regs->ebx, sizeof(filename))) { regs->eax = E_FAULT; return; }
     char basename[MAX_FILENAME];
     int parent_id = split_from_cwd(filename, basename);
     if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
-    if (!check_vfs_access((uint8_t)parent_id, 1)) {
+    if (!check_vfs_access((fs_id_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "rm: Permission denied. Cannot delete this file!");
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_delete(basename, (uint8_t)parent_id);
+    regs->eax = fs_delete(basename, (fs_id_t)parent_id);
 }
 
 /**
  * @brief Function sys_mv_file
  */
 void sys_mv_file(arch_regs_t *regs) {
-    char old_name[MAX_FILENAME];
-    char new_name[MAX_FILENAME];
+    char old_name[MAX_PATH];
+    char new_name[MAX_PATH];
     if (!copy_user_string(old_name, (const char *)regs->ebx, sizeof(old_name)) ||
         !copy_user_string(new_name, (const char *)regs->ecx, sizeof(new_name))) {
         regs->eax = E_FAULT; return; 
@@ -645,28 +645,28 @@ void sys_mv_file(arch_regs_t *regs) {
         regs->eax = E_INVAL; return;
     }
 
-    if (!check_vfs_access((uint8_t)old_parent, 1)) {
+    if (!check_vfs_access((fs_id_t)old_parent, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mv: Permission denied. Cannot rename this file!");
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_rename(old_base, new_base, (uint8_t)old_parent);
+    regs->eax = fs_rename(old_base, new_base, (fs_id_t)old_parent);
 }
 
 /**
  * @brief Function sys_mkdir
  */
 void sys_mkdir(arch_regs_t *regs) {
-    char name[MAX_FILENAME];
+    char name[MAX_PATH];
     if (!copy_user_string(name, (const char *)regs->ebx, sizeof(name))) { regs->eax = E_FAULT; return; }
     char basename[MAX_FILENAME];
     int parent_id = split_from_cwd(name, basename);
     if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
-    if (!check_vfs_access((uint8_t)parent_id, 1)) {
+    if (!check_vfs_access((fs_id_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mkdir: Permission denied. No directory creation access!");
         regs->eax = E_ACCES; return;
     }
-    regs->eax = fs_mkdir(basename, (uint8_t)parent_id);
+    regs->eax = fs_mkdir(basename, (fs_id_t)parent_id);
 }
 
 /**
@@ -730,7 +730,7 @@ static int resolve_dir_from_cwd(const char *path) {
  * @brief Function sys_get_dir_id
  */
 void sys_get_dir_id(arch_regs_t *regs) {
-    char path[MAX_FILENAME];
+    char path[MAX_PATH];
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
 
     regs->eax = resolve_dir_from_cwd(path);
@@ -744,7 +744,7 @@ void sys_get_dir_id(arch_regs_t *regs) {
  * than somewhere half-resolved.
  */
 void sys_chdir(arch_regs_t *regs) {
-    char path[MAX_FILENAME];
+    char path[MAX_PATH];
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
     if (current_task == 0) { regs->eax = E_FAULT; return; }
 
@@ -827,7 +827,7 @@ void sys_getcwd(arch_regs_t *regs) {
  * @param id Entry id to find. 0 is the root, which has no slot of its own.
  * @return Index into dir_table, or -1 when no live entry carries that id.
  */
-static int dir_index_of_entry_id(uint8_t id) {
+static int dir_index_of_entry_id(fs_id_t id) {
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1 && dir_table[i].entry_id == id) return i;
     }
@@ -847,10 +847,20 @@ static void stat_fill_root(esd_stat_t *out) {
     out->st_disk_size = 0;
     out->st_ino = 0;
     out->st_uid = 0;
+    out->st_gid = 0;
     out->st_parent = 0;
+    /*
+     * No timestamps, and zero rather than the current time. Root is not an entry
+     * and was never created, so there is no moment to report; the one thing this
+     * must not do is invent one that looks like an answer. Every field is written
+     * either way - the struct goes to user space as a flat block, and one left
+     * alone would hand over whatever the kernel stack was holding.
+     */
+    out->st_mtime = 0;
+    out->st_ctime = 0;
+    out->st_mode = FS_MODE_DEFAULT_DIR;
     out->st_type = FT_DIR;
     out->st_encrypted = 0;
-    out->st_reserved = 0;
 }
 
 /**
@@ -874,10 +884,13 @@ static int stat_fill_from_index(esd_stat_t *out, int idx, vfs_file_t *open_file)
 
     out->st_ino = dir_table[idx].entry_id;
     out->st_uid = dir_table[idx].owner_uid;
+    out->st_gid = dir_table[idx].owner_gid;
     out->st_parent = dir_table[idx].parent_id;
     out->st_type = dir_table[idx].file_type;
     out->st_disk_size = dir_table[idx].file_size;
-    out->st_reserved = 0;
+    out->st_mtime = dir_table[idx].mtime;
+    out->st_ctime = dir_table[idx].ctime;
+    out->st_mode = dir_table[idx].mode & FS_MODE_PERM_MASK;
 
     if (dir_table[idx].file_type == FT_DIR) {
         /* Directories hold no file content: fs_mkdir() stores size 0 and there
@@ -903,7 +916,7 @@ static int stat_fill_from_index(esd_stat_t *out, int idx, vfs_file_t *open_file)
  * other path-taking syscall since v0.3.0 - see split_from_cwd().
  */
 void sys_stat(arch_regs_t *regs) {
-    char path[MAX_FILENAME];
+    char path[MAX_PATH];
     esd_stat_t *user_out = (esd_stat_t *)regs->ecx;
 
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
@@ -938,7 +951,7 @@ void sys_stat(arch_regs_t *regs) {
             stat_fill_root(&st);
             rc = E_OK;
         } else {
-            rc = stat_fill_from_index(&st, dir_index_of_entry_id((uint8_t)target), 0);
+            rc = stat_fill_from_index(&st, dir_index_of_entry_id((fs_id_t)target), 0);
         }
     } else {
         if (!check_vfs_access(parent_id, 0)) {
@@ -946,7 +959,7 @@ void sys_stat(arch_regs_t *regs) {
             regs->eax = E_ACCES; return;
         }
 
-        rc = stat_fill_from_index(&st, fs_get_entry_idx(basename, (uint8_t)parent_id), 0);
+        rc = stat_fill_from_index(&st, fs_get_entry_idx(basename, (fs_id_t)parent_id), 0);
     }
 
     if (rc != E_OK) { regs->eax = rc; return; }
@@ -1073,7 +1086,7 @@ void sys_cat_raw(arch_regs_t *regs) {
     char basename[MAX_FILENAME];
     int resolved = split_from_cwd(target_file, basename);
     if (resolved < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
-    uint8_t parent_id = (uint8_t)resolved;
+    fs_id_t parent_id = (fs_id_t)resolved;
 
     vfs_file_t file;
 
@@ -1115,7 +1128,7 @@ void sys_cat_file(arch_regs_t *regs) {
     char basename[MAX_FILENAME];
     int resolved = split_from_cwd(target_file, basename);
     if (resolved < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
-    uint8_t parent_id = (uint8_t)resolved;
+    fs_id_t parent_id = (fs_id_t)resolved;
 
     vfs_file_t file;
 
@@ -1162,7 +1175,7 @@ void sys_cat_file(arch_regs_t *regs) {
  *   eax = total bytes written, or negative error code
  */
 void sys_readdir(arch_regs_t *regs) {
-    uint8_t parent_id = (uint8_t)regs->ebx;
+    fs_id_t parent_id = (fs_id_t)regs->ebx;
     char *user_buf = (char *)regs->ecx;
     uint32_t buf_size = regs->edx;
 

@@ -10,6 +10,7 @@
 #include "errno.h"
 #include "libft.h"
 #include "security.h"
+#include "bcache.h"
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
@@ -402,6 +403,155 @@ void test_vfs_boundary_and_depth(void) {
  * - Standard file creation and deletion processes execute correctly and return success indicators.
  * - Finally, triggers the advanced test_vfs_boundary_and_depth subroutine.
  */
+/**
+ * @brief Verifies the on-disk format: its shape, its geometry and its wide ids.
+ *
+ * Expected behavior:
+ * - A directory entry is exactly the size the format says, on disk and in memory.
+ * - The superblock describes a geometry the regions actually fit inside.
+ * - An entry id past 255 survives being written and read back.
+ *
+ * Edge cases covered:
+ * - A name one byte too long, which must be refused rather than shortened.
+ * - A path component too long, which used to be silently truncated into a
+ *   different name.
+ *
+ * Volume is deliberately not what this tests. Proving the table holds more than
+ * 256 entries by creating 256 files would spend twenty thousand sector writes to
+ * demonstrate something that can only fail one way - a field too narrow to carry
+ * the number - and that is asserted directly instead.
+ */
+static void test_disk_format(void) {
+    /* ------------------------------------------------------------------
+     * The shape. packed is a request, and a compiler that declined it would
+     * produce a kernel that writes disks no other build can read.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(sizeof(disk_file_entry_t) == 96,
+                 "[STRICT] [VFS] a directory entry is exactly 96 bytes");
+    KTEST_ASSERT(sizeof(((disk_file_entry_t *)0)->entry_id) == 2 &&
+                 sizeof(((disk_file_entry_t *)0)->parent_id) == 2,
+                 "[STRICT] [VFS] and its ids are two bytes, not one");
+    KTEST_ASSERT(sizeof(disk_superblock_t) <= 512,
+                 "[STRICT] [VFS] the superblock fits in the sector it lives in");
+    KTEST_ASSERT(MAX_FILENAME < MAX_PATH,
+                 "[VFS] a path can hold more than one name's worth of characters");
+
+    /* ------------------------------------------------------------------
+     * The geometry, as the mounted superblock reports it.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(fs_mounted == 1, "[VFS] a file system is mounted");
+    KTEST_ASSERT(fs_super.magic == FS_SUPER_MAGIC &&
+                 fs_super.format_version == FS_FORMAT_VERSION,
+                 "[STRICT] [VFS] the superblock says what it is and which version");
+    KTEST_ASSERT(fs_super.entry_size == sizeof(disk_file_entry_t) &&
+                 fs_super.max_entries <= MAX_FILES_IN_DIR,
+                 "[STRICT] [VFS] and describes entries this build agrees with");
+    KTEST_ASSERT(fs_super.dir_start < fs_super.fat_start &&
+                 fs_super.fat_start < fs_super.data_start,
+                 "[VFS] the regions are in order and do not overlap");
+
+    /*
+     * Each region is large enough for what it has to hold. Getting this wrong
+     * does not fail loudly: the directory table would run over the start of the
+     * FAT and each would quietly corrupt the other.
+     */
+    KTEST_ASSERT((uint32_t)fs_super.entry_size * fs_super.max_entries
+                     <= fs_super.dir_sectors * 512u,
+                 "[STRICT] [VFS] the directory table fits in the sectors reserved for it");
+    KTEST_ASSERT(fs_super.dir_start + fs_super.dir_sectors <= fs_super.fat_start,
+                 "[STRICT] [VFS] and stops before the allocation table starts");
+    KTEST_ASSERT(fs_max_sectors * sizeof(uint32_t)
+                     <= (fs_super.data_start - fs_super.fat_start) * 512u,
+                 "[STRICT] [VFS] the allocation table fits before the data does");
+
+    /* ------------------------------------------------------------------
+     * An id past what a byte holds. This is the whole of what widening them
+     * was for, and the way it fails is truncation - which is silent.
+     * ------------------------------------------------------------------ */
+    {
+        int slot = -1;
+
+        for (int i = 1; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].is_used == 0) { slot = i; break; }
+        }
+        KTEST_ASSERT(slot > 0, "[VFS] the directory table has room to test with");
+
+        if (slot > 0) {
+            uint8_t sec_buf[512];
+            uint32_t byte_off = (uint32_t)slot * fs_super.entry_size;
+            uint32_t sector = fs_super.dir_start + byte_off / 512u;
+            uint32_t within = byte_off % 512u;
+            disk_file_entry_t readback;
+
+            ft_memset(&dir_table[slot], 0, sizeof(disk_file_entry_t));
+            ft_strcpy(dir_table[slot].filename, "wide_id_dir");
+            dir_table[slot].is_used = 1;
+            dir_table[slot].file_type = FT_DIR;
+            dir_table[slot].entry_id = 300;
+            dir_table[slot].parent_id = 0;
+            dir_table[slot].mode = FS_MODE_DEFAULT_DIR;
+
+            KTEST_ASSERT(dir_table[slot].entry_id == 300,
+                         "[STRICT] [VFS] an entry id of 300 is still 300 in memory");
+            KTEST_ASSERT(fs_dir_exists(300) == 1,
+                         "[STRICT] [VFS] and a lookup finds the directory it names");
+            KTEST_ASSERT(fs_get_entry_idx("wide_id_dir", 0) == slot,
+                         "[VFS] which is reachable by name from the root");
+
+            /*
+             * And it survives the disk. An entry only 96 bytes wide in memory
+             * proves nothing about what lands in the sector; this reads the
+             * bytes back out of the block the entry was written into.
+             */
+            fs_create_file_raw("wide_probe", (const uint8_t *)"x", 1, 300);
+            bcache_read_sector(sector, sec_buf);
+            ft_memcpy(&readback, &sec_buf[within], sizeof(disk_file_entry_t));
+
+            KTEST_ASSERT(readback.entry_id == 300 && readback.parent_id == 0,
+                         "[STRICT] [VFS] an id past 255 survives the trip to the sector and back");
+            KTEST_ASSERT(fs_get_entry_idx("wide_probe", 300) >= 0,
+                         "[STRICT] [VFS] and a file can be created inside a directory with one");
+
+            /*
+             * Cleared first, deleted second, and the order is the point: the
+             * clear only touches memory, and fs_delete() is what writes the
+             * table back. Doing it the other way round would leave the synthetic
+             * directory on the disk for every module that runs after this one.
+             */
+            ft_memset(&dir_table[slot], 0, sizeof(disk_file_entry_t));
+            fs_delete("wide_probe", 300);
+
+            KTEST_ASSERT(fs_dir_exists(300) == 0 &&
+                         fs_get_entry_idx("wide_probe", 300) == -1,
+                         "[STRICT] [VFS] and the module leaves neither behind");
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * A name too long is refused. It used to be truncated, which at 256 bytes
+     * was unreachable and at 64 is a name somebody might actually type - and
+     * the result is not an error, it is a different file.
+     * ------------------------------------------------------------------ */
+    {
+        char just_fits[MAX_FILENAME];
+        char one_too_many[MAX_FILENAME + 2];
+        int i;
+
+        for (i = 0; i < MAX_FILENAME - 1; i++) just_fits[i] = 'a';
+        just_fits[MAX_FILENAME - 1] = '\0';
+
+        for (i = 0; i < MAX_FILENAME; i++) one_too_many[i] = 'b';
+        one_too_many[MAX_FILENAME] = '\0';
+
+        KTEST_ASSERT(fs_create_file_raw(just_fits, (const uint8_t *)"x", 1, 0) == E_OK,
+                     "[VFS] a name of exactly the longest allowed length is accepted");
+        KTEST_ASSERT(fs_create_file_raw(one_too_many, (const uint8_t *)"x", 1, 0) == E_INVAL,
+                     "[STRICT] [VFS] and one byte more is refused rather than shortened");
+
+        fs_delete(just_fits, 0);
+    }
+}
+
 void run_vfs_tests(void) {
     printk("\n--- VFS (Virtual File System) Tests ---\n");
 
@@ -435,4 +585,5 @@ void run_vfs_tests(void) {
     test_vfs_size_reporting();
     test_vfs_write_bounds();
     test_vfs_rmdir_semantics();
+    test_disk_format();
 }

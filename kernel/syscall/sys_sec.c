@@ -73,7 +73,9 @@ void sys_setuid_call(arch_regs_t *regs) {
 
     if (current_task->uid == 0) {
         current_task->uid = requested_uid;
-        regs->eax = E_OK; 
+        /* No group database, so the two move together - see process_s. */
+        current_task->gid = requested_uid;
+        regs->eax = E_OK;
         klog_int(LOG_LEVEL_INFO, "AUTH", "SUDO: Privilege changed. New UID", requested_uid);
         return;
     }
@@ -102,8 +104,9 @@ void sys_setuid_call(arch_regs_t *regs) {
         
         int auth_uid = verify_user_password("root", provided_password);
 
-        if (auth_uid == 0) { 
-            current_task->uid = 0; 
+        if (auth_uid == 0) {
+            current_task->uid = 0;
+            current_task->gid = 0;
             current_task->auth_fail_ticks = 0;
             regs->eax = E_OK;
             klog_int(LOG_LEVEL_INFO, "AUTH", "Password verified. Escalated to ROOT privilege. PID", current_task->pid);

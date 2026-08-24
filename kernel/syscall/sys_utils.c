@@ -103,7 +103,21 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
             }
             t_idx = 0;
         } else {
-            if (t_idx < MAX_FILENAME - 1) token[t_idx++] = path[i];
+            /*
+             * A component too long to hold is refused, not shortened.
+             *
+             * This used to drop the excess: t_idx simply stopped advancing. With
+             * MAX_FILENAME at 256 that took a name nobody would type, and with it
+             * at 64 it takes an ordinary long one - and the result is not an
+             * error, it is a different file. The path would resolve, the create
+             * would succeed under a name the user did not ask for, and two long
+             * names sharing their first 63 characters would be the same file.
+             */
+            if (t_idx >= MAX_FILENAME - 1) {
+                klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Path component too long");
+                return E_INVAL;
+            }
+            token[t_idx++] = path[i];
         }
         i++;
     }

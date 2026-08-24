@@ -166,6 +166,77 @@ static void run_epoch_tests(void) {
 }
 
 /**
+ * @brief Verifies that the clock can be set, and refuses what it cannot hold.
+ *
+ * Expected behavior:
+ * - A time that is set reads back as itself.
+ * - A date the chip cannot store is refused and leaves the clock alone.
+ *
+ * Edge cases covered:
+ * - The 29th of February, which must be accepted in a leap year and refused in
+ *   a common one.
+ * - The year before the chip's range, and the hour and month past their ends.
+ *
+ * This moves the real hardware clock and puts it back. The restore rewinds by
+ * however long the test took - a fraction of a second - which is worth knowing
+ * and is the price of testing a write against the thing it writes to. The
+ * refusals are checked first, so a range check that let something through
+ * cannot leave the machine somewhere strange before the good case runs.
+ */
+static void run_settime_tests(void) {
+    esd_time_t saved, want, got;
+
+    printk("\n--- Setting the clock ---\n");
+
+    rtc_read_utc(&saved);
+
+    want = utc_at(1999, 12, 31, 23, 59, 59);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_INVAL,
+                 "[STRICT] [TIME] a year before the chip's range is refused");
+
+    want = utc_at(2026, 2, 30, 12, 0, 0);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_INVAL,
+                 "[STRICT] [TIME] the 30th of February is refused");
+
+    want = utc_at(2026, 13, 1, 12, 0, 0);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_INVAL,
+                 "[TIME] a thirteenth month is refused");
+
+    want = utc_at(2026, 1, 1, 24, 0, 0);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_INVAL,
+                 "[STRICT] [TIME] and so is the twenty-fifth hour");
+
+    rtc_read_utc(&got);
+    KTEST_ASSERT(got.year == saved.year && got.month == saved.month,
+                 "[STRICT] [TIME] a refused time leaves the clock where it was");
+
+    /* Thirty seconds into the minute, so reading it back cannot cross into the
+     * next one however slow the round trip is. */
+    want = utc_at(2030, 6, 15, 13, 45, 30);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_OK,
+                 "[TIME] a time the chip can hold is accepted");
+
+    rtc_read_utc(&got);
+    KTEST_ASSERT(got.year == 2030 && got.month == 6 && got.day == 15,
+                 "[STRICT] [TIME] and the date reads back as what was set");
+    KTEST_ASSERT(got.hour == 13 && got.minute == 45,
+                 "[STRICT] [TIME] and so does the time of day");
+
+    want = utc_at(2028, 2, 29, 6, 0, 0);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_OK,
+                 "[STRICT] [TIME] a leap day is accepted in a leap year");
+
+    want = utc_at(2030, 2, 29, 6, 0, 0);
+    KTEST_ASSERT(rtc_set_utc(&want) == E_INVAL,
+                 "[STRICT] [TIME] and refused in a year that has none");
+
+    rtc_set_utc(&saved);
+    rtc_read_utc(&got);
+    KTEST_ASSERT(got.year == saved.year && got.month == saved.month && got.day == saved.day,
+                 "[TIME] the clock the machine booted with is restored");
+}
+
+/**
  * @brief Builds a time to hand to the arithmetic under test.
  */
 static esd_time_t make_time(int year, int month, int day, int hour) {
@@ -397,4 +468,5 @@ void run_time_tests(void) {
                  "[TIME] the offset the system booted with is restored");
 
     run_epoch_tests();
+    run_settime_tests();
 }

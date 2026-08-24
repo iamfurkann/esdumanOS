@@ -18,7 +18,19 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename);
 /** @brief Checks if the current task has permission to access a VFS entry */
 int check_vfs_access(int entry_id, int needs_write);
 /** @brief Prints a hex dump of memory at the specified address */
-void print_hexdump(uint32_t addr, int lenght);
+/**
+ * @brief Renders a hex dump into a buffer.
+ *
+ * Printed to the screen until v0.9.2, which meant the dump could not be piped or
+ * redirected. The caller writes it now.
+ *
+ * @param buf Destination.
+ * @param cap Capacity, terminator included.
+ * @param addr Address to dump.
+ * @param length Bytes to dump.
+ * @return Characters written, excluding the terminator.
+ */
+int format_hexdump(char *buf, uint32_t cap, uint32_t addr, int length);
 /** @brief Computes a salted djb2 hash of a string */
 uint32_t hash_djb2_salted(const char *str);
 
@@ -50,6 +62,8 @@ void sys_getpid(arch_regs_t *regs);
 void sys_sleep(arch_regs_t *regs);
 /** @brief Syscall handler for reading the current wall-clock time */
 void sys_time(arch_regs_t *regs);
+/** @brief Syscall handler for setting the wall clock */
+void sys_settime(arch_regs_t *regs);
 /** @brief Syscall handler for getting command line arguments */
 void sys_get_args(arch_regs_t *regs);
 /** @brief Syscall handler for dumping the task's stack */
@@ -90,10 +104,8 @@ void sys_ls_dir(arch_regs_t *regs);
 void sys_get_dir_id(arch_regs_t *regs);
 /** @brief Syscall handler for listing all files */
 void sys_list_files(arch_regs_t *regs);
-/** @brief Syscall handler for raw file output */
-void sys_cat_raw(arch_regs_t *regs);
-/** @brief Syscall handler for outputting file contents */
-void sys_cat_file(arch_regs_t *regs);
+/** @brief Syscall handler for reading an open file's stored, undecrypted bytes */
+void sys_read_raw(arch_regs_t *regs);
 /** @brief Syscall handler for reporting a path's metadata */
 void sys_stat(arch_regs_t *regs);
 /** @brief Syscall handler for reporting an open descriptor's metadata */

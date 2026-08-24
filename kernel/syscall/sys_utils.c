@@ -18,31 +18,34 @@
 /**
  * @brief Function print_hexdump
  */
-void print_hexdump(uint32_t addr, int length) {
+int format_hexdump(char *buf, uint32_t cap, uint32_t addr, int length) {
   uint8_t *ptr = (uint8_t *)addr;
   const char hex_chars[] = "0123456789ABCDEF";
+  int n = 0;
 
   for (int i = 0; i < length; i += 16) {
-    printk("0x%x: ", (uint32_t)(ptr + i));
+    n = kbprintf(buf, cap, (uint32_t)n, "0x%x: ", (uint32_t)(ptr + i));
     for (int j = 0; j < 16; j++) {
       if (i + j < length) {
         uint8_t byte = ptr[i + j];
-        printk("%c%c ", hex_chars[byte >> 4], hex_chars[byte & 0x0F]);
+        n = kbprintf(buf, cap, (uint32_t)n, "%c%c ", hex_chars[byte >> 4], hex_chars[byte & 0x0F]);
       } else {
-        printk("  ");
+        n = kbprintf(buf, cap, (uint32_t)n, "   ");
       }
-      if (j == 7) printk(" ");
+      if (j == 7) n = kbprintf(buf, cap, (uint32_t)n, " ");
     }
-    printk(" |");
+    n = kbprintf(buf, cap, (uint32_t)n, " |");
     for (int j = 0; j < 16; j++) {
       if (i + j < length) {
         uint8_t byte = ptr[i + j];
-        if (byte >= 32 && byte <= 126) printk("%c", byte);
-        else printk(".");
+        if (byte >= 32 && byte <= 126) n = kbprintf(buf, cap, (uint32_t)n, "%c", byte);
+        else n = kbprintf(buf, cap, (uint32_t)n, ".");
       }
     }
-    printk("|\n");
+    n = kbprintf(buf, cap, (uint32_t)n, "|\n");
   }
+
+  return n;
 }
 
 /**
@@ -374,6 +377,52 @@ void sys_time(arch_regs_t *regs) {
     else rtc_read_local(&now);
 
     regs->eax = (copy_to_user(user_out, &now, sizeof(now)) == E_OK) ? E_OK : E_FAULT;
+}
+
+/**
+ * @brief Sets the wall clock.
+ *
+ * The clock could be read and never written until v0.9.2, so `date` reported
+ * whatever the machine had come up with and nothing could correct it. That
+ * mattered more once files started carrying timestamps: a wrong clock does not
+ * announce itself, it just stamps every file written from then on.
+ *
+ * The caller hands over the time in the shape it reads one - fields plus the
+ * offset they are adjusted by - and the offset is taken back out here. The
+ * conversion is esdtime.h's, so the calendar carry and the leap-year rule are
+ * the same ones every other part of this system uses rather than a second copy
+ * that gets to disagree.
+ *
+ * Root only. A clock a user can move is a clock that says nothing about when a
+ * file was written.
+ *
+ * @param regs ebx is an esd_time_t* in user memory. On return eax is E_OK, or a
+ *             negative errno.
+ */
+void sys_settime(arch_regs_t *regs) {
+    const esd_time_t *user_in = (const esd_time_t *)regs->ebx;
+    esd_time_t given, utc;
+
+    if (current_task != 0 && current_task->uid != 0) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "settime: root only");
+        regs->eax = E_PERM;
+        return;
+    }
+
+    if (copy_from_user(&given, user_in, sizeof(given)) != E_OK) {
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    /* Round-tripped through the epoch, which is where the offset comes off and
+     * the calendar carry is already right. A date before 1970 converts to zero
+     * and would silently become the epoch, so it is refused instead. */
+    uint32_t epoch = esd_time_to_epoch(&given);
+    if (epoch == 0) { regs->eax = E_INVAL; return; }
+
+    esd_time_from_epoch(epoch, &utc);
+
+    regs->eax = rtc_set_utc(&utc);
 }
 
 /**

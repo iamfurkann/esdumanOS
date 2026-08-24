@@ -65,6 +65,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_GETUID:       sys_getuid(regs); break;
         case SYSCALL_GETPID:       sys_getpid(regs); break;
         case SYSCALL_TIME:         sys_time(regs); break;
+        case SYSCALL_SETTIME:      sys_settime(regs); break;
         case SYSCALL_SLEEP:        sys_sleep(regs); break;
         case SYSCALL_GET_ARGS:     sys_get_args(regs); break;
         case SYSCALL_STACK_DUMP:   sys_stack_dump(regs); break;
@@ -87,8 +88,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_LS_DIR:       sys_ls_dir(regs); break;
         case SYSCALL_GET_DIR_ID:   sys_get_dir_id(regs); break;
         case SYSCALL_LIST_FILES:   sys_list_files(regs); break;
-        case SYSCALL_CAT_RAW:      sys_cat_raw(regs); break;
-        case SYSCALL_CAT_FILE:     sys_cat_file(regs); break;
+        case SYSCALL_READ_RAW:     sys_read_raw(regs); break;
         case SYSCALL_READDIR:      sys_readdir(regs); break;
         case SYSCALL_STAT:         sys_stat(regs); break;
         case SYSCALL_FSTAT:        sys_fstat(regs); break;

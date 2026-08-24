@@ -152,6 +152,10 @@ int main() {
 
     // free.c tests
     run_static_test("apps/bin/free.c", "syscall(15,", "free.c -> Uses SYSCALL_MEMINFO (15)", &fail_count);
+    /* As of v0.9.2 the kernel renders the figures and free writes them, which is
+     * what lets `free > file` produce a file with something in it. Losing this
+     * call would put the output back on the screen and nowhere else. */
+    run_static_test("apps/bin/free.c", "syscall(4,", "free.c -> Uses SYSCALL_WRITE (4) to emit what the kernel rendered", &fail_count);
     run_static_test("apps/bin/free.c", "syscall(1,", "free.c -> Uses SYSCALL_EXIT (1)", &fail_count);
 
     // whoami.c tests
@@ -205,6 +209,7 @@ int main() {
      */
     run_static_test("apps/bin/date.c", "syscall(55,", "date.c -> Uses SYSCALL_TIME (55) rather than a fixed string", &fail_count);
     run_static_test("apps/bin/date.c", "syscall(42,", "date.c -> Uses SYSCALL_GET_ARGS (42) to read -u", &fail_count);
+    run_static_test("apps/bin/date.c", "syscall(66,", "date.c -> Uses SYSCALL_SETTIME (66) for -s", &fail_count);
 
     /*
      * edit.c tests.

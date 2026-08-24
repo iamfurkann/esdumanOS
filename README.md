@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.9.1--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.9.2--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.9.1-alpha
+**Version:** 0.9.2-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -315,6 +315,19 @@ bits, `ls -l` to show them, and the system's own paths are put back to the permi
 they must have on every boot rather than only when they are created — because
 everything v0.9.0 wrote took the default `0644`, `/etc/shadow` included.
 
+v0.9.2 clears the last category on the list to 1.0: answers that looked right and were
+not. `meminfo > mem.txt` produced an empty file and reported success; `cat_raw f | grep`
+fed an empty pipe; `grep nothing f && echo hi` printed `hi`. The first two were the same
+defect — the output was printed from inside the kernel and never reached the calling
+process's descriptor 1 — and the fix is the one `dmesg` got in v0.8.x: the kernel renders
+into a buffer the caller supplies, and the caller writes it. `cat_raw` needed a different
+answer, because 64 KB of file is 192 KB of hex text and no buffer wants that; the syscall
+became `READ_RAW`, which is `read()` against the stored form, and the formatting moved to
+the shell where it belongs. `grep` now reports 0 for a match, 1 for none and 2 for a
+failure. And the clock can be set, which it never could — it was readable and not
+writable, so `date` showed whatever the machine came up with and nothing could correct
+it, which started mattering the moment v0.9.0 began stamping files.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -402,7 +415,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **Shell** | Login screen, 28 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), two-stage pipe operator, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion |
+| **Shell** | Login screen, 33 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), four-stage pipelines, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion, line editing with history, and Tab completion that walks its candidates |
 | **Programs** | 19 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
@@ -790,6 +803,8 @@ dmesg                 Display the kernel log
 meminfo               Display memory usage (root only)
 hexdump <addr>        Hex dump memory (root only)
 stack                 Dump the current task's stack (root only)
+date [-u]             Show the date and time; -u for UTC
+date -s "..."         Set the clock, as "YYYY-MM-DD HH:MM:SS" (root only)
 layout tr|us          Set the keyboard layout
 lockdown              Enter the lockdown security level
 help                  Show available commands
@@ -984,7 +999,7 @@ filtered run proves one module, not the tree.
 | `test_pmm.c` | Frame allocation, free-memory accounting |
 | `test_lifecycle.c` | Address space clone and teardown; asserts every frame is reclaimed |
 | `test_fault.c` | Double-fault infrastructure: task gate, TSS descriptor, dedicated stack |
-| `test_syscall.c` | Dispatcher rejection of bad numbers, FDs, and sizes |
+| `test_syscall.c` | Dispatcher rejection of bad numbers, FDs, and sizes, and that the diagnostics render into the caller's buffer: that they report what they wrote, that a buffer too small is filled rather than overrun, and that one the caller does not own is refused |
 | `test_process.c` | Scheduler, live-frame detection, rwlocks, syscall restart, idle task |
 | `test_signal.c` | Handler registration and pending-signal bookkeeping |
 | `test_jobctl.c` | Stopping and continuing a task: the state it remembers, who is told, and what happens to the terminal |
@@ -994,7 +1009,7 @@ filtered run proves one module, not the tree.
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
 | `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()` |
-| `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall, and the conversions to and from the Unix epoch — checked against each other across sixty years, with the leap rules asserted as rules rather than as dates worked out by hand |
+| `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall, and the conversions to and from the Unix epoch — checked against each other across sixty years, with the leap rules asserted as rules rather than as dates worked out by hand. Setting the clock too: that a time set reads back as itself, that a leap day is accepted in a leap year and refused otherwise, and that a refused date leaves the clock where it was |
 
 The Ring 3 payload (`tests/user/ktest_user.c`) runs after these and reports its
 results back through a dedicated syscall. It is the only part of the suite that
@@ -1134,6 +1149,7 @@ The kernel exposes 55 system calls through `INT 0x80`. The syscall number is pas
 | 53 | `FORK` | Duplicate the caller; returns 0 in the child and its pid in the parent |
 | 54 | `WAIT` | Collect what a child has to report; blocks unless `WNOHANG` (1). With `WUNTRACED` (2) a child that stopped is reported too, as `WSTATUS_STOPPED` (0x100) OR'd with the signal |
 | 55 | `TIME` | Fill an `esd_time_t` with the current wall-clock time |
+| 66 | `SETTIME` | Set the wall clock from an `esd_time_t`; the offset it carries is taken back out and UTC is stored. Root only |
 | 56 | `BRK` | Move the program break; returns the resulting break, so a refusal is the break unmoved |
 | 57 | `MMAP` | Map anonymous, private, zeroed pages; returns the address or `0xFFFFFFFF` |
 | 58 | `MUNMAP` | Release pages obtained from `MMAP`; refuses any range outside that region |
@@ -1210,18 +1226,20 @@ register `SIG_IGN` for it first and then check the return value.
 |--------|------|-------------|
 | 8 | `CREATE_FILE` | Create a new file |
 | 9 | `LIST_FILES` | List files in current directory |
-| 11 | `CAT_FILE` | Read and display file contents |
+| ~~11~~ | — | Was `CAT_FILE`; removed in v0.9.2. It printed a file from the kernel and had no caller. The number is left free until the ABI is frozen |
 | 22 | `RM_FILE` | Delete a file |
 | 23 | `MV_FILE` | Rename a file |
 | 26 | `MKDIR` | Create a directory |
 | 28 | `LS_DIR` | List directory contents |
 | 29 | `GET_DIR_ID` | Resolve directory path to ID |
-| 34 | `CAT_RAW` | Read raw (unencrypted) file contents |
+| 34 | `READ_RAW` | Read an open file's stored bytes, without decrypting them. `read()` against the stored form: same descriptor, same offset, same shape |
 | 44 | `READDIR` | Read directory entries into user buffer |
 | 45 | `SYNC` | Write dirty block-cache sectors out, and the kernel log to `/var/log` |
 | 46 | `CHDIR` | Change the calling process's working directory |
 | 47 | `GETCWD` | Write the working directory into a user buffer |
 | 48 | `STAT` | Report a path's metadata into a user `esd_stat_t` |
+| 64 | `CHMOD` | Set a path's permission bits. The owner and root, and nobody else |
+| 65 | `CHOWN` | Set a path's owner and group. Root only |
 
 Relative paths in every one of these resolve against the calling process's working
 directory, which lives in the PCB. No syscall takes a base directory as an argument.
@@ -1464,11 +1482,12 @@ The following are known constraints of the current implementation. These are doc
 - **`SIGTTOU` does not exist.** A background job that *writes* to the terminal still
   does, interleaving its output with whatever the shell is drawing. Only reading is
   stopped, which is the half that made the shell unusable.
-- **`meminfo`, `hexdump`, `stack` and `free` print from inside the kernel**, so their
-  output goes to the screen whatever the calling process's descriptor 1 points at. They
-  cannot be piped or redirected: `meminfo > mem.txt` creates an empty file. `ls` and
-  `dmesg` had the same defect and were moved off it in v0.5.3 — these four are root-only
-  diagnostics and each needs a formatter of its own, so they were left.
+- **`lockdown` prints its warning from inside the kernel**, so it goes to the screen
+  whatever the calling process's descriptor 1 points at. Every other command that did
+  this was moved off it in v0.9.2; this one stayed on purpose. What it prints is not
+  output but a red banner announcing a state change to whoever is at the console — the
+  same class as the message `halt` prints on the way down — and there is no pipeline that
+  wants it. It writes a `klog` record as well, so `dmesg` can say when it happened.
 - **FPU state is switched eagerly, and stays that way.** Every context switch saves
   and restores the full 512-byte register file rather than parking it behind CR0.TS
   and restoring it on first use. Lazy switching was on the roadmap as an
@@ -1536,7 +1555,6 @@ Near-term priorities for the project, roughly in order:
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
 | P2 | A sticky bit on `/tmp`, so a user cannot delete another user's temporary file |
-| P2 | Setting the clock — the RTC is read and never written |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1555,8 +1573,9 @@ reference; moving the shell onto `fork`, which brought concurrent pipelines and 
 control in v0.5.2 and `SIGPIPE` in v0.5.3; ANSI escape code support in the terminal,
 which landed in v0.8.0 and had been sitting here as a P3 for two releases after it did;
 the on-disk format, which grew a superblock, timestamps, an owner group and permission
-bits in v0.9.0; and enforcing those bits, which retired the last of the name comparisons
-in v0.9.1.
+bits in v0.9.0; enforcing those bits, which retired the last of the name comparisons in
+v0.9.1; and setting the clock, which v0.9.2 added along with clearing out the commands
+that printed their output from inside the kernel.
 
 ---
 

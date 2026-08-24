@@ -64,12 +64,101 @@ static int klog_contains(const char *needle) {
  * - Integer overflow size attacks during read operations.
  * - Reuse of closed file descriptors.
  */
+/**
+ * @brief Verifies that the diagnostics render into the caller's buffer.
+ *
+ * Expected behavior:
+ * - A call reports how many bytes it wrote and writes them where it was told.
+ * - A buffer too small is filled and not overrun.
+ * - A buffer that cannot be written to is refused rather than written to.
+ *
+ * These printed straight to the screen until v0.9.2, so `meminfo > file` wrote an
+ * empty file and reported success. What that made untestable is the point: there
+ * was no return value to assert on and no buffer to look in. There is now, and
+ * the one failure that would bring the old behaviour back without anybody
+ * noticing - a call that returns a length but writes nothing - is exactly what
+ * the length-and-contents assertion catches.
+ */
+static void test_diag_to_buffer(void) {
+    arch_regs_t regs;
+    int n;
+
+    /*
+     * A user-space address, not a static in this file. The call validates that
+     * the buffer belongs to the caller before it writes a byte into it, so a
+     * kernel address is refused with E_FAULT - correctly, and it took three
+     * failing assertions to notice the test had been handing it one.
+     *
+     * It has to be inside the window run_all_selftests() maps, which is four
+     * pages at 0x500000 and not a byte more. The second page is the one no other
+     * module uses: the first holds their scratch strings and the third and
+     * fourth are taken by the integration and stress modules.
+     */
+    char *buf = (char *)0x501000;
+
+    /* A guard past the end. Nothing may touch it, whatever capacity is claimed. */
+    #define DIAG_CAP 200
+    buf[DIAG_CAP] = (char)0xA5;
+
+    for (int i = 0; i < DIAG_CAP; i++) buf[i] = 0;
+
+    regs.eax = SYSCALL_MEMINFO;
+    regs.ebx = (uint32_t)buf;
+    regs.ecx = DIAG_CAP;
+    regs.edx = 0;
+    syscall_handler(&regs);
+    n = (int)regs.eax;
+
+    KTEST_ASSERT(n > 0, "[SYSCALL] meminfo reports how much it wrote");
+    KTEST_ASSERT(n < DIAG_CAP && buf[0] != 0,
+                 "[STRICT] [SYSCALL] and actually wrote it into the caller's buffer");
+    KTEST_ASSERT(buf[DIAG_CAP] == (char)0xA5,
+                 "[STRICT] [SYSCALL] without touching the byte past the capacity");
+
+    /*
+     * A capacity of one. The rendering is far longer, so this is the truncation
+     * path - and the byte after the buffer is where an off-by-one would land.
+     */
+    buf[1] = (char)0x5A;
+    regs.eax = SYSCALL_MEMINFO;
+    regs.ebx = (uint32_t)buf;
+    regs.ecx = 1;
+    regs.edx = 0;
+    syscall_handler(&regs);
+
+    KTEST_ASSERT((int)regs.eax == 1,
+                 "[STRICT] [SYSCALL] a buffer of one byte takes one byte");
+    KTEST_ASSERT(buf[1] == (char)0x5A,
+                 "[STRICT] [SYSCALL] and the byte after it is left alone");
+
+    /* Nowhere to write is refused rather than written to. */
+    regs.eax = SYSCALL_MEMINFO;
+    regs.ebx = 0xD0000000;
+    regs.ecx = 64;
+    regs.edx = 0;
+    syscall_handler(&regs);
+    KTEST_ASSERT((int)regs.eax == E_FAULT,
+                 "[STRICT] [SYSCALL] a buffer the caller does not own is refused");
+
+    regs.eax = SYSCALL_MEMINFO;
+    regs.ebx = (uint32_t)buf;
+    regs.ecx = 0;
+    regs.edx = 0;
+    syscall_handler(&regs);
+    KTEST_ASSERT((int)regs.eax == E_INVAL,
+                 "[SYSCALL] and a capacity of zero is a bad argument, not an empty answer");
+
+    #undef DIAG_CAP
+}
+
 void run_syscall_tests(void) {
     printk("\n--- Syscall Dispatcher Tests ---\n");
 
+    test_diag_to_buffer();
+
     // Allocate an architecture-specific register structure to simulate syscall input.
     arch_regs_t regs;
-    
+
     // =========================================================================
     // 1. Valid Syscall Boundary Check Note
     // =========================================================================

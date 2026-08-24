@@ -157,10 +157,23 @@ void sys_lockdown(arch_regs_t *regs) {
         return; 
     }
     
+    /*
+     * This one keeps printing from the kernel, and deliberately - v0.9.2 moved
+     * the commands that produce *output* into the caller's descriptor 1, and
+     * this does not produce output. It announces a state change to whoever is at
+     * the console, in red, and it is the same class of message as the one
+     * sys_halt() prints on the way down: there is no pipeline that wants it and
+     * redirecting it would mean the warning went somewhere nobody was looking.
+     *
+     * What it was missing is the log. A security level that changed left no
+     * record, so `dmesg` after the fact could not say when - or whether - the
+     * system had been locked.
+     */
     if (current_sec_level >= SEC_LEVEL_LOCKDOWN) {
         printk("System is already in SECURE MODE!\n");
     } else {
         set_security_level(SEC_LEVEL_LOCKDOWN);
+        klog(LOG_LEVEL_WARN, "SEC", "Lockdown engaged; the system is in secure mode.");
         terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
         printk("\n[WARNING] KERNEL LOCKED (SECURE MODE ACTIVE)!\n\n");
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);

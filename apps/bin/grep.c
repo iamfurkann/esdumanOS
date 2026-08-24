@@ -53,6 +53,15 @@ static char line_buf[LINE_MAX];
 static int line_len = 0;
 
 /**
+ * @brief Whether anything has matched since the search began.
+ *
+ * grep's exit status is an answer, not just a report of whether it ran: 0 means
+ * something matched, 1 means nothing did, 2 means it could not look. This
+ * carries the first of those out of the line-by-line scan.
+ */
+static int any_match = 0;
+
+/**
  * @brief Reports whether a line contains the search term.
  *
  * @param line Line contents, not null-terminated.
@@ -82,6 +91,7 @@ static int line_contains(const char *line, int len, const char *term, int term_l
  */
 static void flush_line(const char *term, int term_len) {
     if (line_contains(line_buf, line_len, term, term_len)) {
+        any_match = 1;
         syscall(4, 1, (int)line_buf, line_len);
         print_newline();
     }
@@ -143,7 +153,7 @@ void main(void) {
 
     if (args_buf[0] == '\0') {
         print("Usage: grep <term> [file]"); print_newline();
-        status = 1;
+        status = 2;
     } else {
         char *term = args_buf;
         int term_len = 0; while (term[term_len]) term_len++;
@@ -151,23 +161,30 @@ void main(void) {
         if (has_file) {
             char *file = &args_buf[i + 1];
             int fd = syscall(40, (int)file, 0, 0); // SYSCALL_OPEN
-            if (fd < 0) { print("grep: File not found"); print_newline(); status = 1; }
+            if (fd < 0) { print("grep: File not found"); print_newline(); status = 2; }
             else {
                 grep_fd(fd, term, term_len);
                 syscall(38, fd, 0, 0); // SYSCALL_CLOSE
+                status = any_match ? 0 : 1;
             }
         } else {
             /* Descriptor 0 is never closed: it belongs to whoever started this
              * process, and closing it would take standard input away from them
              * as well. */
             grep_fd(0, term, term_len);
+            status = any_match ? 0 : 1;
         }
     }
 
     /*
-     * Reports usage and open errors. It does NOT yet distinguish "no lines
-     * matched" from "lines matched" the way grep conventionally does - that is
-     * a behaviour change rather than a bug fix, and is recorded as follow-up.
+     * 0 matched, 1 did not, 2 could not look - the convention grep has
+     * everywhere, and as of v0.9.2 the one this follows.
+     *
+     * It used to report 1 for both "nothing matched" and "no such file", which
+     * made the status useless for the thing a status is for: `grep x f && ...`
+     * ran the second half whether or not anything had been found, and there was
+     * no way for a script to tell an empty result from a broken one. Moving the
+     * errors to 2 is a behaviour change and is called out in the release notes.
      */
     syscall(1, status, 0, 0); // EXIT
     while(1);

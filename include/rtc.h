@@ -52,6 +52,18 @@ void rtc_read_utc(esd_time_t *out);
 void rtc_read_local(esd_time_t *out);
 
 /**
+ * @brief Sets the hardware clock, in UTC.
+ *
+ * The clock could be read and not set until v0.9.2. Writes in whatever format
+ * register B says the chip is in, and halts the update cycle for the duration so
+ * that a tick cannot land between two of the seven registers.
+ *
+ * @param t Time to set, in UTC; year 2000 to 2099.
+ * @return E_OK, or E_INVAL when the fields are not a date this can store.
+ */
+int rtc_set_utc(const esd_time_t *t);
+
+/**
  * @brief Sets the offset local time is reported at.
  *
  * Read from /etc/timezone at boot. It was a build-time constant, so the only way

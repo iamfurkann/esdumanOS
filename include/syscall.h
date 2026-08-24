@@ -255,6 +255,23 @@
  */
 #define SYSCALL_GETPGID         62
 
+/**
+ * @brief Ask whether a read would block; ebx is the descriptor.
+ *
+ * Returns 1 when a read would return straight away - because there is data, or
+ * because there is an end of file to report - 0 when it would block, and a
+ * negative errno for a descriptor that is not open.
+ *
+ * It exists for one problem with no other honest answer. The keyboard sends the
+ * escape sequences a terminal sends, so `ESC` now arrives both as the Escape key
+ * and as the first byte of a sequence, and nothing in this system has a timer
+ * fine enough to tell them apart by how long the next byte takes. Asking whether
+ * a second byte is already waiting does tell them apart, and asking is the only
+ * thing a program can do that does not involve consuming a byte it may have to
+ * give back.
+ */
+#define SYSCALL_POLL            63
+
 // ==========================================================
 // Test-build-only syscalls (>= 200)
 //

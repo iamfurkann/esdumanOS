@@ -64,6 +64,8 @@ void sys_hexdump(arch_regs_t *regs);
 // sys_fs.c
 /** @brief Syscall handler for reading from a file descriptor */
 void sys_read(arch_regs_t *regs);
+/** @brief Syscall handler asking whether a read would block */
+void sys_poll(arch_regs_t *regs);
 /** @brief Syscall handler for writing to a file descriptor */
 void sys_write(arch_regs_t *regs);
 /** @brief Syscall handler for creating a pipe */

@@ -92,6 +92,41 @@ void sys_read(arch_regs_t *regs) {
 
     if (desc->type == FD_TYPE_CONSOLE) {
         /*
+         * A background job may not take the keyboard.
+         *
+         * There is one input ring and every blocked reader is woken when a key
+         * arrives, so a background job reading standard input does not share the
+         * keyboard with the shell - it races it for each keystroke, and the user
+         * watches half of what they type disappear into a job they deliberately
+         * put out of the way. There is no way to type the command that would end
+         * it, either, because that command is being typed into the same race.
+         *
+         * The job is stopped instead, which is the answer POSIX gives and the
+         * only one that loses nothing: `jobs` shows it, and `fg` gives it the
+         * terminal it was asking for. The frame is rewound first so the read runs
+         * again from the trap when the job continues, and this time it is either
+         * in the foreground or it stops again.
+         *
+         * A task that handles or ignores SIG_TTIN reads as before. POSIX returns
+         * E_IO there; a program that went to the trouble of catching the signal
+         * has said it knows what it is doing, and refusing it as well would mean
+         * there is no disposition under which the read can happen at all.
+         *
+         * multitasking_enabled guards the kernel-mode test suite, which runs with
+         * it clear against a synthetic task whose group is nobody's foreground.
+         */
+        if (multitasking_enabled && foreground_pgid != 0 &&
+            current_task->pgid != foreground_pgid &&
+            current_task->signal_handlers[SIG_TTIN] == 0 &&
+            current_task->in_syscall && trap_frame_is_live(regs) &&
+            (regs->cs & 0x03) != 0) {
+
+            regs->eip = current_task->syscall_entry_eip;
+            send_signal_to_group(current_task->pgid, SIG_TTIN);
+            return;
+        }
+
+        /*
          * A signal cut a previous attempt short. Reported as E_INTR rather than
          * blocking again: the syscall restarts from the beginning when it is
          * woken, so a read that simply went back to sleep would make the
@@ -1179,4 +1214,53 @@ void sys_readdir(arch_regs_t *regs) {
 
     kfree(kbuf);
     regs->eax = offset;
+}
+
+/**
+ * @brief Reports whether a read on a descriptor would block.
+ *
+ * "Would not block" includes having an end of file to report, because a read
+ * that returns zero has returned: a caller asking this is asking whether to call
+ * read(), and the answer for a drained pipe with no writers is yes, once.
+ *
+ * The keyboard is the case this exists for. Its escape sequences made ESC
+ * ambiguous - the Escape key and the first byte of a sequence are the same byte -
+ * and with no timer to measure the gap, the only way to tell them apart is to
+ * ask whether the rest of the sequence is already here. Consuming a byte to find
+ * out is not an option: there would be nowhere to put it back.
+ *
+ * @param regs ebx is the descriptor. eax is 1, 0, or a negative errno.
+ */
+void sys_poll(arch_regs_t *regs) {
+    int fd = (int)regs->ebx;
+
+    if (!validate_fd(fd)) { regs->eax = E_INVAL; return; }
+
+    file_descriptor_t *desc = &current_task->fd_table[fd];
+
+    switch (desc->type) {
+        case FD_TYPE_CONSOLE:
+            /* An interrupted read is also an immediate answer: it returns
+             * E_INTR rather than waiting for a key. */
+            regs->eax = (keyboard_has_input() || current_task->signal_interrupted) ? 1 : 0;
+            break;
+
+        case FD_TYPE_PIPE: {
+            pipe_t *p = (pipe_t *)desc->ptr;
+            if (p == 0) { regs->eax = E_BADF; return; }
+            regs->eax = (p->head != p->tail || p->write_refs <= 0) ? 1 : 0;
+            break;
+        }
+
+        case FD_TYPE_FILE:
+        case FD_TYPE_DEVICE:
+            /* Neither can block. A file read past its end returns zero, and every
+             * device in this system answers out of memory it already holds. */
+            regs->eax = 1;
+            break;
+
+        default:
+            regs->eax = E_BADF;
+            break;
+    }
 }

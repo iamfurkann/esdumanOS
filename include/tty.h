@@ -48,10 +48,25 @@ void terminal_putchar(char c);
 
 /**
  * @brief Prints a null-terminated string to the terminal.
- * 
+ *
  * @param data The string to display.
  */
 void terminal_writestring(const char* data);
+
+/**
+ * @brief Writes a run of bytes, refreshing the screen once at the end.
+ *
+ * What every bulk write should use. A full repaint is 80 by 24 cells out of the
+ * scrollback buffer and the hardware cursor is two port writes, and doing either
+ * in the middle of a write buys nothing: nobody can see the screen halfway
+ * through one. A frame from a full-screen program is dozens of escape sequences
+ * and hundreds of characters, and used to cost a repaint for each of the former
+ * and a cursor reprogram for each of the latter.
+ *
+ * @param data Bytes to write.
+ * @param n How many.
+ */
+void terminal_write_batch(const char *data, size_t n);
 
 /**
  * @brief Writes a string to a named terminal, which may not be the visible one.

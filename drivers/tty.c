@@ -127,6 +127,49 @@ void draw_status_bar(const char* left, const char* right) {
 		vga_memory[VGA_WIDTH - len + i] = vga_entry(right[i], color);
 }
 
+/*
+ * Deferred refresh.
+ *
+ * A full repaint is 80 by 24 cells copied out of the scrollback buffer, and
+ * until this existed one happened for every completed escape sequence and the
+ * hardware cursor was reprogrammed for every printable character. That is
+ * affordable for a shell writing a prompt and ruinous for a program drawing a
+ * screen: one frame of /bin/edit is around fifty sequences and eighteen hundred
+ * characters, so it cost fifty repaints - about a hundred thousand cell writes -
+ * and thirty-six hundred port writes, per keystroke.
+ *
+ * None of that work is wanted in the middle. What the screen looks like halfway
+ * through a write is something nobody can see; only the state it is left in
+ * matters. So a write marks the refresh as owed and pays it once, at the end.
+ *
+ * Nested writes save and restore rather than counting, so that a keystroke
+ * arriving on IRQ1 in the middle of one - the driver echoes "^C" from interrupt
+ * context - cannot lose an update or leave the flag set.
+ */
+static int refresh_deferred = 0;
+static int refresh_owed = 0;
+
+void update_screen(void);
+
+/**
+ * @brief Repaints now, or notes that a repaint is owed.
+ */
+static void term_refresh(void) {
+	if (refresh_deferred) { refresh_owed = 1; return; }
+	update_screen();
+}
+
+/**
+ * @brief Moves the hardware cursor, or notes that the screen is owed a refresh.
+ *
+ * @param x Column.
+ * @param y Row.
+ */
+static void term_refresh_cursor(size_t x, size_t y) {
+	if (refresh_deferred) { refresh_owed = 1; return; }
+	update_cursor(x, y);
+}
+
 /**
  * @brief Updates the screen based on the current terminal's state.
  */
@@ -515,8 +558,10 @@ static void terminal_putchar_on(terminal_state_t *term, char c) {
 		int taken = terminal_escape_feed(term, uc);
 
 		/* Redrawn once the sequence is complete, not once per parameter digit:
-		 * a full repaint is 80 by 24 cells and a cursor move is three bytes. */
-		if (taken == 2 && visible) update_screen();
+		 * a full repaint is 80 by 24 cells and a cursor move is three bytes.
+		 * Deferred to the end of the write on top of that - a frame is dozens of
+		 * sequences and only its last state is ever seen. */
+		if (taken == 2 && visible) term_refresh();
 		if (taken) return;
 	}
 
@@ -594,13 +639,13 @@ static void terminal_putchar_on(terminal_state_t *term, char c) {
 		return;
 
 	if (needs_full_redraw)
-		update_screen();
+		term_refresh();
 	else {
 		if (term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
-			update_cursor(term->cursor_x, term->cursor_y - term->view_offset + 1);
+			term_refresh_cursor(term->cursor_x, term->cursor_y - term->view_offset + 1);
 		}
 		else
-			update_cursor(80, 25);
+			term_refresh_cursor(80, 25);
 	}
 }
 
@@ -713,8 +758,37 @@ void terminal_reset(size_t term_no) {
  * @param data The string to print.
  */
 void terminal_writestring(const char* data) {
-	for (size_t i = 0; data[i] != '\0'; i++)
-		terminal_putchar(data[i]);
+	size_t n = 0;
+
+	while (data[n] != '\0') n++;
+	terminal_write_batch(data, n);
+}
+
+/**
+ * @brief Writes a run of bytes and refreshes the screen once, at the end.
+ *
+ * The entry point every bulk write should use. What the screen looks like
+ * halfway through one is something nobody can see, and paying for it - a full
+ * repaint per escape sequence, a cursor reprogram per character - is what made a
+ * full-screen program crawl.
+ *
+ * Nesting saves and restores rather than counting: the keyboard driver echoes
+ * from interrupt context and can land in the middle of one of these.
+ *
+ * @param data Bytes to write.
+ * @param n How many.
+ */
+void terminal_write_batch(const char *data, size_t n) {
+	int saved = refresh_deferred;
+
+	refresh_deferred = 1;
+	for (size_t i = 0; i < n; i++) terminal_putchar(data[i]);
+	refresh_deferred = saved;
+
+	if (!refresh_deferred && refresh_owed) {
+		refresh_owed = 0;
+		update_screen();
+	}
 }
 
 /**

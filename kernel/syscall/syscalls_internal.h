@@ -100,6 +100,10 @@ void sys_stat(arch_regs_t *regs);
 void sys_fstat(arch_regs_t *regs);
 /** @brief Syscall handler for repositioning an open file's read offset */
 void sys_lseek(arch_regs_t *regs);
+/** @brief Syscall handler for changing a file's permission bits */
+void sys_chmod(arch_regs_t *regs);
+/** @brief Syscall handler for changing a file's owner and group */
+void sys_chown(arch_regs_t *regs);
 
 // sys_ipc.c
 /** @brief Syscall handler for sending an IPC message */

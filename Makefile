@@ -64,6 +64,8 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/date_elf_data.c \
 			src/resources/stat_elf_data.c \
 			src/resources/edit_elf_data.c \
+			src/resources/chmod_elf_data.c \
+			src/resources/chown_elf_data.c \
 			fs/bcache.c \
             fs/vfs.c \
             fs/crypto_fs.c \
@@ -391,6 +393,12 @@ apps/bin/stat.elf: apps/bin/stat.c
 apps/bin/edit.elf: apps/bin/edit.c include/editbuf.h
 	$(CC) $(USER_CFLAGS) apps/bin/edit.c -o apps/bin/edit.elf
 
+apps/bin/chmod.elf: apps/bin/chmod.c
+	$(CC) $(USER_CFLAGS) apps/bin/chmod.c -o apps/bin/chmod.elf
+
+apps/bin/chown.elf: apps/bin/chown.c
+	$(CC) $(USER_CFLAGS) apps/bin/chown.c -o apps/bin/chown.elf
+
 
 # Ring 3 half of the kernel self-test suite. Built, encrypted and embedded the
 # same way as the /bin programs, but only linked into $(TEST_BIN).
@@ -532,6 +540,18 @@ src/resources/stat_elf_data.c: apps/bin/stat.elf tools/encrypt_tool
 	@./tools/encrypt_tool apps/bin/stat.elf apps/bin/stat_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i apps/bin/stat_encrypted.elf | \
 	sed 's/apps_bin_stat_encrypted_elf/stat_elf/g' > src/resources/stat_elf_data.c
+
+src/resources/chmod_elf_data.c: apps/bin/chmod.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/chmod.elf apps/bin/chmod_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/chmod_encrypted.elf | \
+	sed 's/apps_bin_chmod_encrypted_elf/chmod_elf/g' > src/resources/chmod_elf_data.c
+
+src/resources/chown_elf_data.c: apps/bin/chown.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/chown.elf apps/bin/chown_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/chown_encrypted.elf | \
+	sed 's/apps_bin_chown_encrypted_elf/chown_elf/g' > src/resources/chown_elf_data.c
 
 src/resources/edit_elf_data.c: apps/bin/edit.elf tools/encrypt_tool
 	@mkdir -p src/resources

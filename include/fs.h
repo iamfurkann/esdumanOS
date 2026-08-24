@@ -415,6 +415,70 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
  */
 int fs_dir_exists(fs_id_t parent_id);
 
+/**
+ * @brief Sets an entry's permission bits.
+ *
+ * Who may call this is decided by the caller - the syscall layer, alongside the
+ * other access rules. What this owns is the mechanics: the lock, the ctime, and
+ * getting the change onto the disk. Bits outside the permission mask are dropped
+ * rather than stored; there are no set-user-id or sticky bits here to keep.
+ *
+ * @param entry_id Entry to change.
+ * @param mode New permission bits.
+ * @return E_OK, or a negative errno.
+ */
+int fs_chmod(fs_id_t entry_id, uint16_t mode);
+
+/**
+ * @brief Sets an entry's owner and group.
+ *
+ * @param entry_id Entry to change.
+ * @param uid New owner.
+ * @param gid New group.
+ * @return E_OK, or a negative errno.
+ */
+int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid);
+
+/**
+ * @brief Whether a mode grants what a caller is asking for.
+ *
+ * The Unix rule exactly: the owning user gets the owner bits, the owning group
+ * gets the group bits, everyone else gets the other bits, and **the first class
+ * that matches is the one that decides.** An owner with no permission is refused
+ * rather than falling through to the group bits, which is the part people
+ * misremember and the part a `chmod 077` depends on.
+ *
+ * Pure, and in the header for the reason editbuf.h and esdtime.h are: permission
+ * logic that is wrong is wrong silently, so it has to be reachable from a test
+ * without a disk or a screen behind it.
+ *
+ * @param mode Entry's permission bits.
+ * @param owner_uid Entry's owner.
+ * @param owner_gid Entry's group.
+ * @param uid Caller's user id.
+ * @param gid Caller's group id.
+ * @param want Bits wanted, in the other-class positions: 4 read, 2 write, 1 execute.
+ * @return 1 when every wanted bit is granted.
+ */
+static inline int fs_mode_allows(uint16_t mode, uint32_t owner_uid, uint32_t owner_gid,
+                                 uint32_t uid, uint32_t gid, int want) {
+    int bits;
+
+    /* Root is not subject to the bits, as everywhere else. */
+    if (uid == 0) return 1;
+
+    if (uid == owner_uid)      bits = (mode >> 6) & 7;
+    else if (gid == owner_gid) bits = (mode >> 3) & 7;
+    else                       bits = mode & 7;
+
+    return (bits & want) == want;
+}
+
+/** @brief Permission bits, in the positions fs_mode_allows() wants them. */
+#define FS_WANT_READ  4
+#define FS_WANT_WRITE 2
+#define FS_WANT_EXEC  1
+
 
 // --- Added by Refactor Script ---
 extern int fs_get_entry_idx(const char *name, fs_id_t parent_id);

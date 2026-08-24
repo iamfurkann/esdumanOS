@@ -93,6 +93,8 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_STAT:         sys_stat(regs); break;
         case SYSCALL_FSTAT:        sys_fstat(regs); break;
         case SYSCALL_LSEEK:        sys_lseek(regs); break;
+        case SYSCALL_CHMOD:        sys_chmod(regs); break;
+        case SYSCALL_CHOWN:        sys_chown(regs); break;
 
         //sys_ipc.c
         case SYSCALL_IPC_SEND:     sys_ipc_send(regs); break;

@@ -224,6 +224,23 @@ int main() {
     run_static_test("apps/bin/edit.c", "syscall(24,", "edit.c -> Uses SYSCALL_SIGNAL_REG (24) to decline the interrupt and catch the continue", &fail_count);
     run_static_test("apps/bin/edit.c", "syscall(1,", "edit.c -> Uses SYSCALL_EXIT (1)", &fail_count);
 
+    /*
+     * chmod.c and chown.c tests.
+     *
+     * The call each one exists to make is the thing worth pinning: a refactor
+     * that stopped chmod calling SYSCALL_CHMOD would still build, still run, and
+     * still exit zero.
+     */
+    run_static_test("apps/bin/chmod.c", "syscall(64,", "chmod.c -> Uses SYSCALL_CHMOD (64), which is the whole point of it", &fail_count);
+    run_static_test("apps/bin/chmod.c", "syscall(42,", "chmod.c -> Uses SYSCALL_GET_ARGS (42)", &fail_count);
+    run_static_test("apps/bin/chmod.c", "syscall(4,", "chmod.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/chmod.c", "syscall(1,", "chmod.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    run_static_test("apps/bin/chown.c", "syscall(65,", "chown.c -> Uses SYSCALL_CHOWN (65), which is the whole point of it", &fail_count);
+    run_static_test("apps/bin/chown.c", "syscall(42,", "chown.c -> Uses SYSCALL_GET_ARGS (42)", &fail_count);
+    run_static_test("apps/bin/chown.c", "syscall(4,", "chown.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/chown.c", "syscall(1,", "chown.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
     // sh.c tests
     run_static_test("apps/bin/sh.c", "syscall(5,", "sh.c -> Uses SYSCALL_EXEC (5) for external apps", &fail_count);
     run_static_test("apps/bin/sh.c", "SYSCALL_OPEN", "sh.c -> Uses SYSCALL_OPEN (40)", &fail_count);

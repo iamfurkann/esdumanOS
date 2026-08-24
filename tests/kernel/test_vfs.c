@@ -552,6 +552,69 @@ static void test_disk_format(void) {
     }
 }
 
+/**
+ * @brief Verifies the permissions the system puts on its own paths.
+ *
+ * Expected behavior:
+ * - /etc/shadow is readable by root alone.
+ * - /tmp is writable by everyone, /root by nobody else.
+ * - The rest of the top level is readable and searchable, and not writable.
+ *
+ * These are applied at boot rather than only at creation, and this asserts the
+ * result rather than the call. A disk written by v0.9.0 carries the default 0644
+ * on everything it created, /etc/shadow included, because that release enforced
+ * no modes at all - so a kernel that started enforcing them and only stamped new
+ * entries would hand the password database to every user on the first mount. The
+ * one thing worth checking is that after boot, the modes are right whatever the
+ * disk arrived holding.
+ */
+static void test_system_modes(void) {
+    int etc_id = fs_get_entry_idx("etc", 0);
+    int idx;
+
+    idx = fs_get_entry_idx("tmp", 0);
+    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0777,
+                 "[STRICT] [VFS] /tmp is writable by everyone, which is what it is for");
+
+    idx = fs_get_entry_idx("root", 0);
+    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0700,
+                 "[STRICT] [VFS] /root is root's alone");
+
+    idx = fs_get_entry_idx("bin", 0);
+    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0755,
+                 "[VFS] /bin can be read and searched, and not written");
+
+    if (etc_id >= 0) {
+        int etc_entry = dir_table[etc_id].entry_id;
+
+        idx = fs_get_entry_idx("shadow", (fs_id_t)etc_entry);
+        KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0600,
+                     "[STRICT] [VFS] /etc/shadow is readable by root alone");
+        KTEST_ASSERT(idx < 0 || dir_table[idx].owner_uid == 0,
+                     "[STRICT] [VFS] and owned by root, so 0600 means what it should");
+
+        idx = fs_get_entry_idx("passwd", (fs_id_t)etc_entry);
+        KTEST_ASSERT(idx < 0 || (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0644,
+                     "[VFS] /etc/passwd is readable by everyone, as it carries no secrets");
+    }
+
+    /* And the rule the modes exist to feed, asserted through the same function
+     * the VFS decides with rather than by restating it. */
+    idx = fs_get_entry_idx("root", 0);
+    if (idx >= 0) {
+        KTEST_ASSERT(fs_mode_allows(dir_table[idx].mode, dir_table[idx].owner_uid,
+                                    dir_table[idx].owner_gid, 1000, 1000, FS_WANT_EXEC) == 0,
+                     "[STRICT] [VFS] a user cannot enter /root");
+    }
+    idx = fs_get_entry_idx("tmp", 0);
+    if (idx >= 0) {
+        KTEST_ASSERT(fs_mode_allows(dir_table[idx].mode, dir_table[idx].owner_uid,
+                                    dir_table[idx].owner_gid, 1000, 1000,
+                                    FS_WANT_WRITE | FS_WANT_EXEC) == 1,
+                     "[STRICT] [VFS] and can write in /tmp");
+    }
+}
+
 void run_vfs_tests(void) {
     printk("\n--- VFS (Virtual File System) Tests ---\n");
 
@@ -586,4 +649,5 @@ void run_vfs_tests(void) {
     test_vfs_write_bounds();
     test_vfs_rmdir_semantics();
     test_disk_format();
+    test_system_modes();
 }

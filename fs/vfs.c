@@ -1055,6 +1055,71 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
 }
 
 /**
+ * @brief Finds the directory table slot an entry id occupies.
+ *
+ * @param entry_id Entry to find.
+ * @return Slot index, or -1.
+ */
+static int fs_slot_of(fs_id_t entry_id) {
+    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        if (dir_table[i].is_used && dir_table[i].entry_id == entry_id) return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief Sets an entry's permission bits.
+ *
+ * @param entry_id Entry to change.
+ * @param mode New permission bits.
+ * @return E_OK, or a negative errno.
+ */
+int fs_chmod(fs_id_t entry_id, uint16_t mode) {
+    if (!fs_mounted) return E_NODEV;
+    if (current_sec_level == SEC_LEVEL_IMMUTABLE) return E_ROFS;
+
+    vfs_lock();
+
+    int idx = fs_slot_of(entry_id);
+    if (idx < 0) { vfs_unlock(); return E_NOENT; }
+
+    dir_table[idx].mode = (uint16_t)(mode & FS_MODE_PERM_MASK);
+    /* The entry changed and the contents did not, which is the distinction the
+     * two timestamps exist to make. */
+    dir_table[idx].ctime = fs_now();
+
+    save_directory_to_disk();
+    vfs_unlock();
+    return E_OK;
+}
+
+/**
+ * @brief Sets an entry's owner and group.
+ *
+ * @param entry_id Entry to change.
+ * @param uid New owner.
+ * @param gid New group.
+ * @return E_OK, or a negative errno.
+ */
+int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid) {
+    if (!fs_mounted) return E_NODEV;
+    if (current_sec_level == SEC_LEVEL_IMMUTABLE) return E_ROFS;
+
+    vfs_lock();
+
+    int idx = fs_slot_of(entry_id);
+    if (idx < 0) { vfs_unlock(); return E_NOENT; }
+
+    dir_table[idx].owner_uid = uid;
+    dir_table[idx].owner_gid = gid;
+    dir_table[idx].ctime = fs_now();
+
+    save_directory_to_disk();
+    vfs_unlock();
+    return E_OK;
+}
+
+/**
  * @brief fs_get_entry_idx
  * @param name
  * @param parent_id

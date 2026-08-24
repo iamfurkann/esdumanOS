@@ -9,7 +9,7 @@
  */
 #define OS_VERSION_MAJOR    0
 #define OS_VERSION_MINOR    9
-#define OS_VERSION_PATCH    0
+#define OS_VERSION_PATCH    1
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
@@ -165,5 +165,7 @@ extern unsigned char wc_elf[]; extern unsigned int wc_elf_len;
 extern unsigned char date_elf[]; extern unsigned int date_elf_len;
 extern unsigned char stat_elf[]; extern unsigned int stat_elf_len;
 extern unsigned char edit_elf[]; extern unsigned int edit_elf_len;
+extern unsigned char chmod_elf[]; extern unsigned int chmod_elf_len;
+extern unsigned char chown_elf[]; extern unsigned int chown_elf_len;
 
 #endif //KERNEL_H

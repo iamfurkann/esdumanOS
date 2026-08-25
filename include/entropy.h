@@ -21,7 +21,27 @@
  *   is dead. The callers that need unique-but-not-necessarily-secret values -
  *   CBC initialisation vectors and password salts - rest on this rather than on
  *   the entropy estimate.
+ *
+ *   Across boots that counter starts over, so uniqueness there rests on the pool
+ *   starting from somewhere different. entropy_load_seed() is what makes it, by
+ *   carrying 32 bytes on disk from one boot to the next. It buys distinctness
+ *   and nothing else - the seed is credited no entropy, and a pool that reports
+ *   ENTROPY_WEAK reports it just the same with a seed loaded.
  */
+
+/**
+ * @brief The seed carried across boots: where it lives and how big it is.
+ *
+ * 32 bytes because that is the width of the pool state; a seed larger than the
+ * state it is mixed into would be carrying bytes that cannot make a difference.
+ *
+ * /var rather than /etc, which is the FHS distinction and not a preference: a
+ * seed is state the system rewrites on its own, not configuration anybody edits.
+ * It is the same directory the kernel log is written into and for the same
+ * reason.
+ */
+#define ENTROPY_SEED_BYTES 32
+#define ENTROPY_SEED_NAME  "random-seed"
 
 /** RDRAND succeeded — cryptographic quality */
 #define ENTROPY_OK    0
@@ -72,13 +92,46 @@ typedef struct {
  * the full RTC date and time, the TSC, and a few boot-dependent addresses.
  * Idempotent: a second call re-stirs the pool but does not reset its counters.
  *
- * Cross-boot uniqueness rests on the RTC timestamp and the TSC. Two cold boots
- * of the same image within the same RTC second are not guaranteed to differ;
- * closing that gap needs a seed carried across boots on disk, which is not done
- * here (it would have to interact with VFS init ordering and with the LOCKDOWN
- * and IMMUTABLE levels, and deserves its own change).
+ * Cross-boot uniqueness does not come from here. This runs before there is a
+ * file system to read a seed out of, so all it has to work with is the RTC and
+ * the TSC, and two cold boots inside the same RTC second are not guaranteed to
+ * differ on those alone. entropy_load_seed() is the second half, and runs once
+ * the disk is mounted.
  */
 void entropy_init(void);
+
+/**
+ * @brief Mixes the seed left by the previous boot into the pool, then replaces it.
+ *
+ * Called from init_filesystem_and_vfs() once the disk is mounted and the system
+ * paths have their modes, which is as early as it can be: entropy_init() has to
+ * run before anything may extract, and it runs long before there is a /var.
+ *
+ * Two things it deliberately does not do. It credits the seed **no entropy** -
+ * bytes written by a pool that never reached cryptographic quality do not become
+ * unpredictable by being stored, so entropy_quality() reads exactly the same
+ * before and after. And it does not fail: a missing, short or unreadable seed is
+ * recorded and the boot continues, because the pool is no worse off than it was
+ * without one.
+ *
+ * The seed on disk is replaced immediately rather than at the next checkpoint,
+ * so a machine that loses power before reaching sync, halt or reboot cannot come
+ * back up and mix in a seed it has already used.
+ */
+void entropy_load_seed(void);
+
+/**
+ * @brief Writes a fresh seed for the next boot.
+ *
+ * Called at the three checkpoints that already write state out - sync, halt and
+ * reboot - alongside klog_persist(), and once more from entropy_load_seed().
+ *
+ * @return E_OK, or a negative errno. E_ROFS means the security level forbids
+ *         writes, which is IMMUTABLE working rather than a failure. Every caller
+ *         carries on either way: a machine that would not halt because it could
+ *         not refresh its seed would be the worse bargain.
+ */
+int entropy_persist_seed(void);
 
 /**
  * @brief Absorbs one timing sample. Safe to call from an interrupt handler.

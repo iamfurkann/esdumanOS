@@ -2,10 +2,11 @@
  * @file stat.c
  * @brief Prints a file's metadata: size, type, owner, mode, times and storage form.
  *
- * The mode, the group and the two timestamps arrived with the v0.9.0 disk format.
- * The mode is shown because it is stored; nothing enforces it yet, which the
- * README says and this does not pretend otherwise by dressing it up as an
- * ls-style rwx string it would have to invent meaning for.
+ * The mode, the group and the two timestamps arrived with the v0.9.0 disk format,
+ * and v0.9.1 made the mode decide access rather than merely be recorded. It is
+ * printed in octal because that is how a mode is read and written - `ls -l` is
+ * where the rwx string belongs, and printing both in both places would be two
+ * renderings to keep in agreement.
  *
  * Times are shown as dates rather than as the counts they are stored as. The
  * conversion is esdtime.h's, the same one the kernel stamped them with - it is

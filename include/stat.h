@@ -66,10 +66,9 @@ typedef struct {
     /**
      * Permission bits.
      *
-     * Recorded and reported; nothing consults them yet. Access is still decided
-     * by check_vfs_access(), which compares names, and replacing it is what
-     * v0.9.1 is for. Reporting a mode that is really stored is not the same as
-     * claiming it is enforced, and the README says which is which.
+     * Recorded, reported, and consulted: check_vfs_access() has decided by these
+     * bits rather than by file names since v0.9.1. What is reported here is what
+     * the system actually enforces.
      */
     uint16_t st_mode;
 

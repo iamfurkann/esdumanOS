@@ -328,6 +328,21 @@ failure. And the clock can be set, which it never could — it was readable and 
 writable, so `date` showed whatever the machine came up with and nothing could correct
 it, which started mattering the moment v0.9.0 began stamping files.
 
+v0.9.3 finishes something v0.9.0 started. Widening an entry id from a byte to two was
+mostly a matter of following the compiler, and the part the compiler cannot help with is
+the explicit cast — `(uint8_t)` compiles cleanly and truncates silently. Eight of them
+were still in the tree, on the paths people use most: `ls <dir>` and `cd` asked the
+permission question about one directory and then operated in another, `pwd` rendered a
+name belonging to some other entry, and the check that refuses to delete a directory that
+still holds files stopped seeing the files. All of them need an entry id past 255 to
+bite, which a table of 512
+reaches, and none of them fail loudly when they do — they answer about a different
+directory. The entropy pool also stops starting from scratch: a 32-byte seed is carried
+in `/var/random-seed` from one boot to the next, so two cold boots of the same image
+inside the same RTC second are no longer indistinguishable. It buys that and nothing
+else — the seed is credited no entropy, and a pool that reports `ENTROPY_WEAK` still
+reports it.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -409,7 +424,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **HMAC-SHA256** | RFC 2104, verified against RFC 4231 test vectors. Used for file integrity and IV derivation |
 | **PBKDF2-HMAC-SHA256** | Password key derivation, verified against RFC 6070 vectors. Iteration count is clamped to a sane range on read |
 | **ChaCha20** | Stream cipher backing `/dev/random` and `/dev/urandom`, keyed from the entropy pool |
-| **Entropy pool** | RDRAND when available; otherwise interrupt timing jitter with per-source entropy budgets and an honest quality verdict |
+| **Entropy pool** | RDRAND when available; otherwise interrupt timing jitter with per-source entropy budgets and an honest quality verdict. A 32-byte seed in `/var/random-seed` carries distinctness across boots, credited zero bits |
 
 ### User Space
 
@@ -534,6 +549,8 @@ kernel_main()
   +---> Create FHS hierarchy     /bin, /dev, /etc, /home, /root, /tmp, /var
   +---> First boot setup         Prompts for the root and user passwords,
   |                              then writes /etc/passwd and /etc/shadow
+  +---> apply_system_modes()     Put the system's own paths back to their modes
+  +---> entropy_load_seed()      Mix /var/random-seed in, then replace it
   +---> Load ELF programs        Decrypt and write init and the /bin tools
   +---> load_and_exec_elf()      Load init into its own address space
   v
@@ -844,9 +861,9 @@ The matching class decides and only that class: an owner with no permission is r
 rather than falling through to the group bits, which is what makes `chmod 077` mean
 what it says.
 
-The system's own paths are set at boot and put back if they drift: `/etc/shadow` is
-`0600`, `/tmp` is `0777`, `/root` is `0700`, and the rest of the top level is `0755`.
-Files are created `0644` and directories `0755`.
+The system's own paths are set at boot and put back if they drift: `/etc/shadow` and
+`/var/random-seed` are `0600`, `/tmp` is `0777`, `/root` is `0700`, and the rest of the
+top level is `0755`. Files are created `0644` and directories `0755`.
 
 ### The Editor
 
@@ -1234,7 +1251,7 @@ register `SIG_IGN` for it first and then check the return value.
 | 29 | `GET_DIR_ID` | Resolve directory path to ID |
 | 34 | `READ_RAW` | Read an open file's stored bytes, without decrypting them. `read()` against the stored form: same descriptor, same offset, same shape |
 | 44 | `READDIR` | Read directory entries into user buffer |
-| 45 | `SYNC` | Write dirty block-cache sectors out, and the kernel log to `/var/log` |
+| 45 | `SYNC` | Write dirty block-cache sectors out, and the kernel log and the entropy seed to `/var` |
 | 46 | `CHDIR` | Change the calling process's working directory |
 | 47 | `GETCWD` | Write the working directory into a user buffer |
 | 48 | `STAT` | Report a path's metadata into a user `esd_stat_t` |
@@ -1533,9 +1550,13 @@ The following are known constraints of the current implementation. These are doc
   at which it would claim cryptographic quality, and it reports that honestly
   instead of pretending otherwise. IV and salt *uniqueness* does not depend on
   this; unpredictability does.
-- **Entropy uniqueness is guaranteed within a boot, not across boots.** Two cold
-  boots of the same image inside the same RTC second are not provably distinct.
-  Closing that needs a seed persisted on disk.
+- **The cross-boot seed carries distinctness, not quality.** `/var/random-seed`
+  is mixed into the pool at boot and credited zero bits, so two boots of the same
+  image no longer start from the same state — but a seed written by a pool that
+  never reached cryptographic quality does not gain any by being stored. A
+  machine with no RDRAND still reports `ENTROPY_WEAK` with a seed loaded, which
+  is the honest answer. The seed is also replaced the moment it is read, so a
+  machine that loses power before its next checkpoint cannot reuse one.
 - **No ASLR, no stack canaries in user space, no W^X for user pages.**
 - LOCKDOWN blocks new programs and destroys the master key. It does not restrict
   an already-running shell, so a session that is open when the level is raised
@@ -1549,11 +1570,9 @@ Near-term priorities for the project, roughly in order:
 
 | Priority | Item |
 |----------|------|
-| P1 | Persist an entropy seed across boots, so uniqueness does not rest on the RTC |
 | P1 | Bounded string operations throughout user space |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
-| P1 | `/var/log`: separate the log from the screen transcript, wrap the buffer, write it out |
 | P2 | A sticky bit on `/tmp`, so a user cannot delete another user's temporary file |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
@@ -1575,7 +1594,11 @@ which landed in v0.8.0 and had been sitting here as a P3 for two releases after 
 the on-disk format, which grew a superblock, timestamps, an owner group and permission
 bits in v0.9.0; enforcing those bits, which retired the last of the name comparisons in
 v0.9.1; and setting the clock, which v0.9.2 added along with clearing out the commands
-that printed their output from inside the kernel.
+that printed their output from inside the kernel. Two more left this list in v0.9.3: the
+entropy seed carried across boots, and `/var/log` — which had been sitting here as a P1
+since v0.6.1 did every part of it. The log wraps, it holds records rather than a
+transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; the row
+outlived the work by five releases.
 
 ---
 

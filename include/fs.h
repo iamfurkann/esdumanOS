@@ -84,10 +84,11 @@ typedef uint16_t fs_id_t;
 /**
  * @brief Permission bits, in the arrangement everyone already knows.
  *
- * Stored and reported as of v0.9.0; nothing enforces them yet. check_vfs_access()
- * still decides by comparing names, and replacing it is what v0.9.1 is for. A
- * mode that is recorded truthfully and not yet consulted is a smaller lie than a
- * mode invented at the moment something asks for one.
+ * Stored and reported as of v0.9.0, enforced as of v0.9.1: check_vfs_access()
+ * reads them rather than comparing names. This comment said the enforcement was
+ * still to come for two releases after it arrived, which is the failure mode a
+ * comment about permissions has - it is read by people deciding whether a bit
+ * matters.
  */
 #define FS_MODE_DEFAULT_FILE 0644
 #define FS_MODE_DEFAULT_DIR  0755

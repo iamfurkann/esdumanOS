@@ -422,12 +422,12 @@ void run_syscall_tests(void) {
                  "[STRICT] [KLOG] the log is written out to /var/log/kern.log");
 
     int var_idx = fs_get_entry_idx("var", 0);
-    int log_idx = (var_idx >= 0) ? fs_get_entry_idx("log", (uint8_t)var_idx) : -1;
+    int log_idx = (var_idx >= 0) ? fs_get_entry_idx("log", (fs_id_t)var_idx) : -1;
     KTEST_ASSERT(log_idx >= 0, "[KLOG] /var/log exists to write into");
 
     if (log_idx >= 0) {
         vfs_file_t kern_log;
-        int opened = fs_open("kern.log", (uint8_t)log_idx, &kern_log);
+        int opened = fs_open("kern.log", (fs_id_t)log_idx, &kern_log);
         KTEST_ASSERT(opened == E_OK, "[STRICT] [KLOG] and the file it wrote can be opened");
 
         if (opened == E_OK) {

@@ -215,11 +215,11 @@ static void test_vfs_write_bounds(void) {
 /**
  * @brief Deleting a directory that still holds something.
  *
- * A child records its parent as the parent's index in dir_table, and fs_delete()
- * used to clear the parent's slot and stop there. The children stayed behind
- * pointing at an index that no longer described them: unreachable through any
- * path, and visible again as somebody else's contents the moment the slot was
- * reused. Nothing tested it because nothing had reason to delete a directory.
+ * A child records its parent's entry id, and fs_delete() used to clear the
+ * parent's slot and stop there. The children stayed behind pointing at an id
+ * that no longer described anything: unreachable through any path, and visible
+ * again as somebody else's contents the moment the slot was reused. Nothing
+ * tested it because nothing had reason to delete a directory.
  *
  * An empty one still goes, which is what makes this rmdir(2) rather than a
  * refusal to remove directories at all - there is no separate rmdir call here,
@@ -236,17 +236,17 @@ static void test_vfs_rmdir_semantics(void) {
 
     if (dir_id > 0) {
         const char *payload = "occupied";
-        KTEST_ASSERT(fs_create_file("inside.txt", (const uint8_t *)payload, 8, (uint8_t)dir_id) >= 0,
+        KTEST_ASSERT(fs_create_file("inside.txt", (const uint8_t *)payload, 8, (fs_id_t)dir_id) >= 0,
                      "[VFS] a file was created inside it");
 
         KTEST_ASSERT(fs_delete("rmdirprobe", 0) == E_NOTEMPTY,
                      "[STRICT] [VFS] deleting a directory that still holds a file is refused");
         KTEST_ASSERT(fs_get_entry_idx("rmdirprobe", 0) == dir_id,
                      "[STRICT] [VFS] the refused delete left the directory in place");
-        KTEST_ASSERT(fs_get_entry_idx("inside.txt", (uint8_t)dir_id) > 0,
+        KTEST_ASSERT(fs_get_entry_idx("inside.txt", (fs_id_t)dir_id) > 0,
                      "[STRICT] [VFS] and left its contents reachable rather than orphaned");
 
-        KTEST_ASSERT(fs_delete("inside.txt", (uint8_t)dir_id) == E_OK,
+        KTEST_ASSERT(fs_delete("inside.txt", (fs_id_t)dir_id) == E_OK,
                      "[VFS] the file inside deletes normally");
         KTEST_ASSERT(fs_delete("rmdirprobe", 0) == E_OK,
                      "[STRICT] [VFS] an empty directory deletes");
@@ -511,6 +511,20 @@ static void test_disk_format(void) {
                          "[STRICT] [VFS] an id past 255 survives the trip to the sector and back");
             KTEST_ASSERT(fs_get_entry_idx("wide_probe", 300) >= 0,
                          "[STRICT] [VFS] and a file can be created inside a directory with one");
+
+            /*
+             * And it is still seen to hold that file. fs_delete()'s emptiness
+             * check compared a child's parent_id against the parent's slot index
+             * narrowed to a byte - two mistakes that agree below 256 and stop
+             * agreeing above it. A directory that looked empty was deleted with
+             * its children still in the table, pointing at an id nothing answered
+             * to any more: the exact orphaning the check exists to prevent,
+             * arrived at through the check itself.
+             */
+            KTEST_ASSERT(fs_delete("wide_id_dir", 0) == E_NOTEMPTY,
+                         "[STRICT] [VFS] a directory with a wide id is not mistaken for an empty one");
+            KTEST_ASSERT(fs_get_entry_idx("wide_probe", 300) >= 0,
+                         "[STRICT] [VFS] and the refused delete left its contents where they were");
 
             /*
              * Cleared first, deleted second, and the order is the point: the

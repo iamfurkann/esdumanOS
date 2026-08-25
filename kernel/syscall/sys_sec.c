@@ -14,6 +14,7 @@
 #include "errno.h"
 #include "klog.h"
 #include "keyboard.h"
+#include "entropy.h"
 #include "bcache.h"
 #include "kernel.h"
 #include "rtc.h"
@@ -212,9 +213,12 @@ void sys_panic(arch_regs_t *regs) {
  * prevent.
  */
 void sys_sync(arch_regs_t *regs) {
-    /* Before the flush, so the sectors this writes go out with everything else.
-     * The log lived in RAM and went with the machine until now. */
+    /* Before the flush, so the sectors these write go out with everything else.
+     * The log lived in RAM and went with the machine until now, and the entropy
+     * seed with it. Neither can fail this call: both record what went wrong and
+     * the flush - which is what the caller actually asked for - still happens. */
     klog_persist();
+    entropy_persist_seed();
     bcache_flush();
     regs->eax = E_OK;
 }
@@ -229,6 +233,7 @@ void sys_reboot(arch_regs_t *regs) {
         return; 
     }
     klog_persist();
+    entropy_persist_seed();
     bcache_flush();
 
     outb(0x64, 0xFE);
@@ -245,9 +250,10 @@ void sys_halt(arch_regs_t *regs) {
         return; 
     }
     klog_persist();
+    entropy_persist_seed();
     bcache_flush();
 
-    printk("System halted safely.\n"); 
+    printk("System halted safely.\n");
     asm volatile("cli; hlt");
     regs->eax = 0;
 }

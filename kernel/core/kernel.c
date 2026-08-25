@@ -8,6 +8,7 @@
 #include "init_elf.h"
 #include "keyboard.h" 
 #include "crypto.h"
+#include "entropy.h"
 #include "serial.h"
 #include "fs.h"
 #include "kheap.h"
@@ -611,6 +612,14 @@ static void apply_system_modes(void) {
         ensure_mode("shadow", (fs_id_t)etc_id, 0600);
     }
 
+    /* The entropy seed is root's, for the same reason the shadow file is: a seed
+     * anyone can read tells them where the pool started. It is created 0600 and
+     * corrected here for a disk that arrived otherwise. */
+    int var_id = get_vfs_id("var", 0);
+    if (var_id >= 0) {
+        ensure_mode(ENTROPY_SEED_NAME, (fs_id_t)var_id, 0600);
+    }
+
     if (home_id >= 0) {
         for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
             if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)home_id &&
@@ -694,6 +703,14 @@ static int init_filesystem_and_vfs(void) {
     }
 
     apply_system_modes();
+
+    /*
+     * After the modes, because a seed created on a first boot has to land with
+     * the right one, and after the mount, because entropy_init() ran back in
+     * init_security() when there was no disk to read from. This is the half of
+     * the pool's seeding that needs a file system.
+     */
+    entropy_load_seed();
 
     int tmp_id = get_vfs_id("tmp", 0);
     if (tmp_id != -1) {

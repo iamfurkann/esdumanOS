@@ -21,6 +21,7 @@
 #include "entropy.h"
 #include "crypto.h"
 #include "fs.h"
+#include "errno.h"
 #include "security.h"
 #include "libft.h"
 
@@ -277,6 +278,91 @@ void run_entropy_tests(void) {
      */
     printk("        (dLSB of 4/32 under TCG is arithmetic, not a defect: deltas are\n");
     printk("         multiples of 1000 and 1000 mod 32 == 8, so only 4 values occur.)\n");
+
+    /* --- The seed carried across boots ---------------------------------- */
+
+    /*
+     * Uniqueness within a boot comes from the extraction counter, and it starts
+     * over at zero every time. Across boots it rests on the pool starting from
+     * somewhere different, which before v0.9.3 meant the RTC second and the TSC -
+     * so two cold boots of one image inside the same second were not provably
+     * distinct, and a disk image copied to two machines started them identically.
+     *
+     * The seed closes that and is asked to close nothing else. These assertions
+     * are as much about what it must not do: the pool's verdict has to read the
+     * same afterwards, because a seed written by a pool that never reached
+     * cryptographic quality does not gain any by being stored and read back.
+     *
+     * The file is already there by the time this runs: `make test_kernel` starts
+     * from a blank disk, and the boot that follows creates the seed before any
+     * test module is reached. So the existence assertion is checking the boot's
+     * work rather than this module's, and both calls made here exercise the
+     * reload path - which is the one with something to get wrong.
+     */
+    int seed_var = fs_get_entry_idx("var", 0);
+    KTEST_ASSERT(seed_var >= 0, "[ENTROPY] /var exists to keep the seed in");
+
+    if (seed_var >= 0) {
+        int quality_before_seed = entropy_quality();
+        entropy_stats_t before_seed, after_seed;
+
+        entropy_get_stats(&before_seed);
+        entropy_load_seed();
+        entropy_get_stats(&after_seed);
+
+        int seed_idx = fs_get_entry_idx(ENTROPY_SEED_NAME, (fs_id_t)seed_var);
+        KTEST_ASSERT(seed_idx >= 0,
+                     "[ENTROPY] the boot left a seed behind for the next one");
+        KTEST_ASSERT(seed_idx < 0 ||
+                     (dir_table[seed_idx].mode & FS_MODE_PERM_MASK) == 0600,
+                     "[STRICT] [ENTROPY] and it is readable by root alone, like the shadow file");
+
+        uint8_t first[ENTROPY_SEED_BYTES];
+        uint8_t second[ENTROPY_SEED_BYTES];
+        vfs_file_t seed_file;
+        int read_first = -1;
+        int read_second = -1;
+
+        if (fs_open(ENTROPY_SEED_NAME, (fs_id_t)seed_var, &seed_file) == E_OK) {
+            read_first = fs_read(&seed_file, first, sizeof(first));
+        }
+        KTEST_ASSERT(read_first == (int)sizeof(first),
+                     "[STRICT] [ENTROPY] the stored seed is exactly the expected size");
+
+        /*
+         * The second load consumes what the first one wrote and must not leave it
+         * in place. A machine that lost power before its next checkpoint would
+         * otherwise come back up and mix in a seed it had already used - two boots
+         * from one seed, which is the case this whole mechanism exists to rule out.
+         */
+        entropy_load_seed();
+
+        if (fs_open(ENTROPY_SEED_NAME, (fs_id_t)seed_var, &seed_file) == E_OK) {
+            read_second = fs_read(&seed_file, second, sizeof(second));
+        }
+        KTEST_ASSERT(read_second == (int)sizeof(second) &&
+                     bytes_differ(first, second, sizeof(first)),
+                     "[STRICT] [ENTROPY] loading a seed replaces it, so no seed is ever used twice");
+
+        KTEST_ASSERT(entropy_quality() == quality_before_seed,
+                     "[STRICT] [ENTROPY] a loaded seed buys distinctness, not quality: the verdict is unchanged");
+
+        /*
+         * Stronger than "the total did not move", which would be flaky: writing
+         * the seed does disk I/O, and ATA completions legitimately earn bits
+         * while this runs. What must hold is that every bit the total gained is
+         * accounted for by a source. A seed credited as entropy would have to
+         * appear either outside the per-source counters, breaking this identity,
+         * or inside one of them, which would be a lie about where it came from.
+         */
+        uint32_t total_gained = after_seed.credited_bits - before_seed.credited_bits;
+        uint32_t source_gained = 0;
+        for (uint32_t s = 0; s < ENTROPY_SRC_N; s++) {
+            source_gained += after_seed.credited_by_source[s] - before_seed.credited_by_source[s];
+        }
+        KTEST_ASSERT(total_gained == source_gained,
+                     "[STRICT] [ENTROPY] the seed credited the pool nothing that a source did not earn");
+    }
 
     /* --- Consumer 1: CryptoFS IVs -------------------------------------- */
 

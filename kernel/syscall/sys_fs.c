@@ -42,8 +42,10 @@
  * to check_vfs_access().
  *
  * PATH is what the rendered path is built into, on the kernel stack. MAX_FILENAME
- * is 256, so a deeply nested path with long names can exceed this; that case
- * reports E_NAMETOOLONG rather than truncating to something that looks valid.
+ * is 64 - it was 256 when this was written, and the arithmetic here was left
+ * saying so - and DEPTH is 16, so sixteen full-length names still exceed this.
+ * That case reports E_NAMETOOLONG rather than truncating to something that looks
+ * like a valid path and names a different directory.
  */
 #define GETCWD_MAX_DEPTH 16
 #define GETCWD_MAX_PATH  512
@@ -670,14 +672,29 @@ void sys_mkdir(arch_regs_t *regs) {
 }
 
 /**
- * @brief Function sys_ls_dir
+ * @brief Lists a directory named by entry id.
+ *
+ * The id arrives in ebx and is an fs_id_t, not a byte. It was narrowed to one
+ * here, which v0.9.0 made wrong the moment the table grew to 512 entries: an id
+ * of 256 became 0, so the permission check was asked about the root and the
+ * listing that followed was the root's. The two halves agreed with each other,
+ * which is why nothing looked broken, and neither agreed with what the caller
+ * had named.
+ *
+ * An id no entry can hold is refused rather than listed as empty. Nothing in the
+ * table can answer to it, and "no such directory" is what that means - an empty
+ * listing would claim the directory exists and has nothing in it.
  */
 void sys_ls_dir(arch_regs_t *regs) {
-    if (!check_vfs_access((uint8_t)regs->ebx, 0)) {
+    if (regs->ebx >= (uint32_t)MAX_FILES_IN_DIR) { regs->eax = E_NOENT; return; }
+
+    fs_id_t dir_id = (fs_id_t)regs->ebx;
+
+    if (!check_vfs_access(dir_id, 0)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "ls: Permission denied");
         regs->eax = E_ACCES; return;
     }
-    fs_list_dir((uint8_t)regs->ebx);
+    fs_list_dir(dir_id);
     regs->eax = E_OK;
 }
 
@@ -722,7 +739,7 @@ static int resolve_dir_from_cwd(const char *path) {
         target = dir_table[idx].entry_id;
     }
 
-    if (!check_vfs_access((uint8_t)target, 0)) return E_ACCES;
+    if (!check_vfs_access(target, 0)) return E_ACCES;
     return target;
 }
 
@@ -751,7 +768,7 @@ void sys_chdir(arch_regs_t *regs) {
     int target = resolve_dir_from_cwd(path);
     if (target < 0) { regs->eax = target; return; }
 
-    current_task->cwd_id = (uint8_t)target;
+    current_task->cwd_id = (fs_id_t)target;
     regs->eax = E_OK;
 }
 
@@ -762,6 +779,14 @@ void sys_chdir(arch_regs_t *regs) {
  * bounded rather than trusting the table to be acyclic: a corrupted parent_id
  * that pointed back into the chain would otherwise hang the kernel inside a
  * syscall, which is the same failure K-10 fixed in the VFS access check.
+ *
+ * Two things here are wider than a byte and were both kept in one. `id` is an
+ * fs_id_t, so a working directory at entry 256 was looked up as entry 0 and the
+ * walk stopped immediately - `pwd` answered "/" from inside a subdirectory.
+ * `chain` holds *slot indices* rather than ids, and the table has 512 slots, so
+ * a name rendered from a truncated index was some other directory's name. Both
+ * failures produce a path rather than an error, which is what makes them worth
+ * spelling out: the caller cannot tell.
  */
 void sys_getcwd(arch_regs_t *regs) {
     char *user_buf = (char *)regs->ebx;
@@ -770,9 +795,9 @@ void sys_getcwd(arch_regs_t *regs) {
     if (current_task == 0) { regs->eax = E_FAULT; return; }
     if (user_size == 0) { regs->eax = E_INVAL; return; }
 
-    uint8_t chain[GETCWD_MAX_DEPTH];
+    int chain[GETCWD_MAX_DEPTH];
     int depth = 0;
-    uint8_t id = current_task->cwd_id;
+    fs_id_t id = current_task->cwd_id;
 
     while (id != 0) {
         if (depth >= GETCWD_MAX_DEPTH) { regs->eax = E_NAMETOOLONG; return; }
@@ -787,7 +812,7 @@ void sys_getcwd(arch_regs_t *regs) {
         }
         if (idx == -1) { regs->eax = E_NOENT; return; }
 
-        chain[depth++] = (uint8_t)idx;
+        chain[depth++] = idx;
         id = dir_table[idx].parent_id;
     }
 

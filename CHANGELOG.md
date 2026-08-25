@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3-alpha] - 2026-08-25
+
+v0.9.0 widened an entry id from one byte to two, and the release notes for it said what
+made that dangerous: the compiler catches the declarations and cannot object to a cast.
+Fourteen explicit `(uint8_t)` casts were found and fixed then. Eight were not, and they
+were on the paths people use most — `ls`, `cd`, `pwd` and directory deletion. None of
+them fail; each answers about a different directory than the one it was asked about.
+
+The entropy pool also stops starting from nothing. A 32-byte seed now lives in
+`/var/random-seed` and is carried from one boot to the next, which closes the last of the
+cross-boot uniqueness gap. It closes that and nothing else, and the release is careful
+about the difference.
+
+### Fixed
+
+- **An entry id is two bytes wide everywhere it is used.** Eight places still narrowed
+  one to a byte, which was correct until the directory table grew to 512 entries in
+  v0.9.0 and silently wrong above 255 afterwards:
+
+  - `ls <dir>` and `cd` resolve their argument through the same path resolver, whose
+    access check ran against the truncated id. The permission question was asked about
+    one directory and the operation then happened in another — `ls` listed the right
+    directory on the wrong directory's permissions, and `cd` entered one.
+  - `pwd` walked the parent chain from a truncated working directory and stored **slot
+    indices** in a byte array along the way, so it rendered names belonging to other
+    entries — or stopped at the root and answered `/` from inside a subdirectory.
+  - `fs_delete()` decided whether a directory was empty by comparing each child's
+    `parent_id` against the parent's slot index narrowed to a byte. Above 255 it found no
+    children, so a directory that still held files was deleted and its contents were
+    orphaned — the exact loss that check exists to prevent, reached through the check.
+
+  An entry id past 255 is reachable with a table of 512, and an `ls` on a directory id
+  no entry can hold now reports `E_NOENT` rather than an empty listing.
+
+### Added
+
+- **An entropy seed that survives the machine being switched off.** 32 bytes in
+  `/var/random-seed`, mixed into the pool once the disk is mounted and written back at
+  `sync`, `halt` and `reboot` alongside the kernel log. Cross-boot uniqueness used to
+  rest on the RTC second and the TSC, so two cold boots of one image inside the same
+  second were not provably distinct — and an image copied to two machines started both
+  identically.
+
+  Two properties are deliberate. The seed is **credited zero entropy bits**, so
+  `entropy_quality()` reports exactly what it would have without one: bytes written by a
+  pool that never reached cryptographic quality do not acquire any by being stored. And
+  the seed on disk is **replaced the moment it is read**, not at the next checkpoint, so
+  a machine that loses power before reaching one cannot come back up and mix in a seed it
+  has already used.
+
+  It is created `0600` and owned by root, and the boot-time mode pass enforces that
+  again on every boot — `/etc/shadow`'s treatment, for `/etc/shadow`'s reason. A refusal
+  from `IMMUTABLE` or `LOCKDOWN` is recorded and never escalated: a machine that would
+  not halt because it could not refresh its seed would be the worse bargain.
+
+### Found in passing
+
+- **`SYSCALL_LS_DIR` (28) has no caller anywhere.** v0.9.2 moved the `ls` builtin onto
+  `READDIR` because this one prints its listing from inside the kernel and never reached
+  the caller's descriptor 1, and left the syscall in place "for any caller that genuinely
+  wants a screen dump". There is none — not in `/bin`, not in the shell, not in the
+  tests. That is exactly where `SYSCALL_CAT_FILE` stood before v0.9.2 removed it, and it
+  carries the same defect. Two of the eight truncations fixed here were in it. Left for
+  its own release rather than folded in late, alongside the sticky bit.
+
+- **`/var/log` was on the roadmap as a P1 for five releases after it was done.** The row
+  asked to separate the log from the screen transcript, wrap the buffer and write it out.
+  v0.6.1 did all three. Removed, and moved to the list of things already finished.
+
+- **`/bin`-less `rm` reports failure only in `$?`.** `rm /nope` prints nothing and exits
+  1, so a mistyped path — `rm /tmp/d/` with a trailing slash resolves to an empty
+  basename and refuses — looks exactly like success. `cd` and `chmod` both print. Not
+  introduced here and not fixed here.
+
+- **Three comments said the permission bits were stored but not enforced**, in `fs.h`,
+  `stat.h` and `/bin/stat`. Each was written before v0.9.1 and each was still there
+  afterwards, telling anyone reading that a mode was decorative.
+
+- **A comment in `sys_fs.c` sized the `getcwd` path buffer against a `MAX_FILENAME` of
+  256.** It has been 64 since v0.9.0. The bound it justified is still correct; the
+  arithmetic offered for it was not.
+
+- **The two write paths disagree about which errno `IMMUTABLE` returns** —
+  `fs_create_file()` answers `E_ROFS` and `fs_atomic_update()` answers `E_ACCES`.
+  Deliberately not reconciled here: every caller of both already treats them alike, and
+  changing one is a behaviour change that belongs in its own release.
+
 ## [0.9.2-alpha] - 2026-08-25
 
 The last category on the list to 1.0: answers that looked right and were not. Every one

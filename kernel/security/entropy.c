@@ -23,18 +23,22 @@
  * source dead. That is the property fs_create_encrypted() and create_shadow_entry()
  * actually need, and it no longer depends on how good the sources were.
  *
- * BOUNDARY: uniqueness is guaranteed within a boot. Across boots it rests on the
- * RTC timestamp and the TSC mixed in by entropy_init(), so two cold boots of the
- * same image inside the same RTC second are not provably distinct. Closing that
- * needs a seed persisted on disk and read back at boot, which would have to be
- * ordered against VFS init and reconciled with the LOCKDOWN and IMMUTABLE levels.
- * Deliberately not done here.
+ * Uniqueness across boots is what entropy_load_seed() is for. It used to rest on
+ * the RTC timestamp and the TSC that entropy_init() mixes in, so two cold boots
+ * of the same image inside the same RTC second were not provably distinct - and
+ * a disk image copied to two machines started them both from the same state.
+ * A seed carried on disk closes that, and closes only that: the bytes are mixed
+ * in and credited nothing, because a seed written by a pool that never reached
+ * cryptographic quality does not arrive at the next boot with any more than it
+ * left with. Unpredictability still comes from RDRAND or from nowhere.
  */
 #include "types.h"
 #include "io.h"
 #include "klog.h"
 #include "crypto.h"
 #include "libft.h"
+#include "fs.h"
+#include "errno.h"
 #include "entropy.h"
 
 #define CMOS_ADDRESS 0x70
@@ -181,6 +185,155 @@ void entropy_init(void) {
 
     pool.last_tsc = seed[9];
     pool.seeded = 1;
+}
+
+/**
+ * @brief Absorbs a run of bytes into the pool state.
+ *
+ * state = SHA256(state || label || data). The label is there so that bytes that
+ * arrive as a stored seed cannot be confused with bytes that arrive any other
+ * way, which costs nothing and makes the domains separate on purpose rather
+ * than by accident.
+ */
+static void pool_absorb_bytes(const char *label, const uint8_t *data, uint32_t len) {
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, pool.state, sizeof(pool.state));
+    sha256_update(&ctx, (const uint8_t *)label, (uint32_t)ft_strlen(label));
+    sha256_update(&ctx, data, len);
+    sha256_final(&ctx, pool.state);
+}
+
+/**
+ * @brief Locates /var, which is where the seed lives.
+ * @return Entry id of /var, or a negative errno.
+ */
+static int entropy_seed_dir(void) {
+    int var_id = fs_get_entry_idx("var", 0);
+    return (var_id < 0) ? E_NOENT : var_id;
+}
+
+int entropy_persist_seed(void) {
+    uint8_t seed[ENTROPY_SEED_BYTES];
+
+    /*
+     * ENTROPY_FAIL leaves the buffer untouched, so there would be nothing to
+     * write but the stack's previous contents. Nothing is written instead - a
+     * seed file holding whatever happened to be on the stack is worse than no
+     * seed file, because the next boot would mix it in and believe it.
+     */
+    if (generate_random_bytes(seed, sizeof(seed)) == ENTROPY_FAIL) {
+        klog(LOG_LEVEL_WARN, "ENTROPY", "The pool is not seeded; no seed was written for the next boot.");
+        return E_IO;
+    }
+
+    int var_id = entropy_seed_dir();
+    if (var_id < 0) {
+        ft_memset(seed, 0, sizeof(seed));
+        klog(LOG_LEVEL_WARN, "ENTROPY", "/var is missing; no seed was written for the next boot.");
+        return var_id;
+    }
+
+    /* klog_persist()'s shape, and for its reason: a stored file is one blob that
+     * can be replaced but not extended. */
+    int rc;
+    int existing = fs_get_entry_idx(ENTROPY_SEED_NAME, (fs_id_t)var_id);
+
+    if (existing >= 0) {
+        rc = fs_atomic_update(ENTROPY_SEED_NAME, seed, sizeof(seed), (fs_id_t)var_id);
+    } else {
+        rc = fs_create_file(ENTROPY_SEED_NAME, seed, sizeof(seed), (fs_id_t)var_id);
+
+        /*
+         * A new file takes FS_MODE_DEFAULT_FILE, which is 0644, and a seed every
+         * user can read is a seed that buys nothing: knowing it is knowing where
+         * the pool started. The mode is set on creation and enforced again on
+         * every boot by apply_system_modes(), for /etc/shadow's reason - the
+         * boot-time pass is what covers a disk that arrived with the wrong one.
+         *
+         * Only the creating path needs this. fs_atomic_update() swaps the
+         * contents underneath the existing entry and leaves its mode and owner
+         * alone, which is what makes it an update rather than a new file.
+         */
+        if (rc == E_OK) {
+            int idx = fs_get_entry_idx(ENTROPY_SEED_NAME, (fs_id_t)var_id);
+            if (idx >= 0) fs_chmod(dir_table[idx].entry_id, 0600);
+        }
+    }
+
+    ft_memset(seed, 0, sizeof(seed));
+
+    /*
+     * A refusal from the security level is expected rather than wrong: IMMUTABLE
+     * exists to stop writes and this is a write, and under LOCKDOWN the master
+     * key is gone so a written seed could never be read back. Both are recorded
+     * and neither is escalated - the three checkpoints that call this are sync,
+     * halt and reboot, and a machine that would not halt because it could not
+     * refresh its seed would be the worse bargain, exactly as it is for the log.
+     *
+     * Two codes because the two write paths disagree about which one to use:
+     * fs_create_file() answers E_ROFS and fs_atomic_update() answers E_ACCES for
+     * the same IMMUTABLE level. Left alone rather than reconciled here, since
+     * every caller of both already treats them the same way.
+     */
+    if (rc == E_ROFS || rc == E_ACCES) {
+        klog(LOG_LEVEL_INFO, "ENTROPY", "The security level forbids writes; the seed was left as it was.");
+    } else if (rc != E_OK) {
+        klog_int(LOG_LEVEL_WARN, "ENTROPY", "Writing the seed failed with errno", rc);
+    }
+
+    return rc;
+}
+
+void entropy_load_seed(void) {
+    int var_id = entropy_seed_dir();
+
+    if (var_id < 0) {
+        klog(LOG_LEVEL_WARN, "ENTROPY", "/var is missing; no seed was carried across the boot.");
+        return;
+    }
+
+    vfs_file_t seed_file;
+    uint8_t seed[ENTROPY_SEED_BYTES];
+
+    /*
+     * fs_read() and fs_create_file() both decide by the current security level,
+     * so a seed written and read at the same level round-trips exactly. A level
+     * raised to CRYPTO_ENFORCED before the write and back down before the read
+     * gives 32 bytes of the stored form instead of the plaintext - which is a
+     * harmless outcome here, and only here, because distinctness is the entire
+     * job and ciphertext is exactly as distinct. Under LOCKDOWN the key is gone
+     * and the read refuses outright, which the short-read branch handles.
+     */
+    if (fs_open(ENTROPY_SEED_NAME, (fs_id_t)var_id, &seed_file) == E_OK) {
+        int got = fs_read(&seed_file, seed, sizeof(seed));
+
+        if (got == (int)sizeof(seed)) {
+            pool_absorb_bytes("esdumanOS/seed", seed, sizeof(seed));
+            klog(LOG_LEVEL_INFO, "ENTROPY", "A seed from the previous boot was mixed in, credited no bits.");
+        } else {
+            /*
+             * Short, unreadable or the wrong length. Not used, and said out loud:
+             * mixing a partial seed would still be safe, but a seed file that has
+             * silently stopped being a seed file is the kind of thing that goes
+             * unnoticed for releases.
+             */
+            klog_int(LOG_LEVEL_WARN, "ENTROPY", "The stored seed was not the expected size and was not used; read", got);
+        }
+        ft_memset(seed, 0, sizeof(seed));
+    } else {
+        klog(LOG_LEVEL_INFO, "ENTROPY", "No stored seed was found; this is a first boot on this disk.");
+    }
+
+    /*
+     * Replaced now, not at the next checkpoint, and that is the whole guarantee.
+     * sync, halt and reboot refresh it too, but a machine that loses power before
+     * reaching one of them would otherwise come back up and mix in the very same
+     * seed it used last time - two boots from one seed, which is the case this
+     * exists to rule out. Writing immediately means the seed on disk has always
+     * already been consumed.
+     */
+    entropy_persist_seed();
 }
 
 void entropy_add_event(uint32_t source, uint32_t data) {

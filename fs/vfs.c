@@ -851,24 +851,34 @@ uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
             /*
              * A directory that still holds something is refused.
              *
-             * A child records its parent as the parent's index in this table,
-             * and deleting the parent used to clear that slot and stop there.
-             * The children stayed behind pointing at an index that no longer
-             * described them, unreachable through any path - and visible again
-             * the moment the slot was reused, as somebody else's contents.
+             * A child records its parent's entry id, and deleting the parent
+             * used to clear that slot and stop there. The children stayed behind
+             * pointing at an id that no longer described anything, unreachable
+             * through any path - and visible again the moment the slot was
+             * reused, as somebody else's contents.
              *
              * An empty directory still deletes, which is what makes this
              * rmdir(2) rather than a refusal to remove directories at all:
              * there is no separate rmdir in this system, so refusing outright
              * would leave a directory with no way to remove it.
              *
-             * Index 0 is the root and is never allocated to a real entry -
-             * fs_mkdir() starts its search at 1 - so scanning for parent_id == i
-             * cannot confuse a directory's children with the root's.
+             * Entry id 0 is the root and is never allocated to a real entry -
+             * fs_mkdir() starts its search at 1 - so scanning for children by
+             * entry id cannot confuse a directory's children with the root's.
+             *
+             * The comparison used to be against the loop index narrowed to a
+             * byte, which was two mistakes that cancelled below 256 and stopped
+             * cancelling above it. An entry id and a slot index happen to be
+             * equal here (entry_id is assigned the slot it lands in), so the
+             * confusion was invisible; the byte was not. A directory in slot 256
+             * looked for children whose parent_id was 0, found the root's
+             * instead, and either refused a delete it should have allowed or -
+             * with an empty root - deleted a directory that still held files and
+             * orphaned exactly what this check exists to protect.
              */
             if (dir_table[i].file_type == FT_DIR) {
                 for (int c = 0; c < MAX_FILES_IN_DIR; c++) {
-                    if (dir_table[c].is_used == 1 && dir_table[c].parent_id == (uint8_t)i) {
+                    if (dir_table[c].is_used == 1 && dir_table[c].parent_id == dir_table[i].entry_id) {
                         klog(LOG_LEVEL_WARN, "VFS", "Refusing to delete a directory that is not empty.");
                         vfs_unlock(); return E_NOTEMPTY;
                     }

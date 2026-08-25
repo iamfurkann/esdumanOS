@@ -48,9 +48,23 @@ described inaccurately is worse than one described plainly — in either directi
   `/etc/shadow` salts are derived through a monotonic counter, so no two can collide
   within a boot even if every source were worthless. Unpredictability is what degrades,
   not uniqueness.
-- **Uniqueness holds within a boot, not across boots.** Two cold boots of the same image
-  inside the same RTC second are not provably distinct. A persisted seed would close
-  this and is on the roadmap.
+- **Across boots, uniqueness rests on a seed carried on disk.** `/var/random-seed` holds
+  32 bytes, mixed into the pool at boot and replaced immediately, so a machine that
+  loses power before its next checkpoint cannot reuse one. Before v0.9.3 this rested on
+  the RTC second and the TSC alone, and two cold boots of one image inside the same
+  second were not provably distinct.
+- **The seed is credited zero entropy, and this is not a technicality.** Bytes written
+  by a pool that never reached cryptographic quality do not acquire any by being stored
+  and read back, so `entropy_quality()` returns exactly what it would have without one.
+  The seed buys distinctness between boots. It does not turn `ENTROPY_WEAK` into
+  `ENTROPY_OK` and is not treated as if it could.
+- The seed file is created `0600` and owned by root, and the boot-time pass puts that
+  mode back if it drifts — the same treatment `/etc/shadow` gets. What that bit is worth
+  is bounded by how this system decides access: `check_vfs_access()` is asked about the
+  **directory** an operation happens in, not about the file, so a mode on a file is
+  recorded and reported rather than standing between a reader and its contents. `/var`
+  is `0755`. The seed is not a secret this system can currently keep, and it is written
+  down here that way rather than assumed.
 
 ### Memory and process protection
 
@@ -139,7 +153,6 @@ Please note that as a hobby/educational OS kernel, the security model is intenti
 We welcome contributions that improve the security posture of esdumanOS. Currently open:
 - A sticky bit, so `/tmp` being world-writable does not also make it world-deletable
 - Deriving the disk key from a boot passphrase instead of a build-time constant
-- Persisting an entropy seed across boots
 - Adding stack canaries, in the kernel and in user-space programs
 - Implementing ASLR
 - Validating the directory table on mount beyond the superblock's geometry, so a crafted
@@ -147,5 +160,6 @@ We welcome contributions that improve the security posture of esdumanOS. Current
 
 Already done, so no longer needed: per-user password salting (PBKDF2-HMAC-SHA256 with a
 16-byte salt); the entropy pool (interrupt-jitter sourced, with per-source budgets and
-an honest quality verdict); and enforcing the permission bits, which in 0.9.1 retired
-the last of the name comparisons in `check_vfs_access()`.
+an honest quality verdict); enforcing the permission bits, which in 0.9.1 retired the
+last of the name comparisons in `check_vfs_access()`; and persisting an entropy seed
+across boots, which 0.9.3 added — for distinctness between boots, not for quality.

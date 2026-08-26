@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.9.2--alpha-blue)
+![Version](https://img.shields.io/badge/version-0.10.1--alpha-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -54,7 +54,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.9.2-alpha
+**Version:** 0.10.1-alpha
 
 esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -467,7 +467,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-------|-------------|
 | **Kernel Self-Tests** | 34 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
-| **Fuzzing** | Parser fuzz testing with 54 corpus files |
+| **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
 
 ---
@@ -485,7 +485,7 @@ anyone curious about kernel internals — not for storing anything you care abou
                           INT 0x80      INT 0x80  INT 0x80  INT 0x80
                                |             |        |         |
     +--------------------------|-------------|--------|---------|-------+
-    |                    System Call Dispatcher (50 syscalls)           |
+    |                    System Call Dispatcher (62 syscalls)           |
     +------------------------------------------------------------------+
     |                                                                   |
     |   +-------------+  +-------------+  +-------------+  +---------+ |
@@ -569,15 +569,18 @@ kernel_main()
   +---> init_timer(TIMER_HZ)     PIT at 100 Hz
   +---> init_signals()           Kernel timer slot table
   +---> ata_identify()           ATA disk detection
-  +---> fs_init()                VFS, FAT, directory table from disk
+  +---> fs_init()                Partition table, superblock, FAT and directory
+  |                              table; formats a blank disk, refuses a foreign one
   +---> init_fpu()               FPU/SSE detection and initialization
   +---> init_multitasking()      Idle task, task array
   +---> Create FHS hierarchy     /bin, /dev, /etc, /home, /root, /tmp, /var
   +---> First boot setup         Prompts for the root and user passwords,
   |                              then writes /etc/passwd and /etc/shadow
-  +---> apply_system_modes()     Put the system's own paths back to their modes
-  +---> entropy_load_seed()      Mix /var/random-seed in, then replace it
   +---> Load ELF programs        Decrypt and write init and the /bin tools
+  +---> apply_system_modes()     Put the system's own paths back to their modes.
+  |                              After the programs are written, not before: they
+  |                              are created 0644 and exec needs the execute bit
+  +---> entropy_load_seed()      Mix /var/random-seed in, then replace it
   +---> load_and_exec_elf()      Load init into its own address space
   v
 start_first_task() ------------> iret to Ring 3, init shell starts
@@ -720,7 +723,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.5.2-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v0.10.1-alpha.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -743,7 +746,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.5.2-alpha.iso \
+    -cdrom esdumanOS-v0.10.1-alpha.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -1004,10 +1007,10 @@ esdumanOS includes a multi-layered test infrastructure:
 # Run host-side unit tests (crypto, ELF analysis, hash)
 make test
 
-# Run parser fuzzing with 54 corpus files
+# Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 31 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 34 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -1037,7 +1040,7 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
-| `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes, that the superblock's geometry leaves room for the regions it describes, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), and that the system's own paths carry the permissions they must after a boot |
+| `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes and the master boot record exactly one sector, that the superblock's geometry leaves room for the regions it describes and stays relative to the partition, that clusters 0 and 1 are reserved so a start cluster of 0 can mean "no data", that a file spanning two clusters reads back byte-for-byte, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), the mount-time table validator against four kinds of corruption, and that the system's own paths carry the permissions they must after a boot |
 | `test_memory.c` | Heap allocation, deallocation, read/write verification |
 | `test_pipe.c` | Pipe creation, ring buffer, EOF detection, syscall integration |
 | `test_security.c` | Authentication: wrong password, invalid UID, correct password. The permission rule the VFS decides with: the three classes, that the matching one is the only one consulted so an owner with no permission is not passed to the group, that every bit asked for has to be granted, and that root is subject to none of it |
@@ -1101,7 +1104,7 @@ esdumanOS/
 |   |   |-- pipe.c                   Anonymous and named pipes
 |   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   |-- syscall.c                Dispatcher, 55 system calls
+|   |   |-- syscall.c                Dispatcher, 62 system calls
 |   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
 |       |-- security.c               Security levels, master key lifetime
@@ -1154,13 +1157,16 @@ esdumanOS/
 |       |-- grep.c                   Search text patterns (file or stdin)
 |       |-- head.c                   Display first lines of file or stdin
 |       |-- wc.c                     Count lines, words and bytes
-|       |-- date.c                   Display date and time
-|       +-- stat.c                   Show a file's size, type and owner
+|       |-- date.c                   Display date and time, and set the clock
+|       |-- edit.c                   Modal text editor, vi-shaped
+|       |-- chmod.c                  Change permission bits
+|       |-- chown.c                  Change owner and group
+|       +-- stat.c                   Show a file's size, type, owner, mode and times
 |
-|-- include/                         41 header files
-|   |-- kernel.h                     Master header (version 0.6.1-alpha)
+|-- include/                         44 header files
+|   |-- kernel.h                     Master header, and where the version lives
 |   |-- types.h                      Integer type definitions
-|   |-- syscall.h                    50 syscall number definitions
+|   |-- syscall.h                    62 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
 |   |-- fs.h                         VFS structures, file operations
 |   |-- stat.h                       esd_stat_t and the lseek origins
@@ -1169,12 +1175,11 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      31 kernel-mode test modules + framework
+|   |-- kernel/                      34 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
-|   +-- host/                        Host-side tests, fuzzing (54 corpus files)
+|   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
 |-- tools/                           Build-time utilities
-|   |-- mkfs.py                      File system image creator
 |   +-- encrypt_tool.c               ELF encryption tool (links OpenSSL libcrypto)
 |
 |-- grub/
@@ -1189,7 +1194,7 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 55 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 62 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 ### Process Management
 
@@ -1336,7 +1341,7 @@ sets them, `chown` sets the owner and group, and `ls -l` shows both.
 |--------|------|-------------|
 | 2 | `IPC_SEND` | Send a message to another process |
 | 6 | `IPC_RECEIVE` | Receive a message from mailbox |
-| 18 | `ALARM` | Set a timer-based alarm |
+| 18 | `ALARM` | Arms the demonstration timer: a fixed three seconds, after which the kernel prints a line on the console. Takes no arguments and delivers no signal, despite the name — see `syscall.h`. What becomes of it is part of freezing the ABI at 1.0 |
 | 24 | `SIGNAL_REG` | Register a signal handler, or `SIG_DFL` (0) / `SIG_IGN` (1) |
 | 25 | `KILL` | Send a signal to a process, or to every member of a group when the pid is negative |
 | 27 | `SIGRETURN` | Return from signal handler |
@@ -1454,7 +1459,7 @@ The following are known constraints of the current implementation. These are doc
 | Resource | Limit |
 |----------|-------|
 | Maximum processes | 16 (`MAX_TASKS`) |
-| File descriptors per process | 32 (`MAX_FD_PER_TASK`) |
+| File descriptors per process | 16 (`MAX_FD_PER_TASK`) |
 | Files in directory table | 512 (`MAX_FILES_IN_DIR`) |
 | Maximum filename length | 64 bytes (`MAX_FILENAME`) |
 | Maximum path length | 256 bytes (`MAX_PATH`) |
@@ -1509,11 +1514,13 @@ The following are known constraints of the current implementation. These are doc
   name it already knows. `check_vfs_access()` is not told which of the two its caller is
   about to do, so it asks for both — stricter than Unix, never looser, and no mode this
   system sets for itself distinguishes them.
-- **A disk written before v0.9.0 cannot be read, and is refused rather than converted.**
-  The format changed and there is no converter: the kernel recognises an older image —
-  the old format never used sector 0, so a zero superblock over a non-zero directory
-  region can only be one thing — prints what happened, and writes nothing to it. Every
-  release ships a fresh `disk.img`, and `make run` starts from a blank one.
+- **A disk written before v0.10.0 cannot be read, and is refused rather than converted.**
+  The format has changed twice and there is no converter for either step. v0.10.0 put a
+  partition table in sector 0, where v0.9.x kept the superblock, so an old image is
+  recognised by its own magic number sitting where the partition table now goes — named
+  as a v0.9.x disk, refused, and not written to. Anything older than v0.9.0 is refused
+  for the same reason with less to say about it. Every release ships a fresh `disk.img`,
+  and `make run` starts from a blank one.
 - **There is no group database.** A task's `gid` starts equal to its `uid` and follows
   it, so the group on a file is always its owner's. The field exists because the format
   needs one and because a value taken from the creating task is a better answer than a
@@ -1577,6 +1584,29 @@ The following are known constraints of the current implementation. These are doc
   in the same program share a read position. Linux keeps one per open.
 - **No ACPI.** Shutdown and reboot use legacy keyboard controller reset.
 - **VGA text mode only.** No framebuffer or graphical output.
+- **One test is not deterministic, and the cause is not established.**
+  `test_time`'s round trip — set the clock to a known time, read it back, compare
+  — fails often enough to meet in ordinary use: roughly two full runs in five
+  during the session that documented it, not the one-in-fifty first guessed here.
+  Sometimes only the date assertion fails, sometimes the time-of-day one beside
+  it as well, which means the read can come back wrong in every field rather than
+  in the date alone — and that rules out the first theory, a date-register roll
+  landing between the write and the read.
+
+  Both assertions read the same structure from one `rtc_read_utc()`, and that
+  read is the textbook-correct sequence: wait out the update-in-progress flag,
+  read, read again, and accept only two readings that agree. The write path halts
+  the update cycle with register B's SET bit before touching anything, and
+  `rtc_set_utc()` returning `E_OK` is asserted separately and does not fail. So
+  the write is accepted and the value that comes back is not the one written.
+
+  An extra update-in-progress wait after asserting SET was tried and made it
+  worse rather than better, which also disproved the theory behind it: with SET
+  asserted the chip does not update, so that wait is a no-op and cannot have
+  been what changed anything. It was removed. What is written down here is what
+  is known — the test is flaky — rather than a mechanism nobody has demonstrated.
+  Fixing it properly means either making the assertion deterministic or reading
+  QEMU's RTC implementation to find the real interaction.
 
 ### Security
 

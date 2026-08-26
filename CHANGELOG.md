@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1-alpha] - 2026-08-26
+
+An audit of the whole tree before freezing the ABI at 1.0. No new features; what
+follows is what a systematic read found, and the documentation came out of it worse
+than the code did.
+
+### Fixed
+
+- **Seven of the eight `IMMUTABLE` guards asked `==` rather than `>=`.** The security
+  levels are an ordered enum and IMMUTABLE is currently the last, so the two forms are
+  equivalent today and stop being equivalent the moment a stricter level is added —
+  every `==` guard would let the write through. A check that opens when somebody
+  appends a line to an enum is not a check, and `SEC_LEVEL_*` is about to be frozen.
+
+- **Six syscalls flattened the path resolver's errno into `E_NOENT`.**
+  `split_from_cwd()` distinguishes E_INVAL (component too long), E_NOTDIR and E_NOENT;
+  `open`, `create`, `rm`, `mv`, `mkdir` and the directory resolver collapsed all three,
+  while `stat` propagated. The same path therefore produced different errnos depending
+  on which call you asked, and creating a file with a 250-character name reported "no
+  such file or directory" about a file the caller was trying to make.
+
+- **`fs_atomic_update()` answered `E_ACCES` where every other write path answers
+  `E_ROFS`** for the identical condition. Noticed in v0.9.3 and left because callers
+  treated them alike; that does not survive a freeze.
+
+- **`MAX_FD_PER_TASK` said 32 and the real limit was 16.** The constant was used
+  nowhere — every bound goes through the task's own `fd_table_size` — so nothing ever
+  compared the two. It says 16 now and `create_process()` uses it.
+
+### Removed
+
+- **An AES-256 interface that was never implemented.** `crypto.h` declared
+  `aes256_ctx_t` and six functions, plus a RISC-V acceleration block written in terms
+  of that fictional type. Nothing called any of it. The real AES is in `aes.h` and
+  `crypto/aes.c`.
+
+- **`update_passwd_file()`**, which rewrote `/etc/passwd` with no check of the caller's
+  uid, the file's mode, or the security level. No caller, and no declaration in any
+  header. Dead code that would have been a hole the day somebody revived it.
+
+- **`print_two_digits()`**, which had no caller and no declaration.
+
+### Changed
+
+- **Four test assertions passed when their subject was missing.**
+  `KTEST_ASSERT(idx < 0 || <property>)` reads as "if it exists it must be so" and
+  behaves as "say nothing if it is gone" — `/etc/passwd` among them, with no existence
+  check anywhere near it.
+
+- **`test_stress`'s long-name check never reached the VFS.** It accepted any
+  non-positive return, and what it was getting was `E_FAULT`: the content argument was
+  the literal `""`, which lives in kernel `.rodata`, so `copy_user_string()` refused the
+  pointer before a path was ever resolved. A test called "VFS Long Name (Buffer
+  Overflow)" spent its life checking pointer validation on its second argument.
+
+- **`esd_stat_t` and `esd_time_t` now have size assertions.** They cross the Ring 0 /
+  Ring 3 boundary; `disk_file_entry_t` has had one for the disk, and the argument is
+  the same except that there is no magic number here to catch a disagreement.
+
+- **The static analysis of `/bin` covered seventeen of nineteen programs.** The two it
+  missed were `stat.c` and `init.c` — and `init.c` is PID 1: if it stops calling `exec`
+  there is no shell left to notice with.
+
+- **`pmm.c`'s low-memory floor is named**, not a bare `256` in two places. The number is
+  one megabyte over the page size, and this project has been bitten twice by a
+  relationship written as a literal.
+
+- **`SYSCALL_ALARM` is described as what it is.** It said "set an alarm signal" and
+  keeps none of those promises: no duration, no signal, no relation to the caller — it
+  arms a timer for a fixed three seconds and lets the kernel print a line. What becomes
+  of number 18 is now part of freezing the ABI, alongside 11, 28 and the gap at 99.
+
+- **The boot sequence diagram documented the ordering bug v0.10.0 shipped**, showing the
+  mode pass before the block that writes the `/bin` tools. The code does the opposite,
+  and does so because the other order left every program unexecutable.
+
+- **`CONTRIBUTING`'s checklist listed three test targets and claimed CI runs the same
+  ones.** CI runs six.
+
+### Known issues
+
+- **`test_time`'s clock round trip is not deterministic and the cause is not
+  established.** It fails roughly two full runs in five. An extra update-in-progress
+  wait was tried and made it worse, which also disproved the theory behind it. Both the
+  attempt and its refutation are recorded rather than a fix nobody demonstrated.
+
 ## [0.10.0-alpha] "Stake" - 2026-08-26
 
 Sector 0 held the superblock from v0.9.0 onward, so the disk could not say where it

@@ -1081,7 +1081,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
  * @return int
  */
 int fs_create_file(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
-    if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File creation blocked!");
         return E_ROFS;
     }
@@ -1149,7 +1149,7 @@ int fs_delete(const char *name, fs_id_t parent_id) {
     if (!fs_mounted) return E_NODEV;
 
     vfs_lock();
-    if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File deletion blocked!");
         vfs_unlock(); return E_ROFS;
     }
@@ -1246,7 +1246,7 @@ int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
     if (ft_strlen(new_name) >= MAX_FILENAME) return E_INVAL;
 
     vfs_lock();
-    if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File renaming blocked!");
         vfs_unlock(); return E_ROFS;
     }
@@ -1295,7 +1295,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
 
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_WARN, "VFS", "fs_atomic_update: Blocked by IMMUTABLE security level");
-        return E_ACCES;
+        return E_ROFS;
     }
     // CRYPTO_ENFORCED: atomic updates also go through encrypted path
     // This is handled by using fs_create_file() instead of fs_create_file_raw()
@@ -1396,7 +1396,7 @@ static int fs_slot_of(fs_id_t entry_id) {
  */
 int fs_chmod(fs_id_t entry_id, uint16_t mode) {
     if (!fs_mounted) return E_NODEV;
-    if (current_sec_level == SEC_LEVEL_IMMUTABLE) return E_ROFS;
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) return E_ROFS;
 
     vfs_lock();
 
@@ -1423,7 +1423,7 @@ int fs_chmod(fs_id_t entry_id, uint16_t mode) {
  */
 int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid) {
     if (!fs_mounted) return E_NODEV;
-    if (current_sec_level == SEC_LEVEL_IMMUTABLE) return E_ROFS;
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) return E_ROFS;
 
     vfs_lock();
 
@@ -1468,7 +1468,7 @@ int fs_mkdir(const char *name, fs_id_t parent_id) {
     if (!fs_mounted) return E_NODEV;
 
     vfs_lock();
-    if (current_sec_level == SEC_LEVEL_IMMUTABLE) { vfs_unlock(); return E_ROFS; }
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) { vfs_unlock(); return E_ROFS; }
 
     /* Refused rather than truncated, as in fs_create_file_raw(). */
     if (ft_strlen(name) >= MAX_FILENAME) { vfs_unlock(); return E_INVAL; }

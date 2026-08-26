@@ -64,9 +64,22 @@ static int copy_user_string(char *destination, const char *source, size_t max_le
  * lookups started, and every /bin tool passed a hardcoded 0, which is why they
  * all operated on the root directory no matter where the shell had cd'd to.
  *
+ * **Callers must pass a negative return through, not flatten it.** This answers
+ * E_INVAL for a path component too long to hold, E_NOTDIR for a component that
+ * is not a directory, and E_NOENT for one that is not there - three different
+ * things a caller can act on differently. Six of the eight call sites used to
+ * collapse all of them into E_NOENT, so creating a file with a 250-character
+ * name reported "no such file or directory" about a file the caller was trying
+ * to make. stat() propagated and the rest did not, which meant the same path
+ * produced different errnos depending on which call you asked.
+ *
+ * E_NOENT stays for the one case it fits: a parent that resolved but a basename
+ * that came back empty, which is what a trailing slash produces - the path names
+ * a directory rather than an entry in one.
+ *
  * @param path     Path already copied into kernel memory.
  * @param basename Receives the final component; MAX_FILENAME bytes.
- * @return Parent directory entry id, or a negative errno.
+ * @return Parent directory entry id, or a negative errno worth passing on.
  */
 static int split_from_cwd(const char *path, char *basename) {
     fs_id_t base = current_task ? current_task->cwd_id : 0;
@@ -494,7 +507,8 @@ void sys_open(arch_regs_t *regs) {
     for (int k = 0; k < MAX_FILENAME; k++) basename[k] = '\0';
     int parent_id = split_from_cwd(path, basename);
 
-    if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
+    if (parent_id < 0) { regs->eax = parent_id; return; }
+    if (basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
     int dev_idx_vfs = fs_get_entry_idx("dev", 0);
     int dev_id = (dev_idx_vfs != -1) ? dir_table[dev_idx_vfs].entry_id : -1;
@@ -606,7 +620,8 @@ void sys_create_file(arch_regs_t *regs) {
     }
     char basename[MAX_FILENAME];
     int parent_id = split_from_cwd(filename, basename);
-    if (parent_id < 0 || basename[0] == '\0') { kfree(content); regs->eax = E_NOENT; return; }
+    if (parent_id < 0) { kfree(content); regs->eax = parent_id; return; }
+    if (basename[0] == '\0') { kfree(content); regs->eax = E_NOENT; return; }
 
     if (!check_vfs_access((fs_id_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "Permission denied: No write access to this location!");
@@ -625,7 +640,8 @@ void sys_rm_file(arch_regs_t *regs) {
     if (!copy_user_string(filename, (const char *)regs->ebx, sizeof(filename))) { regs->eax = E_FAULT; return; }
     char basename[MAX_FILENAME];
     int parent_id = split_from_cwd(filename, basename);
-    if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
+    if (parent_id < 0) { regs->eax = parent_id; return; }
+    if (basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
     if (!check_vfs_access((fs_id_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "rm: Permission denied. Cannot delete this file!");
@@ -661,9 +677,9 @@ void sys_mv_file(arch_regs_t *regs) {
     int old_parent = split_from_cwd(old_name, old_base);
     int new_parent = split_from_cwd(new_name, new_base);
 
-    if (old_parent < 0 || new_parent < 0 || old_base[0] == '\0' || new_base[0] == '\0') {
-        regs->eax = E_NOENT; return;
-    }
+    if (old_parent < 0) { regs->eax = old_parent; return; }
+    if (new_parent < 0) { regs->eax = new_parent; return; }
+    if (old_base[0] == '\0' || new_base[0] == '\0') { regs->eax = E_NOENT; return; }
 
     /*
      * fs_rename() renames within a single directory - it has no notion of moving
@@ -703,7 +719,8 @@ void sys_mkdir(arch_regs_t *regs) {
     if (!copy_user_string(name, (const char *)regs->ebx, sizeof(name))) { regs->eax = E_FAULT; return; }
     char basename[MAX_FILENAME];
     int parent_id = split_from_cwd(name, basename);
-    if (parent_id < 0 || basename[0] == '\0') { regs->eax = E_NOENT; return; }
+    if (parent_id < 0) { regs->eax = parent_id; return; }
+    if (basename[0] == '\0') { regs->eax = E_NOENT; return; }
 
     if (!check_vfs_access((fs_id_t)parent_id, 1)) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mkdir: Permission denied. No directory creation access!");
@@ -728,7 +745,7 @@ static int resolve_dir_from_cwd(const char *path) {
     char basename[MAX_FILENAME];
 
     int parent = split_from_cwd(path, basename);
-    if (parent < 0) return E_NOENT;
+    if (parent < 0) return parent;
 
     int target;
 

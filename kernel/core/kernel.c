@@ -747,7 +747,7 @@ static int init_filesystem_and_vfs(void) {
     vfs_file_t temp_elf;
     if (fs_open("init.elf", 0,&temp_elf) != E_OK) {
         klog(LOG_LEVEL_INFO, "VFS", "init.elf absent; writing the embedded images to disk.");
-        if (current_sec_level == SEC_LEVEL_IMMUTABLE) {
+        if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
             terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             printk("[VFS ERROR] System is in IMMUTABLE mode! 'init.elf' cannot be written to disk.\n");
             terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);

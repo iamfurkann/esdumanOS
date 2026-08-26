@@ -271,10 +271,11 @@ int entropy_persist_seed(void) {
      * halt and reboot, and a machine that would not halt because it could not
      * refresh its seed would be the worse bargain, exactly as it is for the log.
      *
-     * Two codes because the two write paths disagree about which one to use:
-     * fs_create_file() answers E_ROFS and fs_atomic_update() answers E_ACCES for
-     * the same IMMUTABLE level. Left alone rather than reconciled here, since
-     * every caller of both already treats them the same way.
+     * Both codes are still checked. E_ROFS is what every write path in the VFS
+     * answers for IMMUTABLE - fs_atomic_update() disagreed and said E_ACCES until
+     * the pre-freeze audit made the seven guards identical - and E_ACCES is what
+     * a destroyed master key produces under LOCKDOWN, which is a different
+     * refusal reaching the same conclusion.
      */
     if (rc == E_ROFS || rc == E_ACCES) {
         klog(LOG_LEVEL_INFO, "ENTROPY", "The security level forbids writes; the seed was left as it was.");

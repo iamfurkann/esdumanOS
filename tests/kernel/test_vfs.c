@@ -570,25 +570,35 @@ static void test_disk_format(void) {
  * @brief Verifies the permissions the system puts on its own paths.
  *
  * Expected behavior:
- * - /etc/shadow is readable by root alone.
- * - /tmp is writable by everyone, /root by nobody else.
+ * - /etc/shadow carries 0600 and is owned by root; /etc/passwd carries 0644.
+ * - /tmp is 01777: writable by everyone, and sticky, so what you wrote is yours.
+ * - Everything in /bin carries 0755, and so does init.elf.
  * - The rest of the top level is readable and searchable, and not writable.
+ *
+ * What this module asserts is the *mode*, not who can get past it. Enforcement
+ * lives in check_vfs_access() and check_file_access() and is covered by
+ * test_security, which can put a uid on the calling task; saying "readable by
+ * root alone" here, over a comparison that only ever looked at the bits, is the
+ * kind of message that reads like a guarantee and checks a number.
  *
  * These are applied at boot rather than only at creation, and this asserts the
  * result rather than the call. A disk written by v0.9.0 carries the default 0644
  * on everything it created, /etc/shadow included, because that release enforced
  * no modes at all - so a kernel that started enforcing them and only stamped new
  * entries would hand the password database to every user on the first mount. The
- * one thing worth checking is that after boot, the modes are right whatever the
- * disk arrived holding.
+ * /bin entries are the same hazard pointing the other way: they are written 0644
+ * with no execute bit, so the boot-time pass has to reach them before anything
+ * asks for one, or no program on an existing disk can be launched at all.
  */
 static void test_system_modes(void) {
     int etc_id = fs_get_entry_idx("etc", 0);
     int idx;
 
     idx = fs_get_entry_idx("tmp", 0);
-    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0777,
-                 "[STRICT] [VFS] /tmp is writable by everyone, which is what it is for");
+    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 01777,
+                 "[STRICT] [VFS] /tmp is writable by everyone and sticky, which is what it is for");
+    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_STICKY) != 0,
+                 "[STRICT] [VFS] and the sticky bit is the part that keeps it survivable");
 
     idx = fs_get_entry_idx("root", 0);
     KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0700,
@@ -598,14 +608,42 @@ static void test_system_modes(void) {
     KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0755,
                  "[VFS] /bin can be read and searched, and not written");
 
+    /*
+     * And every program inside it carries an execute bit. Counted rather than
+     * spot-checked: a loop that found nothing would pass a "none of them is
+     * wrong" assertion, and /bin being empty is exactly the failure that would
+     * produce.
+     */
+    if (idx >= 0) {
+        int bin_entry = dir_table[idx].entry_id;
+        int programs = 0;
+        int without_x = 0;
+
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)bin_entry &&
+                dir_table[i].file_type == FT_REGULAR) {
+                programs++;
+                if ((dir_table[i].mode & FS_MODE_PERM_MASK) != 0755) without_x++;
+            }
+        }
+
+        KTEST_ASSERT(programs > 0, "[VFS] /bin holds programs to check");
+        KTEST_ASSERT(without_x == 0,
+                     "[STRICT] [VFS] and every one of them is 0755, so exec has a bit to read");
+    }
+
+    idx = fs_get_entry_idx("init.elf", 0);
+    KTEST_ASSERT(idx < 0 || (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0755,
+                 "[VFS] init.elf is a program and says so");
+
     if (etc_id >= 0) {
         int etc_entry = dir_table[etc_id].entry_id;
 
         idx = fs_get_entry_idx("shadow", (fs_id_t)etc_entry);
         KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0600,
-                     "[STRICT] [VFS] /etc/shadow is readable by root alone");
+                     "[STRICT] [VFS] /etc/shadow carries 0600");
         KTEST_ASSERT(idx < 0 || dir_table[idx].owner_uid == 0,
-                     "[STRICT] [VFS] and owned by root, so 0600 means what it should");
+                     "[STRICT] [VFS] and is owned by root, so 0600 means what it should");
 
         idx = fs_get_entry_idx("passwd", (fs_id_t)etc_entry);
         KTEST_ASSERT(idx < 0 || (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0644,
@@ -627,6 +665,26 @@ static void test_system_modes(void) {
                                     FS_WANT_WRITE | FS_WANT_EXEC) == 1,
                      "[STRICT] [VFS] and can write in /tmp");
     }
+
+    /*
+     * The sticky rule itself, on made-up numbers rather than on the real /tmp,
+     * because what needs checking is the rule and not this boot's ownership.
+     * fs_mode_allows() above says a user may write in /tmp; this is the second
+     * question, asked only of removals, and the two together are what let a
+     * shared directory be shared without being a free-for-all.
+     *
+     * Directory owned by root, entry owned by 1000, callers 1000 and 1001.
+     */
+    KTEST_ASSERT(fs_sticky_allows_removal(0777, 0, 1000, 1001) == 1,
+                 "[STRICT] [VFS] without the sticky bit, directory write permission is enough");
+    KTEST_ASSERT(fs_sticky_allows_removal(01777, 0, 1000, 1000) == 1,
+                 "[STRICT] [VFS] a sticky directory still lets the owner remove their own file");
+    KTEST_ASSERT(fs_sticky_allows_removal(01777, 0, 1000, 1001) == 0,
+                 "[STRICT] [VFS] and stops a stranger removing it, which is the whole point");
+    KTEST_ASSERT(fs_sticky_allows_removal(01777, 0, 1000, 0) == 1,
+                 "[STRICT] [VFS] root is not subject to it, as everywhere else");
+    KTEST_ASSERT(fs_sticky_allows_removal(01777, 1001, 1000, 1001) == 1,
+                 "[STRICT] [VFS] and the directory's own owner may clear out what is in it");
 }
 
 void run_vfs_tests(void) {

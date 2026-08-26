@@ -585,6 +585,7 @@ static void ensure_mode(const char *name, fs_id_t parent_id, uint16_t mode) {
 static void apply_system_modes(void) {
     int etc_id = get_vfs_id("etc", 0);
     int home_id = get_vfs_id("home", 0);
+    int bin_id = get_vfs_id("bin", 0);
 
     /* Readable and searchable by everyone, writable by root alone. */
     ensure_mode("bin", 0, 0755);
@@ -594,13 +595,13 @@ static void apply_system_modes(void) {
     ensure_mode("home", 0, 0755);
 
     /*
-     * /tmp is the one directory anybody may write in, which used to be true
-     * because check_vfs_access() matched the name "tmp" and is now true because
-     * the mode says so. There is no sticky bit yet, so a user can delete another
-     * user's temporary file; that is written down in SECURITY.md rather than
-     * quietly hoped about.
+     * /tmp is the one directory anybody may write in, and 01777 rather than 0777
+     * is what makes that survivable. The write bit on a directory is the
+     * permission to remove things from it, so at 0777 anybody could delete
+     * anybody else's temporary file - documented as a limitation from v0.9.1
+     * until the sticky bit arrived to separate the two.
      */
-    ensure_mode("tmp", 0, 0777);
+    ensure_mode("tmp", 0, 01777);
 
     /* Root's home is root's business. */
     ensure_mode("root", 0, 0700);
@@ -628,6 +629,31 @@ static void apply_system_modes(void) {
             }
         }
     }
+
+    /*
+     * Everything in /bin is a program, and until now not one of them said so.
+     * They are written with fs_create_file_raw(), which stamps
+     * FS_MODE_DEFAULT_FILE - 0644, no execute bit anywhere - and nothing ever
+     * looked, because exec decided by which directory a file sat in.
+     *
+     * That is why this runs before anything consults the bit rather than in the
+     * same change: a kernel that started asking for execute permission against
+     * a /bin full of 0644 would boot to a shell that could not launch a single
+     * command, on every existing disk.
+     *
+     * init.elf is the same thing at the root. Nothing execs it through the
+     * syscall - the boot path calls load_and_exec_elf() directly, below the
+     * permission layer - but a file that is a program should read as one.
+     */
+    if (bin_id >= 0) {
+        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+            if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)bin_id &&
+                dir_table[i].file_type == FT_REGULAR) {
+                ensure_mode(dir_table[i].filename, (fs_id_t)bin_id, 0755);
+            }
+        }
+    }
+    ensure_mode("init.elf", 0, 0755);
 }
 
 static int init_filesystem_and_vfs(void) {
@@ -701,16 +727,6 @@ static int init_filesystem_and_vfs(void) {
             }
         }
     }
-
-    apply_system_modes();
-
-    /*
-     * After the modes, because a seed created on a first boot has to land with
-     * the right one, and after the mount, because entropy_init() ran back in
-     * init_security() when there was no disk to read from. This is the half of
-     * the pool's seeding that needs a file system.
-     */
-    entropy_load_seed();
 
     int tmp_id = get_vfs_id("tmp", 0);
     if (tmp_id != -1) {
@@ -833,6 +849,33 @@ static int init_filesystem_and_vfs(void) {
             klog(LOG_LEVEL_INFO, "VFS", "/bin tools and /etc files written to disk.");
         }
     }
+
+    /*
+     * The mode pass runs here, after everything this function creates, and the
+     * position is load-bearing rather than arbitrary.
+     *
+     * It used to run further up, before the block above. That was fine while it
+     * only corrected entries that had survived from a previous boot - but the
+     * /bin tools and init.elf are written *here*, with fs_create_file_raw(),
+     * which stamps the 0644 default and no execute bit. On a fresh disk they
+     * therefore arrived after the pass had already gone by and kept 0644 for
+     * that whole boot, which the tests caught the moment anything started
+     * reading the execute bit.
+     *
+     * Anything created before this line is covered. Anything created after it is
+     * not, and must set its own mode - which is what entropy_persist_seed() does
+     * for the seed file on the boot that creates it.
+     */
+    apply_system_modes();
+
+    /*
+     * And the seed, after the modes for the same reason and after the mount
+     * because entropy_init() ran back in init_security() when there was no disk
+     * to read from. This is the half of the pool's seeding that needs a file
+     * system.
+     */
+    entropy_load_seed();
+
     load_timezone();
 
     boot_ok("ATA PIO Disk Driver Loaded & VFS Mounted");

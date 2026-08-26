@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0-alpha] "Stake" - 2026-08-26
+
+Sector 0 held the superblock from v0.9.0 onward, so the disk could not say where it
+began and there was no room for a partition table. It has one now, and the file system
+lives in a partition rather than at the front of the device.
+
+The 2 MB ceiling went with it, and the two had to travel together because they move the
+same bytes — a user's files are not worth relocating twice. What actually capped the disk
+was never the partitioning: the allocation table held one entry per **sector**, a static
+`uint32_t[4096]`, so 4096 sectors was the whole of it. It counts clusters of eight
+sectors now and covers **16 MB** with the same 16 KB of kernel memory.
+
+**A disk written by v0.9.x will not be read.** It is recognised by the magic number
+sitting where the partition table now goes, named as a v0.9.x disk, and refused without
+a byte being written to it.
+
+### Added
+
+- **A partition table in sector 0.** One partition of type `0x7F` — the byte reserved by
+  convention for individual and experimental use, so this kernel will not mistake a Linux
+  or FAT partition for its own and nothing else will mistake this one for something it
+  can read. It begins at LBA 64 rather than the 2048 a modern tool would choose, because
+  2048 sectors is 1 MB and that is most of a disk small enough to partition by hand. The
+  kernel writes the table itself when it formats a blank disk; no external tool is
+  involved.
+
+  The superblock stays **partition-relative**, so the file system does not know where it
+  lives and moving a partition costs nothing. Exactly one function adds the offset, and
+  nothing inside the file system calls the block cache directly any more — a single
+  missed offset would read the right sector of the wrong place, and one door is the only
+  defence against that which does not depend on remembering.
+
+- **Clusters, and a 16 MB disk.** `FS_CLUSTER_SECTORS` is 8, so an allocation unit is
+  4 KB. Clusters 0 and 1 are reserved as in every FAT ever written, which is what lets a
+  `start_cluster` of 0 mean "no data at all" — what a directory and an empty file both
+  record — without colliding with a real allocation.
+
+  **The bill:** a one-byte file now occupies 4 KB, and with 512 entries the worst case is
+  about 2 MB of slack on a disk that can hold 16.
+
+- **The directory table is checked before it is believed.** An open item in
+  `SECURITY.md` for several releases. Every used entry must have an id equal to the slot
+  it occupies, a parent chain that reaches the root, a start cluster inside the file
+  system, and a valid type. A table that fails is **refused rather than repaired**: the
+  information needed to repair it is exactly the information in doubt, and quietly
+  rewriting somebody's directory tree is a worse answer than declining to mount.
+
+### Removed
+
+- **`SYSCALL_LS_DIR` (28).** It printed a listing from inside the kernel, so its output
+  could never reach a pipe; v0.9.2 moved the shell's `ls` onto `READDIR` for that reason
+  and left the syscall "for any caller that genuinely wants a screen dump". There was
+  never such a caller. Removing it orphaned `fs_list_dir()`, which went with it. The
+  number is left free rather than reused — what becomes of 11 and 28 belongs with
+  freezing the ABI at 1.0, alongside the gap at 99 where `YIELD` sits. **62 system calls.**
+
+### Changed
+
+- **`start_sector` is `start_cluster`.** The field's type did not change, only its unit,
+  and that is precisely why it was renamed: v0.9.3 spent a release finding eight
+  `(uint8_t)` casts that the compiler could not object to, and a field whose meaning
+  changes under the same name is the same trap. The rename made the compiler name all
+  seventeen sites.
+
+- **Bounded string operations in user space.** The unbounded `ft_strcpy()` in the shell
+  and in `init` is now `ft_strlcpy_sz()`, which takes the destination's size and returns
+  the source's length so a truncation can be told from a fit. Every one of the sixteen
+  calls was already safe — each of them because of a check somewhere else, a length test
+  forty lines up or a buffer that happened to be as large as its source. That is safety
+  that holds until somebody moves the check. `exec` now refuses a path too long for its
+  buffer rather than shortening it, because a shortened command is a different command.
+
 ## [0.9.4-alpha] - 2026-08-25
 
 A file's own mode decided nothing. `check_vfs_access()` was asked about the **directory**

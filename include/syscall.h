@@ -81,10 +81,22 @@
 
 /** @brief Create a new directory */
 #define SYSCALL_MKDIR           26  
-/** @brief List directory contents */
-#define SYSCALL_LS_DIR          28  
+/*
+ * 28 was SYSCALL_LS_DIR, removed in v0.10.0.
+ *
+ * It printed a directory listing from inside the kernel with terminal_putchar(),
+ * so its output never reached the calling process's descriptor 1 - "ls | grep"
+ * saw an empty pipe. v0.9.2 moved the shell's `ls` onto READDIR because of that
+ * and left the syscall in place "for any caller that genuinely wants a screen
+ * dump". There was never such a caller, in /bin or the shell or the tests, and
+ * v0.9.3 found that out by looking rather than by reading the comment.
+ *
+ * The same position CAT_FILE was in when v0.9.2 removed it, and the number gets
+ * the same treatment: left free rather than reused. What becomes of 11 and 28 is
+ * part of freezing the ABI at 1.0, along with the gap at 99 where YIELD sits.
+ */
 /** @brief Get directory ID */
-#define SYSCALL_GET_DIR_ID      29  
+#define SYSCALL_GET_DIR_ID      29
 
 /** @brief Dump current task stack */
 #define SYSCALL_STACK_DUMP      14

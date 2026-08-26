@@ -62,16 +62,60 @@ typedef uint16_t fs_id_t;
  * it was formatted with so that changing these constants later cannot make the
  * kernel misread a disk written by an older one.
  *
- * The arithmetic: 512 entries of 96 bytes is 49152 bytes, which is exactly 96
- * sectors, so the directory table is sectors 1 to 96. The FAT holds one uint32_t
- * per sector, so 4096 sectors is 16384 bytes and 32 more sectors, 97 to 128. Data
- * starts at 200 as it always has, leaving 129 to 199 spare - the room the next
- * format change gets to grow into without moving a single byte of anybody's file.
+ * **Every one of these is relative to the start of the partition**, not to the
+ * start of the disk. The file system does not know where it lives; fs_part_start
+ * holds that and is added on the way to the block cache. Keeping the superblock
+ * partition-relative is what makes moving a partition cost nothing.
+ *
+ * The arithmetic: 512 entries of 96 bytes is 49152 bytes, exactly 96 sectors, so
+ * the directory table is sectors 1 to 96. The FAT holds one uint32_t per
+ * *cluster* now rather than per sector, so 4096 clusters is 16384 bytes and 32
+ * more sectors, 97 to 128. Data starts at 200 as it always has, leaving 129 to
+ * 199 spare - the room the next format change gets to grow into without moving a
+ * single byte of anybody's file.
  */
 #define FS_DIR_START_SECTOR   1
 #define FS_DIR_SECTOR_COUNT   96
 #define FS_FAT_START_SECTOR   97
 #define FS_DATA_START_SECTOR  200
+
+/**
+ * @brief Sectors per cluster, and the reason there are clusters at all.
+ *
+ * Through v0.9.4 the allocation table held one entry per *sector*, which is why
+ * the disk was capped at 2 MB: file_allocation_table is a static uint32_t[4096],
+ * 4096 sectors, and growing past it meant growing the array - 512 KB of kernel
+ * memory for a 64 MB disk. Counting in clusters of 8 sectors covers 16 MB with
+ * the same 16 KB array.
+ *
+ * The bill, stated rather than buried: a one-byte file now occupies 4 KB. With
+ * 512 entries the worst case is about 2 MB of slack on a disk that can hold 16.
+ * That is the trade, and it is the trade every file system with clusters makes.
+ *
+ * FS_FIRST_DATA_CLUSTER is 2, as in every FAT ever written, and for the reason
+ * FAT has it: 0 is FAT_FREE and an entry with no data at all - a directory, an
+ * empty file - records start_cluster 0. If cluster 0 were allocatable, "no data"
+ * and "data at the first cluster" would be the same value. Reserving 0 and 1
+ * costs 8 KB of disk and removes the ambiguity entirely.
+ */
+#define FS_CLUSTER_SECTORS    8
+#define FS_MAX_CLUSTERS       4096
+#define FS_FIRST_DATA_CLUSTER 2
+
+/**
+ * @brief Where the file system's partition begins, and what it is called.
+ *
+ * LBA 64 rather than the 2048 a modern tool would choose: 2048 sectors is 1 MB,
+ * which on a disk small enough to be worth partitioning by hand is most of it.
+ * 64 is a whole number of clusters and costs 32 KB.
+ *
+ * Type 0x7F is the byte reserved by convention for individual and experimental
+ * use. That cuts both ways on purpose: this kernel will not mistake somebody
+ * else's Linux or FAT partition for one of its own, and nothing else will
+ * mistake this one for something it can read.
+ */
+#define FS_PART_START_LBA     64
+#define FS_PART_TYPE          0x7F
 
 /**
  * @brief File Type Definitions.
@@ -122,7 +166,7 @@ typedef uint16_t fs_id_t;
 typedef struct {
     char     filename[MAX_FILENAME]; /**< Name, null-terminated. */
     uint32_t file_size;              /**< Size of the file in bytes. */
-    uint32_t start_sector;           /**< First sector of the file's data. */
+    uint32_t start_cluster;          /**< First cluster of the file's data; 0 when none. */
     uint32_t owner_uid;              /**< User ID of the file's owner. */
     uint32_t owner_gid;              /**< Group ID of the file's owner. */
     uint32_t mtime;                  /**< Seconds since the Unix epoch, last write. */
@@ -155,28 +199,68 @@ typedef struct {
  */
 #define FS_SUPER_SECTOR   0
 #define FS_SUPER_MAGIC    0x46647365u   /* "esdF", little-endian */
-#define FS_FORMAT_VERSION 1
+#define FS_FORMAT_VERSION 2
+
+/**
+ * @brief The master boot record: sector 0 of the disk, not of the partition.
+ *
+ * Sector 0 held the superblock from v0.9.0 to v0.9.4, which is the reason this
+ * arrives as a format change rather than an addition - there is no room for a
+ * partition table where the superblock is sitting, and moving the superblock
+ * moves every sector address behind it.
+ *
+ * The layout is the one every PC has used since 1983 and is not negotiable: 446
+ * bytes of boot code, four sixteen-byte entries, and 0x55 0xAA. This kernel is
+ * loaded by GRUB from the ISO and never executes the boot code, so those 446
+ * bytes are written as zeroes - but they are left in place, because a sector 0
+ * that is shaped like an MBR is one that other tools can read without being
+ * told to.
+ *
+ * The CHS fields are written as zero. They have been meaningless on any disk
+ * this side of 8 GB for thirty years, every modern tool reads the LBA fields,
+ * and a fabricated CHS value would be a number that looks authoritative and is
+ * not.
+ */
+#define MBR_SIGNATURE       0xAA55
+#define MBR_PART_OFFSET     446
+#define MBR_PART_COUNT      4
+
+typedef struct {
+    uint8_t  status;        /**< 0x80 bootable, 0x00 otherwise. */
+    uint8_t  chs_first[3];  /**< Zero; see above. */
+    uint8_t  type;          /**< FS_PART_TYPE for ours; 0 for an unused entry. */
+    uint8_t  chs_last[3];   /**< Zero; see above. */
+    uint32_t lba_first;     /**< First sector of the partition, from sector 0. */
+    uint32_t sector_count;  /**< Sectors the partition spans. */
+} __attribute__((packed)) mbr_partition_t;
+
+typedef struct {
+    uint8_t         boot_code[MBR_PART_OFFSET]; /**< Zero here; never executed. */
+    mbr_partition_t partitions[MBR_PART_COUNT];
+    uint16_t        signature;                  /**< MBR_SIGNATURE. */
+} __attribute__((packed)) mbr_t;
 
 typedef struct {
     uint32_t magic;           /**< FS_SUPER_MAGIC when this is one of ours. */
     uint16_t format_version;  /**< FS_FORMAT_VERSION; a higher one is refused. */
     uint16_t sector_size;     /**< Bytes per sector; 512. */
-    uint32_t total_sectors;   /**< Sectors the file system was formatted across. */
+    uint32_t total_sectors;   /**< Sectors the partition spans, from its own start. */
     uint32_t dir_start;       /**< First sector of the directory table. */
     uint32_t dir_sectors;     /**< Sectors the directory table occupies. */
     uint32_t max_entries;     /**< Entries the directory table holds. */
     uint16_t entry_size;      /**< Bytes per directory entry. */
-    uint16_t cluster_sectors; /**< Sectors per allocation unit; 1 today. */
+    uint16_t cluster_sectors; /**< Sectors per allocation unit; FS_CLUSTER_SECTORS. */
     uint32_t fat_start;       /**< First sector of the allocation table. */
-    uint32_t data_start;      /**< First sector file data may occupy. */
+    uint32_t data_start;      /**< Sector cluster 0 would begin at. */
+    uint32_t total_clusters;  /**< Clusters the allocation table describes. */
     uint32_t flags;           /**< Reserved; zero. */
 } __attribute__((packed)) disk_superblock_t;
 
 /**
  * @brief The geometry the mounted file system is actually being read with.
  *
- * Filled by init_fs() from the disk, not from the constants above. Everything
- * that addresses a sector goes through this.
+ * Filled by init_fs() from the disk, not from the constants above. Every sector
+ * address in it is relative to the start of the partition.
  */
 extern disk_superblock_t fs_super;
 
@@ -190,9 +274,72 @@ extern disk_superblock_t fs_super;
 extern int fs_mounted;
 
 /**
- * @brief Sectors the device reports, capped at what the allocation table holds.
+ * @brief The partition's first sector, counted from the start of the disk.
+ *
+ * The one value that turns a partition-relative address into a disk address.
+ * fs_read_sector() and fs_write_sector() add it; nothing else should, and
+ * nothing else in the file system should call the block cache directly.
+ */
+extern uint32_t fs_part_start;
+
+/**
+ * @brief Sectors in the partition, as the device and the MBR agree on them.
  */
 extern uint32_t fs_max_sectors;
+
+/**
+ * @brief Clusters this file system may address, capped at FS_MAX_CLUSTERS.
+ */
+extern uint32_t fs_total_clusters;
+
+/**
+ * @brief The partition-relative sector a cluster begins at.
+ *
+ * Pure, and in the header because the tests need it and because a conversion
+ * that lives in one place is a conversion that cannot disagree with itself.
+ *
+ * @param cluster Cluster index; FS_FIRST_DATA_CLUSTER or above for real data.
+ * @return First sector of that cluster, relative to the partition.
+ */
+static inline uint32_t fs_cluster_to_sector(uint32_t cluster) {
+    return fs_super.data_start + cluster * fs_super.cluster_sectors;
+}
+
+/**
+ * @brief The file system's only door to the disk.
+ *
+ * Takes a sector named relative to the partition and adds fs_part_start on the
+ * way to the block cache. Nothing inside the file system calls the cache
+ * directly any more: a single missed offset would read the right sector of the
+ * wrong place, which is a silent wrong answer, and one door is the only defence
+ * against that which does not depend on remembering.
+ *
+ * The master boot record is the one exception, and deliberately so - it lives at
+ * absolute sector 0 and belongs to the disk rather than to any file system.
+ *
+ * @param rel_sector Sector, counted from the first sector of the partition.
+ * @param buffer 512 bytes.
+ */
+void fs_read_sector(uint32_t rel_sector, uint8_t *buffer);
+
+/** @brief Writes a partition-relative sector. See fs_read_sector(). */
+void fs_write_sector(uint32_t rel_sector, uint8_t *buffer);
+
+/**
+ * @brief Checks the directory table's own invariants.
+ *
+ * Run at mount, before anything is allowed to believe the table. The tree rests
+ * on things nothing enforced until v0.10.0: that an entry's id is the slot it
+ * occupies, that a parent chain terminates at the root, and that a start cluster
+ * is inside the file system. A crafted image could break any of them.
+ *
+ * Not static, so a test can corrupt an entry and watch this refuse it. That is
+ * the only way to cover the branch: the alternative is an image built to be
+ * broken, and the check would then be tested by the thing it exists to catch.
+ *
+ * @return 1 when every used entry is consistent, 0 otherwise.
+ */
+int fs_validate_directory_table(void);
 
 /**
  * @brief In-memory Virtual File System (VFS) file structure.
@@ -202,7 +349,7 @@ typedef struct {
     char     filename[MAX_FILENAME]; /**< File name. */
     uint32_t file_size;              /**< Size of the file in bytes. */
     uint32_t current_offset;         /**< Current read/write offset within the file. */
-    uint32_t start_sector;           /**< Starting sector on the disk. */
+    uint32_t start_cluster;          /**< First cluster of the file's data; 0 when none. */
     int      ref_count;              /**< Reference count to prevent Use-After-Free vulnerabilities! [SECURITY PATCH ADDED] */
     int      inode_idx;              /**< Index in the dir_table for locking */
 
@@ -401,12 +548,12 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size);
  */
 int fs_mkdir(const char *name, fs_id_t parent_id);
 
-/**
- * @brief Lists the contents of a specific directory.
- * 
- * @param parent_id Entry ID of the directory to list.
+/*
+ * fs_list_dir() is gone as of v0.10.0. Its only caller was SYSCALL_LS_DIR, which
+ * printed the listing from inside the kernel and so could never reach a pipe;
+ * removing the call left the function with nobody to answer to. What replaced it
+ * is READDIR, which hands the entries back and lets the caller do the printing.
  */
-void fs_list_dir(fs_id_t parent_id);
 
 /**
  * @brief Atomically updates an existing file by writing the new content safely.
@@ -541,6 +688,11 @@ static inline int fs_sticky_allows_removal(uint16_t dir_mode, uint32_t dir_owner
 // --- Added by Refactor Script ---
 extern int fs_get_entry_idx(const char *name, fs_id_t parent_id);
 extern disk_file_entry_t dir_table[];
+/* The allocation table, one uint32_t per cluster. Declared here as of v0.10.0
+ * because the tests need to assert that clusters 0 and 1 are reserved - which is
+ * what makes a start_cluster of 0 mean "no data" rather than "the first
+ * cluster", and is therefore worth checking rather than assuming. */
+extern uint32_t file_allocation_table[];
 extern void init_fs(void);
 
 #endif // FS_H

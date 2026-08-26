@@ -85,7 +85,6 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_RM_FILE:      sys_rm_file(regs); break;
         case SYSCALL_MV_FILE:      sys_mv_file(regs); break;
         case SYSCALL_MKDIR:        sys_mkdir(regs); break;
-        case SYSCALL_LS_DIR:       sys_ls_dir(regs); break;
         case SYSCALL_GET_DIR_ID:   sys_get_dir_id(regs); break;
         case SYSCALL_LIST_FILES:   sys_list_files(regs); break;
         case SYSCALL_READ_RAW:     sys_read_raw(regs); break;

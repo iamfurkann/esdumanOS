@@ -8,12 +8,15 @@
 | 0.8.x   | :x:                |
 | ≤ 0.7.x | :x:                |
 
-Within 0.9.x, use **0.9.4 or later**, and this one is not a preference. On every release
-from 0.9.0 to 0.9.3 inclusive, `/etc/shadow` can be read by any account on the system —
-0.9.0 because it enforced no permission bits at all and created the file `0644`, and
-0.9.1 through 0.9.3 because they enforced the bits on directories only and never on the
-file. 0.9.4 asks the file's own mode and closes it. The hashes are salted
-PBKDF2-HMAC-SHA256 throughout, so what was exposed is hashes rather than passwords.
+Use **0.9.4 or later**, and this is not a preference. On every release from 0.9.0 to
+0.9.3 inclusive, `/etc/shadow` can be read by any account on the system — 0.9.0 because
+it enforced no permission bits at all and created the file `0644`, and 0.9.1 through
+0.9.3 because they enforced the bits on directories only and never on the file. 0.9.4
+asks the file's own mode and closes it. The hashes are salted PBKDF2-HMAC-SHA256
+throughout, so what was exposed is hashes rather than passwords.
+
+0.10.0 changed the on-disk format again and **will not read a disk written by 0.9.x**.
+It recognises one and says so rather than reading it as though the layout had not moved.
 
 Only the current minor line is supported. This table said 0.4.x for five minor
 releases; it is the current line that matters, and it is 0.9.x.
@@ -118,12 +121,16 @@ described inaccurately is worse than one described plainly — in either directi
 - **`chown` is root-only.** Giving a file away is how a user gets out from under a quota
   on a system that has one. This system has no quota to escape, and the restriction is
   easier to keep now than to add back later.
-- **The directory table is read from the disk and largely trusted.** 0.9.0 added a
-  superblock, so an image this kernel does not recognise is refused rather than read —
-  which is what stops it writing its own tables over a foreign disk. Beyond the
-  superblock's geometry, though, the entries themselves are not validated: a crafted
-  image can still contain a parent chain that loops, which is why the access walk is
-  bounded by the table size rather than by reaching the root.
+- **The directory table is checked before it is believed, as of 0.10.0.** 0.9.0 added a
+  superblock, so an image this kernel does not recognise is refused rather than read.
+  Beyond the superblock's geometry, though, the entries themselves went unvalidated
+  until 0.10.0: a crafted image could contain a parent chain that loops, or an entry
+  whose id was not the slot it occupied — which every lookup in the VFS assumes. The
+  mount path now refuses such a table rather than repairing it, because the information
+  needed to repair it is exactly the information in doubt. The bounded walks in
+  `check_vfs_access()` and `sys_getcwd()` stay where they are: the table is checked once
+  at the door and walked a great many times afterwards, and a guard costing a comparison
+  is not worth removing on the strength of a check that ran minutes ago.
 - Root (uid 0) bypasses these checks entirely, as it does on any Unix.
 
 ### Other
@@ -170,12 +177,12 @@ We welcome contributions that improve the security posture of esdumanOS. Current
 - Deriving the disk key from a boot passphrase instead of a build-time constant
 - Adding stack canaries, in the kernel and in user-space programs
 - Implementing ASLR
-- Validating the directory table on mount beyond the superblock's geometry, so a crafted
-  image cannot present a malformed tree in the first place
 
 Already done, so no longer needed: per-user password salting (PBKDF2-HMAC-SHA256 with a
 16-byte salt); the entropy pool (interrupt-jitter sourced, with per-source budgets and
-an honest quality verdict); enforcing the permission bits, which took two releases —
+an honest quality verdict); validating the directory table on mount, which 0.10.0 added
+so that a crafted image cannot present a tree with a cycle in it or an entry whose id is
+not its own slot; enforcing the permission bits, which took two releases —
 0.9.1 for the directories and 0.9.4 for the files themselves, the latter also retiring
 three name comparisons still hiding in the VFS below the syscall layer; a sticky bit on
 `/tmp`, which 0.9.4 added along with them; and persisting an entropy seed across boots,

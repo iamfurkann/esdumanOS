@@ -108,7 +108,6 @@ void sys_mv_file(arch_regs_t *regs);
 /** @brief Syscall handler for creating a directory */
 void sys_mkdir(arch_regs_t *regs);
 /** @brief Syscall handler for listing directory contents */
-void sys_ls_dir(arch_regs_t *regs);
 /** @brief Syscall handler for getting a directory ID */
 void sys_get_dir_id(arch_regs_t *regs);
 /** @brief Syscall handler for listing all files */

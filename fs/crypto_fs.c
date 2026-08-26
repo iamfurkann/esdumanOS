@@ -173,11 +173,12 @@ int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_siz
 
     /*
      * The IV and the first ciphertext block are the first 32 bytes of the file,
-     * so they are always inside its first sector. Read it through the block
-     * cache, which is where fs_read_raw() would find it anyway.
+     * so they are always inside the first sector of its first cluster. Read it
+     * through fs_read_sector(), which is where fs_read_raw() would find it
+     * anyway and which is what adds the partition offset.
      */
     uint8_t sector[512];
-    bcache_read_sector(file->start_sector, sector);
+    fs_read_sector(fs_cluster_to_sector(file->start_cluster), sector);
 
     /* Aligned because the header fields are read back through a uint32_t view. */
     uint8_t block[AES_BLOCKLEN] __attribute__((aligned(4)));

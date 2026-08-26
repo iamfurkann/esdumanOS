@@ -963,7 +963,7 @@ void show_help(void) {
     printk("    chown [uid[:gid]] [f]  Change owner and group (root only)\n");
     printk("    cat_raw [file]    Show raw (HEX) disk dump (bypasses decryption)\n");
     printk("    write [f] [text]  Create/write a file\n");
-    printk("    rm [file]         Delete a file\n");
+    printk("    rm [file]         Delete a file, or an empty directory\n");
     printk("    mv [old] [new]    Rename a file\n");
     printk("    mkdir [dir]       Create a directory\n");
     printk("\n  Navigation:\n");
@@ -1389,6 +1389,13 @@ int builtin_dmesg(char **args) {
 /**
  * @brief Writes the ten-character mode string everyone recognises.
  *
+ * The sticky bit shares the other-execute position, which is the convention
+ * every ls uses and is not an abbreviation: 't' when execute is set as well,
+ * 'T' when the directory is sticky without being searchable by others. Showing
+ * it matters more here than it looks - /tmp is 01777 as of v0.9.4, and a mode
+ * string that rendered it `drwxrwxrwx` would be describing a directory anybody
+ * can empty, which is precisely what the bit stops.
+ *
  * @param mode Permission bits.
  * @param is_dir Non-zero for a directory.
  * @param out At least 11 bytes.
@@ -1403,6 +1410,7 @@ static void ls_mode_string(unsigned int mode, int is_dir, char *out) {
             out[1 + c * 3 + b] = (cls & (4u >> b)) ? bit[b] : '-';
         }
     }
+    if (mode & FS_MODE_STICKY) out[9] = (out[9] == 'x') ? 't' : 'T';
     out[10] = '\0';
 }
 
@@ -1699,9 +1707,30 @@ void execute_command(char **args) {
         } else { printk("Usage: write <file> <content>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "rm") == 0) {
-        /* The return value was being discarded, so "rm /nope && echo GONE"
-         * printed GONE. Every builtin below now reports what it did. */
-        if (args[1]) last_exit_status = (sys_delete_file(args[1]) == E_OK) ? 0 : 1;
+        /*
+         * v0.9.2 stopped this discarding the return value, so "rm /nope && echo
+         * GONE" no longer prints GONE. It still printed nothing at all, though,
+         * which leaves the status carrying the whole message - and at a prompt
+         * nobody reads $? unless something already looked wrong.
+         *
+         * A trailing slash is the case that showed why it matters: "rm /tmp/d/"
+         * resolves to an empty basename and is refused, and the silence made it
+         * indistinguishable from having removed the directory. cd has printed
+         * its errors since v0.5.x; this now does the same.
+         */
+        if (args[1]) {
+            int rc = sys_delete_file(args[1]);
+
+            if (rc == E_OK) { last_exit_status = 0; }
+            else {
+                printk("rm: cannot remove '"); printk(args[1]); printk("': ");
+                if (rc == E_ACCES)          printk("Permission denied\n");
+                else if (rc == E_NOTEMPTY)  printk("Directory not empty\n");
+                else if (rc == E_ROFS)      printk("Read-only file system\n");
+                else                        printk("No such file or directory\n");
+                last_exit_status = 1;
+            }
+        }
         else { printk("Usage: rm <file>\n"); last_exit_status = 1; }
     }
     else if (ft_strcmp(args[0], "mv") == 0) {
@@ -2121,8 +2150,29 @@ void run_external(char **args) {
          */
         int pid = syscall(5, (int)exec_path, EXEC_NOWAIT, (int)arg_str); // SYSCALL_EXEC
         if (pid < 0) {
-            printk("sh: command not found: "); printk(args[0]); printk("\n");
-            last_exit_status = 127;
+            /*
+             * Every failure used to be "command not found", which was true for
+             * one of them. It stopped being harmless the moment exec started
+             * refusing on permissions: the kernel logged "the file has no
+             * execute bit for this user" and the shell told the user the file
+             * did not exist, so the one thing they needed to know - run chmod -
+             * was the one thing the message ruled out.
+             *
+             * init.c has told these apart since it was written; this is the
+             * caller that did not. 126 for a file that is there and will not
+             * run, 127 for one that is not there, which is the convention every
+             * shell uses and what a script would check.
+             */
+            if (pid == E_ACCES) {
+                printk("sh: "); printk(args[0]); printk(": Permission denied\n");
+                last_exit_status = 126;
+            } else if (pid == E_NOEXEC) {
+                printk("sh: "); printk(args[0]); printk(": not an executable\n");
+                last_exit_status = 126;
+            } else {
+                printk("sh: command not found: "); printk(args[0]); printk("\n");
+                last_exit_status = 127;
+            }
             return;
         }
 

@@ -131,7 +131,7 @@ static void test_vfs_size_reporting(void) {
     for (uint32_t i = 0; i < sizeof(tiny.filename); i++) tiny.filename[i] = '\0';
     tiny.file_size = 8;
     tiny.current_offset = 0;
-    tiny.start_sector = FAT_EOF;
+    tiny.start_cluster = FAT_EOF;
     tiny.ref_count = 1;
     tiny.inode_idx = -1;
 
@@ -171,7 +171,7 @@ static void test_vfs_write_bounds(void) {
     for (uint32_t i = 0; i < sizeof(probe.filename); i++) probe.filename[i] = '\0';
     probe.file_size = 0;
     probe.current_offset = 0;
-    probe.start_sector = FAT_EOF;
+    probe.start_cluster = FAT_EOF;
     probe.ref_count = 1;
     probe.inode_idx = -1;
     probe.write_buf = 0;
@@ -460,9 +460,166 @@ static void test_disk_format(void) {
                  "[STRICT] [VFS] the directory table fits in the sectors reserved for it");
     KTEST_ASSERT(fs_super.dir_start + fs_super.dir_sectors <= fs_super.fat_start,
                  "[STRICT] [VFS] and stops before the allocation table starts");
-    KTEST_ASSERT(fs_max_sectors * sizeof(uint32_t)
+    KTEST_ASSERT(fs_total_clusters * sizeof(uint32_t)
                      <= (fs_super.data_start - fs_super.fat_start) * 512u,
                  "[STRICT] [VFS] the allocation table fits before the data does");
+
+    /* ------------------------------------------------------------------
+     * The partition table, and the offset every address now goes through.
+     * ------------------------------------------------------------------ */
+    {
+        uint8_t sec_buf[512];
+        mbr_t mbr;
+
+        KTEST_ASSERT(sizeof(mbr_partition_t) == 16,
+                     "[STRICT] [VFS] a partition entry is exactly 16 bytes");
+        KTEST_ASSERT(sizeof(mbr_t) == 512,
+                     "[STRICT] [VFS] and the master boot record is exactly one sector");
+
+        /*
+         * Read at absolute sector 0 rather than through fs_read_sector(): the
+         * MBR belongs to the disk, not to the partition, and reading it through
+         * the offset would be reading 64 sectors into our own file system.
+         */
+        bcache_read_sector(0, sec_buf);
+        ft_memcpy(&mbr, sec_buf, sizeof(mbr));
+
+        KTEST_ASSERT(mbr.signature == MBR_SIGNATURE,
+                     "[STRICT] [VFS] sector 0 carries the boot signature");
+        KTEST_ASSERT(mbr.partitions[0].type == FS_PART_TYPE,
+                     "[STRICT] [VFS] and a partition of the type this kernel owns");
+        KTEST_ASSERT(mbr.partitions[0].lba_first == FS_PART_START_LBA,
+                     "[VFS] which begins where the constant says it does");
+        KTEST_ASSERT(fs_part_start == mbr.partitions[0].lba_first,
+                     "[STRICT] [VFS] and that is the offset the file system is mounted at");
+
+        /*
+         * The superblock stays partition-relative. This is the assertion that
+         * catches the whole class of mistake the offset introduces: if any of
+         * the geometry had been written as a disk address, dir_start would have
+         * come back as 65 rather than 1.
+         */
+        KTEST_ASSERT(fs_super.dir_start == FS_DIR_START_SECTOR,
+                     "[STRICT] [VFS] the superblock's addresses are relative to the partition");
+    }
+
+    /* ------------------------------------------------------------------
+     * Clusters. The reason the 2 MB ceiling is gone.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(fs_super.cluster_sectors == FS_CLUSTER_SECTORS,
+                 "[STRICT] [VFS] the allocation unit is a cluster of eight sectors");
+    KTEST_ASSERT(fs_total_clusters > FS_FIRST_DATA_CLUSTER &&
+                 fs_total_clusters <= FS_MAX_CLUSTERS,
+                 "[VFS] and there are clusters to allocate from");
+    KTEST_ASSERT(file_allocation_table[0] == FAT_EOF &&
+                 file_allocation_table[1] == FAT_EOF,
+                 "[STRICT] [VFS] clusters 0 and 1 are reserved, so start_cluster 0 means no data");
+    KTEST_ASSERT(fs_cluster_to_sector(FS_FIRST_DATA_CLUSTER) >= fs_super.data_start,
+                 "[STRICT] [VFS] the first allocatable cluster lands inside the data region");
+    KTEST_ASSERT(fs_cluster_to_sector(fs_total_clusters) <= fs_max_sectors,
+                 "[STRICT] [VFS] and the last one lands inside the partition");
+
+    /*
+     * A file that spans more than one cluster, read back through the chain.
+     * One cluster is 4096 bytes, so 5000 crosses exactly one boundary - which is
+     * the arithmetic that a sector-to-cluster migration gets wrong if it gets
+     * anything wrong.
+     */
+    {
+        static uint8_t big[5000];
+        static uint8_t back[5000];
+        vfs_file_t spanning;
+        int same = 1;
+
+        for (uint32_t i = 0; i < sizeof(big); i++) big[i] = (uint8_t)(i * 7 + 3);
+
+        if (fs_create_file_raw("spanprobe", big, sizeof(big), 0) == E_OK &&
+            fs_open("spanprobe", 0, &spanning) == E_OK) {
+            int got = fs_read_raw(&spanning, back, sizeof(back));
+
+            KTEST_ASSERT(got == (int)sizeof(big),
+                         "[STRICT] [VFS] a file spanning two clusters reads back its whole length");
+
+            for (uint32_t i = 0; i < sizeof(big); i++) {
+                if (back[i] != big[i]) { same = 0; break; }
+            }
+            KTEST_ASSERT(same,
+                         "[STRICT] [VFS] and every byte of it survives the trip across the boundary");
+
+            int idx = fs_get_entry_idx("spanprobe", 0);
+            KTEST_ASSERT(idx >= 0 && dir_table[idx].start_cluster >= FS_FIRST_DATA_CLUSTER,
+                         "[VFS] its first cluster is a real one, not the reserved pair");
+        } else {
+            KTEST_ASSERT(0, "[VFS] a multi-cluster file could be created and opened");
+        }
+
+        fs_delete("spanprobe", 0);
+    }
+
+    /* ------------------------------------------------------------------
+     * The table is checked before it is believed. Each case is broken in
+     * memory, refused, and put back - the table on disk is never touched,
+     * because nothing here calls anything that saves it.
+     * ------------------------------------------------------------------ */
+    {
+        int file_slot = -1;
+        int dir_slot  = -1;
+        int free_slot = -1;
+
+        for (int i = 1; i < MAX_FILES_IN_DIR; i++) {
+            if (!dir_table[i].is_used) { if (free_slot < 0) free_slot = i; continue; }
+            if (dir_table[i].file_type == FT_REGULAR && file_slot < 0) file_slot = i;
+            if (dir_table[i].file_type == FT_DIR     && dir_slot  < 0) dir_slot  = i;
+        }
+
+        KTEST_ASSERT(file_slot > 0 && dir_slot > 0 && free_slot > 0,
+                     "[VFS] a file, a directory and a free slot exist to test the check with");
+
+        KTEST_ASSERT(fs_validate_directory_table() == 1,
+                     "[STRICT] [VFS] the mounted table validates as it stands");
+
+        if (file_slot > 0 && free_slot > 0) {
+            disk_file_entry_t saved = dir_table[file_slot];
+
+            dir_table[file_slot].entry_id = (fs_id_t)(file_slot + 1);
+            KTEST_ASSERT(fs_validate_directory_table() == 0,
+                         "[STRICT] [VFS] an entry whose id is not its slot is refused");
+            dir_table[file_slot] = saved;
+
+            dir_table[file_slot].start_cluster = fs_total_clusters + 1;
+            KTEST_ASSERT(fs_validate_directory_table() == 0,
+                         "[STRICT] [VFS] a start cluster past the end of the file system is refused");
+            dir_table[file_slot] = saved;
+
+            /* A free slot, so the parent genuinely names nothing - rather than a
+             * fixed high index, which would be a real entry the day the table
+             * filled up and would turn this into a test that passes for the
+             * wrong reason. */
+            dir_table[file_slot].parent_id = (fs_id_t)free_slot;
+            KTEST_ASSERT(fs_validate_directory_table() == 0,
+                         "[STRICT] [VFS] a parent that names nothing is refused");
+            dir_table[file_slot] = saved;
+        }
+
+        if (dir_slot > 0) {
+            disk_file_entry_t saved = dir_table[dir_slot];
+
+            /*
+             * A directory that is its own parent. This is the cycle the bounded
+             * walks in check_vfs_access() and sys_getcwd() were written to
+             * survive, and it has to be a *directory* to reach the hop counter -
+             * a file with the same parent is refused one check earlier, for not
+             * having a directory above it.
+             */
+            dir_table[dir_slot].parent_id = (fs_id_t)dir_slot;
+            KTEST_ASSERT(fs_validate_directory_table() == 0,
+                         "[STRICT] [VFS] a parent chain that never reaches the root is refused");
+            dir_table[dir_slot] = saved;
+        }
+
+        KTEST_ASSERT(fs_validate_directory_table() == 1,
+                     "[STRICT] [VFS] and the module leaves the table exactly as it found it");
+    }
 
     /* ------------------------------------------------------------------
      * An id past what a byte holds. This is the whole of what widening them
@@ -504,7 +661,7 @@ static void test_disk_format(void) {
              * bytes back out of the block the entry was written into.
              */
             fs_create_file_raw("wide_probe", (const uint8_t *)"x", 1, 300);
-            bcache_read_sector(sector, sec_buf);
+            fs_read_sector(sector, sec_buf);
             ft_memcpy(&readback, &sec_buf[within], sizeof(disk_file_entry_t));
 
             KTEST_ASSERT(readback.entry_id == 300 && readback.parent_id == 0,

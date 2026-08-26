@@ -64,10 +64,20 @@ void run_regression_tests(void) {
     // =========================================================
     // BUG-03: ATA Disk Boundary Overflow (Timeout) Protection
     // =========================================================
-    // Past Bug Description: Attempting to request reads beyond the disk's physical boundaries 
-    // (e.g., beyond 4096 sectors) caused the ATA driver to wait indefinitely for a DRQ signal 
+    // Past Bug Description: Attempting to request reads beyond the disk's physical boundaries
+    // (e.g., beyond 4096 sectors) caused the ATA driver to wait indefinitely for a DRQ signal
     // that the hardware would never send, locking up the kernel.
-    KTEST_ASSERT(fs_max_sectors <= 4096, "[STRICT] REG-03: ATA driver prevented from exceeding max boundary (4096)");
+    //
+    // The bound moved in v0.10.0 and the regression did not. It used to be a flat
+    // 4096 sectors, because the allocation table held one entry per sector and had
+    // 4096 of them; the table counts clusters now, so the thing that must not be
+    // exceeded is what the partition holds. Asserting the old constant would have
+    // passed for the wrong reason on a small disk and failed on a large one -
+    // which is the shape of a regression test that has stopped tracking its bug.
+    KTEST_ASSERT(fs_cluster_to_sector(fs_total_clusters) <= fs_max_sectors,
+                 "[STRICT] REG-03: the last addressable cluster stays inside the partition");
+    KTEST_ASSERT(fs_total_clusters <= FS_MAX_CLUSTERS,
+                 "[STRICT] REG-03: and inside the allocation table that describes it");
 
     // =========================================================
     // BUG-04: Ring 0 <-> Ring 3 ABI and Struct Padding Mismatch

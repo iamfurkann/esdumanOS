@@ -89,9 +89,19 @@ typedef struct {
 } message_t;
 
 /**
- * @brief Maximum number of file descriptors a single task can have open.
+ * @brief File descriptors a single task gets.
+ *
+ * Sixteen, and it says sixteen because that is what create_process() allocates.
+ * It said 32 until the tree was audited before the ABI freeze, and nothing had
+ * ever used it - every bound in the kernel goes through the task's own
+ * fd_table_size, which is set from the allocation. So the constant was free to
+ * disagree with the code, did, and the README repeated it: the documented limit
+ * was twice the real one for as long as both existed.
+ *
+ * create_process() uses this now rather than writing 16 three times, which is
+ * what stops the two drifting apart again.
  */
-#define MAX_FD_PER_TASK 32
+#define MAX_FD_PER_TASK 16
 
 /**
  * @brief Macros defining different types of file descriptors.

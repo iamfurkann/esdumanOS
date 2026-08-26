@@ -227,6 +227,93 @@ int check_vfs_access(int entry_id, int needs_write) {
 }
 
 /**
+ * @brief Decides whether the calling task may use an entry's own permission bits.
+ *
+ * check_vfs_access() asks about the directory an operation happens in. Nothing
+ * asked about the file, ever, which meant a mode on a file was recorded and
+ * reported and stood between nobody and anything: `/etc/shadow` carried 0600
+ * inside an `/etc` that carried 0755, and any user on the system could read it.
+ *
+ * Until v0.9.1 a name comparison refused reads of "shadow" specifically. v0.9.1
+ * retired the comparison - correctly, a file's permissions should not be a
+ * property of what it is called - and replaced it with a check that never looked
+ * at the file. This is the half that was missing, and until it existed the
+ * retirement was a loosening for that one file rather than a tightening.
+ *
+ * Asked *in addition to* check_vfs_access(), never instead of it. Reaching an
+ * entry still requires getting through every directory above it; this is the
+ * second question, about the entry itself.
+ *
+ * A name that does not exist answers 1. The caller's own lookup is about to
+ * report E_NOENT with better information than this function has, and inventing
+ * an errno here would mean two places deciding what a missing file is.
+ *
+ * @param parent_id Directory the entry lives in.
+ * @param name Entry name, already in kernel memory.
+ * @param want FS_WANT_READ, FS_WANT_WRITE, FS_WANT_EXEC, or a combination.
+ * @return 1 when the task may proceed.
+ */
+int check_file_access(fs_id_t parent_id, const char *name, int want) {
+    if (current_task == 0) return 1;
+
+    /* Root is not subject to the bits, as everywhere else. */
+    if (current_task->uid == 0) return 1;
+
+    int idx = fs_get_entry_idx(name, parent_id);
+    if (idx < 0) return 1;
+
+    return fs_mode_allows(dir_table[idx].mode, dir_table[idx].owner_uid,
+                          dir_table[idx].owner_gid,
+                          current_task->uid, current_task->gid, want);
+}
+
+/**
+ * @brief Decides whether the calling task may remove or rename a named entry.
+ *
+ * Removal is a write to the *directory*, which check_vfs_access() has already
+ * granted by the time this is asked. The sticky bit is the second rule, and it
+ * exists because those two questions are otherwise the same one: `/tmp` has to
+ * be writable by everybody, and that alone would let anybody delete anybody
+ * else's file in it.
+ *
+ * The entry's own mode is deliberately not consulted. Removing a file has never
+ * required permission on the file in Unix - a read-only file in a directory you
+ * can write is yours to delete - and copying that is what keeps `rm` on your own
+ * 0444 file working.
+ *
+ * @param parent_id Directory the entry lives in.
+ * @param name Entry name, already in kernel memory.
+ * @return 1 when the removal may proceed.
+ */
+int check_removal_access(fs_id_t parent_id, const char *name) {
+    if (current_task == 0) return 1;
+    if (current_task->uid == 0) return 1;
+
+    int entry_idx = fs_get_entry_idx(name, parent_id);
+    if (entry_idx < 0) return 1;
+
+    /*
+     * The root directory owns no table entry, so its mode is stated rather than
+     * read - 0755 owned by root, as in check_vfs_access(). It is not sticky, so
+     * this resolves to "allowed" and the directory's write bit, which the caller
+     * already checked, is what actually decided.
+     */
+    uint16_t dir_mode = 0755;
+    uint32_t dir_owner = 0;
+
+    if (parent_id != 0) {
+        int dir_idx = slot_of_entry(parent_id);
+        if (dir_idx < 0) return 0;
+        dir_mode  = dir_table[dir_idx].mode;
+        dir_owner = dir_table[dir_idx].owner_uid;
+    }
+
+    return fs_sticky_allows_removal(dir_mode, dir_owner,
+                                    dir_table[entry_idx].owner_uid,
+                                    current_task->uid);
+}
+
+/**
  * @brief Function validate_user_pointer
  */
 static int validate_user_pointer_access(const void *ptr, size_t size, int requires_write) {

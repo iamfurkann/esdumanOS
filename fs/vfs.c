@@ -681,10 +681,21 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
     uint32_t c_gid = (current_task != 0) ? current_task->gid : 0;
     uint32_t now = fs_now();
 
-    if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
-        klog_int(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can modify 'passwd'. UID", c_uid);
-        vfs_unlock(); return E_ACCES;
-    }
+    /*
+     * The name comparison that used to sit here is gone.
+     *
+     * It refused any non-root creation of a file called "passwd" - anywhere, so
+     * `touch /tmp/passwd` was denied while `touch /tmp/shadow` was not, which is
+     * the shape of every rule that decides by name rather than by mode. What it
+     * was protecting is protected properly now: /etc is 0755 and owned by root,
+     * so check_vfs_access() refuses a user write to it before this is reached,
+     * and /etc/passwd carries 0644 root-owned, so check_file_access() refuses
+     * opening it for writing.
+     *
+     * v0.9.1 retired the comparisons in check_vfs_access(). These three, down
+     * here in the VFS, survived it because nobody was looking below the syscall
+     * layer.
+     */
 
     int existing_idx = -1;
     int free_idx = -1;
@@ -837,12 +848,9 @@ int fs_delete(const char *name, fs_id_t parent_id) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File deletion blocked!");
         vfs_unlock(); return E_ROFS;
     }
-uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
-    
-    if (ft_strcmp(name, "passwd") == 0 && c_uid != 0) {
-        klog(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can delete 'passwd'!");
-        vfs_unlock(); return E_ACCES;
-    }
+    /* The "passwd" name comparison is gone; see fs_create_file_raw() for why.
+     * Deleting from /etc needs write permission on /etc, which is 0755 and
+     * root's, and the syscall layer asks that before this is reached. */
 
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1 &&
@@ -938,12 +946,10 @@ int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File renaming blocked!");
         vfs_unlock(); return E_ROFS;
     }
-uint32_t c_uid = (current_task != 0) ? current_task->uid : 0;
-    
-    if ((ft_strcmp(old_name, "passwd") == 0 || ft_strcmp(new_name, "passwd") == 0) && c_uid != 0) {
-        klog(LOG_LEVEL_WARN, "VFS", "Access Denied: Only ROOT can rename 'passwd'!");
-        vfs_unlock(); return E_ACCES;
-    }
+    /* The "passwd" name comparison is gone; see fs_create_file_raw() for why.
+     * This one also refused renaming anything *to* "passwd", which made the name
+     * itself reserved system-wide - a user could not call their own file that in
+     * their own home directory. */
 
     for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
         if (dir_table[i].is_used == 1 && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, new_name) == 0) {

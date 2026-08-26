@@ -323,14 +323,47 @@ void sys_exec(arch_regs_t *regs) {
         return; 
     }
 
-    int bin_idx = fs_get_entry_idx("bin", 0);
-    int bin_id = (bin_idx != -1) ? dir_table[bin_idx].entry_id : -1;
+    /*
+     * The execute bit decides, and until v0.9.4 nothing read it.
+     *
+     * What stood here was the last of the comparisons v0.9.1 set out to retire:
+     * a program could be run by anybody if it sat in /bin and by root alone
+     * anywhere else. That made executability a property of a file's location
+     * rather than of the file, so moving a program changed who could run it, and
+     * the `x` bit - stored on every entry since v0.9.0, reported by stat, shown
+     * by `ls -l` - meant nothing at all.
+     *
+     * Now it means what it means everywhere: a file you may execute is a file
+     * whose mode says so. /bin is 0755 from the boot-time pass in
+     * apply_system_modes(), which had to land first or no command on an existing
+     * disk could be launched - they are all written 0644.
+     *
+     * Execute only, not execute-and-read. Unix does not require read permission
+     * to run a binary, and the kernel loads it rather than the caller.
+     *
+     * This does open something that was closed: a user can now run a program
+     * they wrote themselves, given `chmod 755`. That is the Unix arrangement and
+     * it is deliberate. The ELF validator still runs on every load, the loader
+     * still refuses segments that would land outside the address space, and
+     * nothing here grants the new process anything its parent did not have.
+     */
+    /*
+     * The directory first, as everywhere else. The rule that stood here was the
+     * only guard exec had, so nothing ever asked whether the caller could reach
+     * the program at all - and dropping the location rule without adding this
+     * would let a user run a 0755 binary sitting in a 0700 directory they cannot
+     * even list.
+     */
+    if (!check_vfs_access(parent_id, 0)) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "exec: Permission denied; the program's directory is not readable.");
+        regs->eax = E_ACCES;
+        return;
+    }
 
-    // ROOT permission is required for programs outside the /bin directory
-    if (parent_id != bin_id && current_task->uid != 0) { 
-        klog(LOG_LEVEL_WARN, "SYSCALL", "exec: Permission denied! (ROOT required for programs outside /bin)");
-        regs->eax = E_ACCES; 
-        return; 
+    if (!check_file_access((fs_id_t)parent_id, basename, FS_WANT_EXEC)) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "exec: Permission denied; the file has no execute bit for this user.");
+        regs->eax = E_ACCES;
+        return;
     }
 
     int child_idx = load_and_exec_elf(basename, parent_id); 

@@ -527,6 +527,25 @@ void sys_open(arch_regs_t *regs) {
         regs->eax = E_ACCES; return;
     }
 
+    /*
+     * The mode is decided here rather than further down, where it used to be
+     * read, because the file's own permission bits depend on it: opening for
+     * writing truncates, so it is a write, and asking for read permission on a
+     * call that is about to empty the file would be asking the wrong question.
+     */
+    uint8_t open_mode = (regs->ecx == 1) ? 1 : 0;
+
+    /*
+     * And the file's own bits, which nothing consulted until v0.9.4. The
+     * directory check above is about getting to the entry; this is about the
+     * entry. Both are asked, and the strictness of the first is unchanged.
+     */
+    if (!check_file_access((fs_id_t)parent_id, basename,
+                           open_mode == 1 ? FS_WANT_WRITE : FS_WANT_READ)) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "open: Permission denied by the file's own mode");
+        regs->eax = E_ACCES; return;
+    }
+
     int fd = -1;
     for (uint32_t i = 3; i < current_task->fd_table_size; i++) {
         if (current_task->fd_table[i].type == 0) { fd = i; break; }
@@ -561,8 +580,6 @@ void sys_open(arch_regs_t *regs) {
          * "> file" has to mean. The buffer itself is allocated on the first
          * write, so opening a file costs nothing extra.
          */
-        uint8_t open_mode = (regs->ecx == 1) ? 1 : 0;
-
         if (open_mode == 1) new_file->dirty = 1;
 
         current_task->fd_table[fd].type = FD_TYPE_FILE;
@@ -614,6 +631,18 @@ void sys_rm_file(arch_regs_t *regs) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "rm: Permission denied. Cannot delete this file!");
         regs->eax = E_ACCES; return;
     }
+
+    /*
+     * And the sticky rule, which is the only thing that makes /tmp workable: it
+     * has to be writable by everybody, and write permission on a directory is
+     * permission to remove from it. Without this second question the two cannot
+     * be told apart, and anybody could delete anybody else's temporary file.
+     */
+    if (!check_removal_access((fs_id_t)parent_id, basename)) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "rm: Permission denied by the sticky bit; the file is not yours.");
+        regs->eax = E_ACCES; return;
+    }
+
     regs->eax = fs_delete(basename, (fs_id_t)parent_id);
 }
 
@@ -651,6 +680,18 @@ void sys_mv_file(arch_regs_t *regs) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mv: Permission denied. Cannot rename this file!");
         regs->eax = E_ACCES; return;
     }
+
+    /*
+     * Renaming takes the entry out of the directory under one name and puts it
+     * back under another, so it is a removal as far as the sticky bit is
+     * concerned - and if it were not asked here, renaming somebody else's file
+     * to a name of your choosing would be the way around the rule above.
+     */
+    if (!check_removal_access((fs_id_t)old_parent, old_base)) {
+        klog(LOG_LEVEL_WARN, "SYSCALL", "mv: Permission denied by the sticky bit; the file is not yours.");
+        regs->eax = E_ACCES; return;
+    }
+
     regs->eax = fs_rename(old_base, new_base, (fs_id_t)old_parent);
 }
 

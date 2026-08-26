@@ -252,6 +252,25 @@ int main() {
     run_static_test("apps/bin/sh.c", "SYSCALL_READ", "sh.c -> Uses SYSCALL_READ (3)", &fail_count);
     run_static_test("apps/bin/sh.c", "SYSCALL_WRITE", "sh.c -> Uses SYSCALL_WRITE (4)", &fail_count);
 
+    /*
+     * init.c and stat.c were not checked here at all until the pre-freeze audit,
+     * and init.c is the one that matters most: it is PID 1. Every other program
+     * in this file can fail and leave a working system; if init stops calling
+     * exec, or stops authenticating before it, there is no shell to notice with.
+     *
+     * Both use named constants rather than literal numbers - the two forms this
+     * project deliberately mixes - so the patterns match what each file actually
+     * contains. The rule is per-file, and getting it backwards is what these
+     * checks exist to catch.
+     */
+    run_static_test("apps/init.c", "SYSCALL_EXEC", "init.c -> Uses SYSCALL_EXEC (5) to launch the shell, which is its whole job", &fail_count);
+    run_static_test("apps/init.c", "SYSCALL_AUTH", "init.c -> Uses SYSCALL_AUTH (41) to check the password", &fail_count);
+    run_static_test("apps/init.c", "SYSCALL_SETUID", "init.c -> Uses SYSCALL_SETUID (35), so the shell starts as the user who logged in", &fail_count);
+
+    run_static_test("apps/bin/stat.c", "SYSCALL_STAT", "stat.c -> Uses SYSCALL_STAT (48), which is the whole point of it", &fail_count);
+    run_static_test("apps/bin/stat.c", "SYSCALL_TIME", "stat.c -> Uses SYSCALL_TIME (55) to render the timestamps it reports", &fail_count);
+    run_static_test("apps/bin/stat.c", "SYSCALL_GET_ARGS", "stat.c -> Uses SYSCALL_GET_ARGS (42)", &fail_count);
+
     printf("======================================================\n");
     // Assess the final results of the static analysis to determine suite success.
     if (fail_count == 0) {

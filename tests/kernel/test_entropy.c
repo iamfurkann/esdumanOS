@@ -313,7 +313,7 @@ void run_entropy_tests(void) {
         int seed_idx = fs_get_entry_idx(ENTROPY_SEED_NAME, (fs_id_t)seed_var);
         KTEST_ASSERT(seed_idx >= 0,
                      "[ENTROPY] the boot left a seed behind for the next one");
-        KTEST_ASSERT(seed_idx < 0 ||
+        KTEST_ASSERT(seed_idx >= 0 &&
                      (dir_table[seed_idx].mode & FS_MODE_PERM_MASK) == 0600,
                      "[STRICT] [ENTROPY] and it is readable by root alone, like the shadow file");
 

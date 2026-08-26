@@ -790,7 +790,7 @@ static void test_system_modes(void) {
     }
 
     idx = fs_get_entry_idx("init.elf", 0);
-    KTEST_ASSERT(idx < 0 || (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0755,
+    KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0755,
                  "[VFS] init.elf is a program and says so");
 
     if (etc_id >= 0) {
@@ -799,11 +799,11 @@ static void test_system_modes(void) {
         idx = fs_get_entry_idx("shadow", (fs_id_t)etc_entry);
         KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0600,
                      "[STRICT] [VFS] /etc/shadow carries 0600");
-        KTEST_ASSERT(idx < 0 || dir_table[idx].owner_uid == 0,
+        KTEST_ASSERT(idx >= 0 && dir_table[idx].owner_uid == 0,
                      "[STRICT] [VFS] and is owned by root, so 0600 means what it should");
 
         idx = fs_get_entry_idx("passwd", (fs_id_t)etc_entry);
-        KTEST_ASSERT(idx < 0 || (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0644,
+        KTEST_ASSERT(idx >= 0 && (dir_table[idx].mode & FS_MODE_PERM_MASK) == 0644,
                      "[VFS] /etc/passwd is readable by everyone, as it carries no secrets");
     }
 

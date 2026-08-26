@@ -36,14 +36,28 @@ int ft_strcmp(const char *s1, const char *s2) {
 }
 
 /**
- * @brief Copies a string.
- * 
+ * @brief Copies a string into a buffer whose size is stated.
+ *
+ * The unbounded ft_strcpy() this replaces was safe here for one reason: both
+ * buffers were 32 bytes. That is a coincidence the next person to change one of
+ * them gets to preserve, which is not a property worth relying on.
+ *
  * @param dest The destination buffer.
+ * @param size Bytes available in dest, terminator included.
  * @param src The source string to copy.
+ * @return Length of src, so a truncation can be told from a fit.
  */
-void ft_strcpy(char *dest, const char *src) {
-    while(*src) *dest++ = *src++;
-    *dest = '\0';
+unsigned int ft_strlcpy_sz(char *dest, unsigned int size, const char *src) {
+    unsigned int len = 0;
+
+    while (src[len]) len++;
+
+    if (size > 0) {
+        unsigned int copy = (len < size - 1) ? len : size - 1;
+        for (unsigned int i = 0; i < copy; i++) dest[i] = src[i];
+        dest[copy] = '\0';
+    }
+    return len;
 }
 
 /**
@@ -184,7 +198,7 @@ void main(void) {
 
         if (uid >= 0) {
             current_uid = uid;
-            ft_strcpy(current_username, user_buf);
+            ft_strlcpy_sz(current_username, sizeof(current_username), user_buf);
             login_success = 1;
         } else {
             printk("\n[ERROR] Invalid username or password!\n\n");

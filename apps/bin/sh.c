@@ -91,14 +91,35 @@ int ft_strcmp(const char *s1, const char *s2) {
 }
 
 /**
- * @brief Copies a string.
- * 
+ * @brief Copies a string into a buffer whose size is stated.
+ *
+ * This was ft_strcpy(), which took no size and copied until the source ran out.
+ * Every call in this file was safe, and each of them was safe because of a check
+ * somewhere else - a length test forty lines up, a buffer that happened to be as
+ * large as its source. That is the kind of safety that holds until somebody
+ * moves the check, and moving checks is what maintenance is.
+ *
+ * Returns the length of src rather than of what was copied, so a caller that
+ * cares can tell a truncation from a fit. The ones that care refuse; see
+ * run_external(). Silently keeping a shortened version of what the user typed is
+ * how a command becomes a different command.
+ *
  * @param dest Destination buffer.
+ * @param size Bytes available in dest, terminator included.
  * @param src Source string.
+ * @return Length of src.
  */
-void ft_strcpy(char *dest, const char *src) {
-    while(*src) *dest++ = *src++;
-    *dest = '\0';
+unsigned int ft_strlcpy_sz(char *dest, unsigned int size, const char *src) {
+    unsigned int len = 0;
+
+    while (src[len]) len++;
+
+    if (size > 0) {
+        unsigned int copy = (len < size - 1) ? len : size - 1;
+        for (unsigned int i = 0; i < copy; i++) dest[i] = src[i];
+        dest[copy] = '\0';
+    }
+    return len;
 }
 
 /**
@@ -735,12 +756,11 @@ int sys_setuid(int uid, const char *password) { return syscall(SYSCALL_SETUID, u
  */
 int sys_mkdir(const char *name) { return syscall(26, (int)name, 0, 0); }
 /*
- * SYSCALL_LS_DIR (28) used to back the "ls" builtin and no longer does. It
- * prints the listing from the kernel with terminal_putchar(), so its output
- * never reached this process's descriptor 1 - "ls | grep" saw an empty pipe and
- * "ls > file" produced an empty file. builtin_ls() below reads the same entries
- * through SYSCALL_READDIR and prints them itself. The syscall stays for any
- * caller that genuinely wants a screen dump.
+ * There is no wrapper for 28 because there is no 28. It backed the "ls" builtin
+ * until v0.9.2, which moved off it because it printed the listing from inside
+ * the kernel and so could never reach a pipe, and v0.10.0 removed the syscall
+ * once it turned out that nothing had called it since. builtin_ls() below reads
+ * the entries through SYSCALL_READDIR and prints them itself.
  */
 /**
  * @brief Gets the directory ID.
@@ -1140,9 +1160,10 @@ int builtin_cat(char **args) {
  *
  * Two things were wrong with what this replaces, and they had different causes.
  *
- * The listing came from SYSCALL_LS_DIR, which prints it inside the kernel with
+ * The listing came from a syscall that printed it inside the kernel with
  * terminal_putchar() - so it went to the screen whatever this process's
- * descriptor 1 pointed at. "ls | grep bin" read an empty pipe and "ls > names"
+ * descriptor 1 pointed at. (That call was number 28; it was removed in v0.10.0,
+ * having had no callers left since this was written.) "ls | grep bin" read an empty pipe and "ls > names"
  * created an empty file. SYSCALL_READDIR hands the same entries back instead,
  * and printing them here means they travel the ordinary way.
  *
@@ -1675,13 +1696,13 @@ void execute_command(char **args) {
          */
         int rc = sys_chdir(target);
         if (rc == E_OK) {
-            ft_strcpy(old_path, current_path);   /* OLDPWD, for "cd -" */
+            ft_strlcpy_sz(old_path, sizeof(old_path), current_path);   /* OLDPWD, for "cd -" */
 
             /* Re-read rather than predict: the prompt should show where the
              * kernel actually put us, not where we asked to go. */
             char resolved[64];
             int len = sys_getcwd(resolved, sizeof(resolved));
-            if (len > 0) ft_strcpy(current_path, resolved);
+            if (len > 0) ft_strlcpy_sz(current_path, sizeof(current_path), resolved);
 
             last_exit_status = 0;
         } else {
@@ -1870,7 +1891,7 @@ void execute_command(char **args) {
         else if (sys_setuid(0, su_pass) == 0) {
             set_env("USER", "root");
             current_uid = 0;
-            ft_strcpy(current_username, "root");
+            ft_strlcpy_sz(current_username, sizeof(current_username), "root");
             printk("\n[SYSTEM] Privileges elevated to ROOT!\n");
             last_exit_status = 0;
         } else {
@@ -2083,10 +2104,18 @@ void run_external(char **args) {
          */
         char exec_path[64];
         if (word_is_path(args[0])) {
-            ft_strcpy(exec_path, args[0]);
+            if (ft_strlcpy_sz(exec_path, sizeof(exec_path), args[0]) >= sizeof(exec_path)) {
+                printk("sh: path too long\n");
+                last_exit_status = 127;
+                return;
+            }
         } else {
-            ft_strcpy(exec_path, "/bin/");
-            ft_strcpy(&exec_path[5], args[0]);
+            ft_strlcpy_sz(exec_path, sizeof(exec_path), "/bin/");
+            if (ft_strlcpy_sz(&exec_path[5], sizeof(exec_path) - 5, args[0]) >= sizeof(exec_path) - 5) {
+                printk("sh: command name too long\n");
+                last_exit_status = 127;
+                return;
+            }
         }
 
         char arg_str[256];
@@ -2396,7 +2425,7 @@ static void handle_tab_completion(char *buf, int *idx) {
         // Check if prefix contains a path
         int dir_id = sys_get_dir_id(".");
         char name_prefix[128];
-        ft_strcpy(name_prefix, prefix);
+        ft_strlcpy_sz(name_prefix, sizeof(name_prefix), prefix);
         
         // If prefix contains '/', resolve the directory part
         int last_slash = -1;
@@ -2952,16 +2981,17 @@ void main(void) {
     syscall(SYSCALL_GET_ARGS, (int)current_username, 0, 0);
 
     if (current_username[0] == '\0') {
-        if (current_uid == 0) ft_strcpy(current_username, "root");
-        else ft_strcpy(current_username, "esduman");
+        if (current_uid == 0) ft_strlcpy_sz(current_username, sizeof(current_username), "root");
+        else ft_strlcpy_sz(current_username, sizeof(current_username), "esduman");
     }
 
     if (current_uid == 0 || ft_strcmp(current_username, "root") == 0) {
-        ft_strcpy(current_path, "/root");
+        ft_strlcpy_sz(current_path, sizeof(current_path), "/root");
         set_env("HOME", "/root");
     } else {
-        ft_strcpy(current_path, "/home/");
-        ft_strcpy(&current_path[ft_strlen(current_path)], current_username);
+        ft_strlcpy_sz(current_path, sizeof(current_path), "/home/");
+        unsigned int home_len = (unsigned int)ft_strlen(current_path);
+        ft_strlcpy_sz(&current_path[home_len], sizeof(current_path) - home_len, current_username);
         set_env("HOME", current_path);
     }
     
@@ -2973,7 +3003,7 @@ void main(void) {
      */
     if (sys_chdir(current_path) != E_OK) {
         sys_chdir("/");
-        ft_strcpy(current_path, "/");
+        ft_strlcpy_sz(current_path, sizeof(current_path), "/");
     }
 
     set_env("USER", current_username);

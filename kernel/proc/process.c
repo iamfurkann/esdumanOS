@@ -220,15 +220,15 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
      * lines above is checked properly; this one was not.
      */
     new_task->fd_table_size = 0;
-    new_task->fd_table = (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t) * 16);
+    new_task->fd_table = (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t) * MAX_FD_PER_TASK);
     if (!new_task->fd_table) {
         klog(LOG_LEVEL_ERROR, "PROCESS", "Could not create new process: no memory for the descriptor table.");
         kfree(new_task);
         return E_NOMEM;
     }
 
-    new_task->fd_table_size = 16;
-    for (uint32_t fd_i = 0; fd_i < 16; fd_i++) {
+    new_task->fd_table_size = MAX_FD_PER_TASK;
+    for (uint32_t fd_i = 0; fd_i < MAX_FD_PER_TASK; fd_i++) {
         new_task->fd_table[fd_i].type = 0;
         new_task->fd_table[fd_i].ptr = 0;
         new_task->fd_table[fd_i].mode = 0;

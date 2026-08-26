@@ -111,7 +111,26 @@
 #define SYSCALL_IPC_SEND        2
 /** @brief Receive IPC message */
 #define SYSCALL_IPC_RECEIVE     6
-/** @brief Set an alarm signal */
+/**
+ * @brief Arms the demonstration timer. Not an alarm(2), despite the name.
+ *
+ * It said "set an alarm signal", which is three promises it does not keep: it
+ * takes no duration - ebx, ecx and edx are read by nothing - it delivers no
+ * signal, and it does not concern the calling process at all. What it does is
+ * schedule kernel timer slot 1 for a fixed three seconds, at which point the
+ * kernel prints a green line on the console.
+ *
+ * That is a demonstration of the timer bottom-half, and it is the last thing in
+ * the table that prints from inside the kernel on a caller's behalf - the class
+ * v0.9.2 otherwise cleared out.
+ *
+ * Its only caller is the shell's `alarm` builtin, which is one of the four not
+ * offered by help or Tab-completion. **What becomes of this number is part of
+ * freezing the ABI at 1.0**, alongside the free numbers at 11 and 28 and the gap
+ * at 99: it can be made into a real alarm(seconds) that raises SIGALRM, removed
+ * the way CAT_FILE and LS_DIR were, or frozen as what it is. Freezing it under
+ * the old description was the one option worth ruling out.
+ */
 #define SYSCALL_ALARM           18
 /** @brief Register a signal handler */
 #define SYSCALL_SIGNAL_REG      24

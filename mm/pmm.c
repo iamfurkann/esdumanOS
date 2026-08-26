@@ -11,6 +11,21 @@
 #include "klog.h"
 #include "errno.h"
 
+/**
+ * @brief Frames below 1 MB, which this allocator does not hand out or take back.
+ *
+ * Written as the arithmetic rather than as 256, which is what it was in both
+ * places that used it. The number is a relationship - one megabyte divided by
+ * the page size - and a relationship spelled as a literal is one that stops
+ * being true the moment either side of it moves.
+ *
+ * Nothing below this is ever allocated either: init_pmm() marks the whole
+ * low-memory region used in the bitmap, so pmm_find_first_free() cannot return
+ * one. The guards here are the second half of that, for a frame arriving from
+ * somewhere other than this allocator.
+ */
+#define PMM_LOW_MEMORY_FRAMES (0x100000u / PAGE_SIZE)
+
 extern uint32_t _kernel_end;
 
 uint32_t *pmm_bitmap = 0;
@@ -205,7 +220,7 @@ void pmm_ref_frame(uint32_t addr) {
 
     /* The same low-memory guard pmm_free_frame() applies: frames below 1 MB are
      * not the allocator's to account for. */
-    if (frame < 256) return;
+    if (frame < PMM_LOW_MEMORY_FRAMES) return;
     if (frame >= pmm_frames_count) return;
 
     spinlock_acquire(&pmm_lock);
@@ -268,8 +283,8 @@ uint32_t pmm_get_shared_frames(void) {
  */
 void pmm_free_frame(uint32_t addr) {
     uint32_t frame = addr / PAGE_SIZE;
-    if (frame < 256) { 
-        return; 
+    if (frame < PMM_LOW_MEMORY_FRAMES) {
+        return;
     }
     if (frame >= pmm_frames_count) return;
     

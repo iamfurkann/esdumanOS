@@ -73,8 +73,15 @@ Valid prefixes: `mm:`, `fs:`, `proc:`, `drivers:`, `crypto:`, `tests:`, `build:`
 
 ## Pull Request Process
 
-1. Ensure all tests pass (`make test && make test_kernel && make test_smap`). CI runs
-   the same targets and none of them are allowed to fail.
+1. Ensure all tests pass. The list is the one under [Getting Started](#getting-started)
+   — `make test`, `make fuzz`, `make`, `make test_kernel`, `make test_smap` — and CI
+   runs every one of them plus `make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"`.
+   None of them is allowed to fail.
+
+   This said "`make test && make test_kernel && make test_smap`" and "CI runs the same
+   targets", which was three of the six. A contributor who trusted it would pass
+   locally and then watch `make fuzz` or the RDRAND run fail on the pull request,
+   having done nothing wrong.
 2. Add or update tests for any new functionality.
 3. Update documentation if the change affects user-visible behavior.
 4. One feature or fix per pull request.

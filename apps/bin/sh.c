@@ -2296,6 +2296,23 @@ void run_with_redirect(char **args, char *redirect_file) {
 /* ================== TAB COMPLETION ================== */
 
 /** Built-in command names for tab completion */
+/**
+ * @brief What Tab offers, which is deliberately not the list of what runs.
+ *
+ * Thirty-three words reach a builtin branch in execute_command(). Thirty-one are
+ * here, and the four that are missing are missing on purpose: `panic` deliberately
+ * crashes the kernel, and `stack`, `testmalloc` and `alarm` are debugging tools
+ * that exist to be typed by somebody who already knows they are there. Offering
+ * them by Tab-completion would put `panic` one keystroke away from `pwd`.
+ *
+ * `show_help()` omits the same four, and the two lists have to be read together:
+ * a command that appears in neither is not hidden, it is undocumented, and the
+ * difference is this comment.
+ *
+ * `clear` and `echo` go the other way - they are /bin programs rather than
+ * builtins, and are listed because a user completing a command wants what they
+ * can run, not a tour of the shell's internals.
+ */
 static const char *builtin_commands[] = {
     "cat", "cat_raw", "cd", "clear", "dmesg", "echo", "env", "exec",
     "bg", "fg", "jobs", "wait",

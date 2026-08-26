@@ -8,6 +8,8 @@
 #include "syscall.h"
 #include "process.h" // for tasks table
 #include "fs.h"      // for vfs structure
+#include "stat.h"    // for esd_stat_t, which crosses the syscall boundary
+#include "esdtime.h" // for esd_time_t, which crosses it too
 #include "libft.h"
 #include "kheap.h"
 #include "ata.h"
@@ -86,6 +88,24 @@ void run_regression_tests(void) {
     // Due to improper struct packing/padding during Syscalls between Ring 3 and Ring 0, 
     // pointer alignment became misaligned and corrupted memory.
     KTEST_ASSERT(sizeof(void *) == 4, "[STRICT] REG-04: Architectural ABI pointer size (4 bytes / 32-bit) preserved");
+
+    // The structures that actually cross that boundary, checked the way
+    // disk_file_entry_t is checked for the disk. The kernel and the user
+    // programs are separate compilation units with separate CFLAGS, so a layout
+    // they disagree about is a stat() that reports somebody else's fields -
+    // and unlike the disk case there is no magic number to catch it.
+    //
+    // Neither struct is packed, and neither needs to be: the fields are ordered
+    // widest-first, so natural alignment produces no interior padding and the
+    // totals below are the sum of the fields. These assertions are what makes
+    // that ordering a requirement rather than an accident, which matters now
+    // that both are about to be frozen into the 1.0 ABI.
+    KTEST_ASSERT(sizeof(esd_stat_t) == 36,
+                 "[STRICT] REG-04: esd_stat_t is 36 bytes, as both sides of the syscall assume");
+    KTEST_ASSERT(sizeof(esd_time_t) == 8,
+                 "[STRICT] REG-04: esd_time_t is 8 bytes, as both sides of the syscall assume");
+    KTEST_ASSERT(sizeof(disk_file_entry_t) == 96,
+                 "[STRICT] REG-04: and a directory entry is still 96, which the disk depends on");
 
     // =========================================================================
     // BUG-05: ATA Identify Infinite Loop Lockup (Hardware Livelock)

@@ -8,6 +8,7 @@
 #include "syscall.h"
 #include "process.h"
 #include "fs.h"
+#include "errno.h"  // for E_INVAL, which the long-name refusal now asserts
 #include "elf.h"
 #include "kheap.h"
 
@@ -57,13 +58,30 @@ void run_stress_tests(void) {
     char *long_name = (char *)0x500B00;
     for(int i=0; i<250; i++) long_name[i] = 'A';
     long_name[250] = '\0';
-    
-    // Attempt to create a file using this 250-character name.
-    // The VFS layer must either truncate it cleanly or reject it with an error.
-    // The critical success metric is that the kernel DOES NOT trigger a buffer overflow and crash.
-    int vfs_res = ktest_syscall(8 /* CREATE_FILE */, (int)long_name, (int)"", 0);
-    KTEST_ASSERT(vfs_res < 0 || vfs_res == 0, 
-                 "[STRICT] VFS Long Name: System DID NOT CRASH on giant filename");
+
+    // The content argument has to be in the mapped user window as well, and it
+    // was not: it was the literal "", which lives in the kernel's .rodata.
+    // copy_user_string() refused that pointer, so sys_create_file() answered
+    // E_FAULT and returned before it ever reached a path or a name.
+    //
+    // Nothing noticed, because the assertion read `vfs_res < 0 || vfs_res == 0` -
+    // every non-positive value - and E_FAULT is negative. A test called "VFS Long
+    // Name" spent its whole life checking pointer validation on its second
+    // argument and passing for it.
+    //
+    // What it is supposed to check is the rule v0.9.0 settled: a name too long is
+    // refused, never shortened, because a shortened name is a different file the
+    // caller cannot find again. vfs_resolve_path() answers E_INVAL for that, and
+    // as of the pre-freeze audit sys_create_file() passes that through rather than
+    // flattening it to E_NOENT.
+    char *empty_content = (char *)0x500C00;
+    empty_content[0] = '\0';
+
+    int vfs_res = ktest_syscall(8 /* CREATE_FILE */, (int)long_name, (int)empty_content, 0);
+    KTEST_ASSERT(vfs_res == E_INVAL,
+                 "[STRICT] VFS Long Name: a 250-character name is refused, not truncated");
+    KTEST_ASSERT(fs_get_entry_idx(long_name, 0) < 0,
+                 "[STRICT] VFS Long Name: and nothing by that name was created");
 
     // =========================================================================
     // 3. DEEP DIRECTORY NESTING STRESS TEST

@@ -40,16 +40,6 @@ uint8_t get_rtc_second(void) {
 }
 
 /**
- * @brief Prints a two-digit number, padding with zero if necessary.
- * @param num The number to print.
- */
-void print_two_digits(uint8_t num) {
-    if (num < 10)
-        printk("0");
-    printk("%d", num);
-}
-
-/**
  * @brief Retrieves and prints the current date and time.
  */
 void print_time(void) {
@@ -285,7 +275,24 @@ int rtc_set_utc(const esd_time_t *t) {
         hour   = (uint8_t)(rtc_to_bcd((uint8_t)(hour & 0x7F)) | (hour & 0x80));
     }
 
-    /* Halt the update cycle, write, let it run again. */
+    /*
+     * Halt the update cycle, write, let it run again.
+     *
+     * There is a window here that the datasheet cares about: UIP is checked
+     * above, the chip sets it about 244 microseconds before it rolls the time,
+     * and an update can begin between that check and the SET bit going up.
+     *
+     * An extra UIP wait after asserting SET was tried, on the theory that the
+     * in-flight update was writing incremented values back over these. It made
+     * the [TIME] round-trip assertions fail more, not less, and was removed
+     * rather than kept: with SET asserted the chip does not update, so QEMU
+     * reports UIP as clear and the wait is a no-op - which means the theory it
+     * rested on cannot have been what was happening.
+     *
+     * The round-trip test is known to fail occasionally and the cause is not
+     * established. It is written down in the README rather than guessed at
+     * again here.
+     */
     set_RTC_register(0x0B, (uint8_t)(regB | 0x80));
 
     set_RTC_register(0x00, second);

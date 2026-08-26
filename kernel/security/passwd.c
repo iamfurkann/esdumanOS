@@ -309,19 +309,16 @@ int verify_user_password(const char *username, const char *password) {
     return E_NOENT;
 }
 
-/**
- * @brief Updates the /etc/passwd file with new content.
+/*
+ * update_passwd_file() was here and is gone.
  *
- * @param new_passwd_content The new content to write to the passwd file.
- * @param size The size of the new content in bytes.
- * @return 0 on success, or a negative error code on failure.
+ * It rewrote /etc/passwd through fs_atomic_update() and had no caller: there is
+ * no useradd and no passwd command, and the accounts this system has are created
+ * once at first boot. It was also declared in no header, so nothing outside this
+ * file could have called it without a warning.
+ *
+ * Worth removing rather than leaving: it took a buffer and a length and wrote the
+ * password database with no check of any kind - not the caller's uid, not the
+ * file's mode, not the security level. Dead code that would have been a hole the
+ * day somebody revived it, which is the worst kind to leave lying about.
  */
-int update_passwd_file(const char *new_passwd_content, uint32_t size) {
-    int etc_idx = fs_get_entry_idx("etc", 0);
-    if (etc_idx == -1) {
-        klog(LOG_LEVEL_ERROR, "PASSWD", "/etc directory not found for updating passwd");
-        return E_NOENT;
-    }
-    int etc_id = dir_table[etc_idx].entry_id;
-    return fs_atomic_update("passwd", (const uint8_t *)new_passwd_content, size, etc_id);
-}

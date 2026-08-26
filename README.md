@@ -355,6 +355,20 @@ empty it. Three more name comparisons went with them, hidden below the syscall l
 the VFS, where a file called `passwd` could not be created, deleted or renamed anywhere
 on the system — including in your own home directory.
 
+v0.10.0 "Stake" gives the disk a partition table and takes the 2 MB ceiling off it. The
+two arrive together because they move the same bytes: sector 0 held the superblock from
+v0.9.0 onward, so making room for an MBR moves every sector address behind it, and there
+is no sense in moving a user's files twice. What actually capped the disk was never the
+partitioning — it was the allocation table holding one entry per *sector*, a static
+`uint32_t[4096]`, so 4096 sectors was the whole of it. Counting in clusters of eight
+sectors covers 16 MB with the same 16 KB of kernel memory, and the bill is stated rather
+than buried: a one-byte file now occupies 4 KB. The directory table is also checked
+against its own invariants before anything is allowed to believe it — that an entry's id
+is the slot it sits in, that a parent chain reaches the root, that a start cluster is
+inside the file system — which had been an open item in `SECURITY.md` for several
+releases. A disk written by v0.9.x is recognised by name and refused; the format did not
+gain a converter and never has.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -369,7 +383,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 **What to expect:**
 - This is not production-ready software
 - You may encounter kernel panics, deadlocks, or unexpected behavior
-- Resource limits are intentionally constrained (16 processes, 2 MB disk, 128 MB RAM,
+- Resource limits are intentionally constrained (16 processes, 16 MB disk, 128 MB RAM,
   512 file system entries, 64-character file names)
 - No networking, no GUI, no dynamic linking
 
@@ -383,7 +397,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 63 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 62 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -413,7 +427,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. A superblock in sector 0 carries a magic number, a format version and the geometry the disk was laid out with; an unrecognised disk is refused rather than read. 512 entries of 96 bytes, each with an owner, a group, permission bits and creation and modification times |
+| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, and the directory table is checked against its own invariants before it is believed. 512 entries of 96 bytes, each with an owner, a group, permission bits and creation and modification times |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
 | **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()` |
 | **DevFS** | `/dev/null`, `/dev/random`, `/dev/urandom` and `/dev/kmsg` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically, and `/dev/kmsg` streams log records with a per-process cursor |
@@ -715,7 +729,7 @@ Which means:
   Quit with `Esc` then `2` to reach the QEMU monitor, or `Ctrl-A X` under `-nographic`.
 - **Serial output goes to `kernel_log.txt`**, not to the terminal. That file is
   where `klog` output lands; tail it in another shell while the OS runs.
-- Bootable CD-ROM from the generated ISO, plus a 2 MB raw disk image on the
+- Bootable CD-ROM from the generated ISO, plus a raw disk image on the
   primary IDE channel.
 - No `-m` flag is passed, so QEMU's default for i386 applies — 128 MB, which is
   what the PMM reports at boot.
@@ -1270,7 +1284,7 @@ register `SIG_IGN` for it first and then check the return value.
 | 22 | `RM_FILE` | Delete a file |
 | 23 | `MV_FILE` | Rename a file |
 | 26 | `MKDIR` | Create a directory |
-| 28 | `LS_DIR` | List directory contents |
+| ~~28~~ | — | Was `LS_DIR`; removed in v0.10.0. It printed a listing from the kernel and had no caller left after v0.9.2 moved `ls` onto `READDIR`. The number is left free until the ABI is frozen |
 | 29 | `GET_DIR_ID` | Resolve directory path to ID |
 | 34 | `READ_RAW` | Read an open file's stored bytes, without decrypting them. `read()` against the stored form: same descriptor, same offset, same shape |
 | 44 | `READDIR` | Read directory entries into user buffer |
@@ -1444,7 +1458,8 @@ The following are known constraints of the current implementation. These are doc
 | Files in directory table | 512 (`MAX_FILES_IN_DIR`) |
 | Maximum filename length | 64 bytes (`MAX_FILENAME`) |
 | Maximum path length | 256 bytes (`MAX_PATH`) |
-| Maximum disk size (FAT) | 2 MB (4096 sectors) |
+| Maximum disk size (FAT) | 16 MB (4096 clusters of 8 sectors) |
+| Allocation unit | 4 KB (`FS_CLUSTER_SECTORS`, 8 sectors) |
 | Physical memory supported | 128 MB |
 | Pipe buffer size | 4 KB (`PIPE_SIZE`) |
 | Pipes, system-wide | 16 (`MAX_SYSTEM_PIPES`, shared by named and anonymous) |
@@ -1595,10 +1610,9 @@ Near-term priorities for the project, roughly in order:
 
 | Priority | Item |
 |----------|------|
-| P1 | Bounded string operations throughout user space |
+| P1 | `mount` and `umount`, so the second partition the table makes room for can be used |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
-| P2 | Validating the directory table on mount, so a crafted image cannot present a cycle |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1619,7 +1633,9 @@ which landed in v0.8.0 and had been sitting here as a P3 for two releases after 
 the on-disk format, which grew a superblock, timestamps, an owner group and permission
 bits in v0.9.0; enforcing those bits, which retired the last of the name comparisons in
 v0.9.1; and setting the clock, which v0.9.2 added along with clearing out the commands
-that printed their output from inside the kernel. Two more left this list in v0.9.3: the
+that printed their output from inside the kernel. Three more went in v0.10.0: bounded string
+operations in user space, validating the directory table on mount, and the disk growing
+past 2 MB - which needed clusters rather than the partition table it arrived with. Two more left this list in v0.9.3: the
 entropy seed carried across boots, and `/var/log` — which had been sitting here as a P1
 since v0.6.1 did every part of it. The log wraps, it holds records rather than a
 transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; the row

@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4-alpha] - 2026-08-25
+
+A file's own mode decided nothing. `check_vfs_access()` was asked about the **directory**
+an operation happened in and never about the file, and no caller anywhere passed it a
+file's entry id — so `chmod 600 secret` was recorded, reported by `stat`, shown by
+`ls -l`, and stood between nobody and anything.
+
+The load-bearing case is `/etc/shadow`. It carries `0600` inside an `/etc` that carries
+`0755`, so on 0.9.1, 0.9.2 and 0.9.3 any account on the system could read the password
+database. That is a **regression rather than a gap**: 0.9.0 refused reads of `shadow` by
+comparing the name, and 0.9.1 retired the comparison — correctly — without replacing what
+it did. Both published releases now carry a banner. The hashes are salted
+PBKDF2-HMAC-SHA256, so what was exposed is hashes rather than passwords.
+
+### Fixed
+
+- **A file's own permission bits are consulted.** `check_file_access()` asks them, in
+  addition to the directory check rather than instead of it, and `open()` asks it for
+  read or for write depending on which the caller wanted — opening for writing truncates,
+  so it is a write. `/etc/shadow` is now readable by root alone, which is what its mode
+  has claimed since 0.9.0.
+
+- **Three name comparisons were still in the VFS, below the syscall layer.**
+  `fs_create_file_raw()`, `fs_delete()` and `fs_rename()` each refused a non-root
+  operation on a file called `passwd` — anywhere on the system, so `touch /tmp/passwd`
+  was denied while `touch /tmp/shadow` was not, and no user could name a file in their
+  own home directory `passwd`. 0.9.1 retired the comparisons in `check_vfs_access()` and
+  these survived it because nobody looked below the syscalls. The mode says it properly
+  now: `/etc` is `0755` owned by root.
+
+### Added
+
+- **The execute bit decides what may be run.** It was decided by location — anything in
+  `/bin` for anybody, anything else for root alone — so executability was a property of
+  where a file sat rather than of the file, and the `x` bit stored on every entry since
+  0.9.0 meant nothing. `exec` asks for read and search on the directory and the execute
+  bit on the file, and nothing else.
+
+  **This opens something that was closed:** a user can run a program they wrote and
+  `chmod 755`'d. That is deliberate and it is the Unix arrangement. The ELF validator
+  still runs on every load, and a new process is granted nothing its parent lacked.
+
+  Everything in `/bin` is `0755` from the boot-time mode pass. That had to land in the
+  commit *before* the enforcement — the programs are written with the `0644` default and
+  no execute bit, so a kernel that asked for one first would boot to a shell that could
+  not launch a single command, on every existing disk.
+
+- **A sticky bit on `/tmp`, which is `01777`.** Write permission on a directory is
+  permission to remove things from it, so a world-writable `/tmp` was also a
+  world-deletable one — documented as a limitation since 0.9.1. Removal and renaming are
+  now restricted to the owner of the entry, the owner of the directory, and root.
+  Renaming is asked as well as removal; without that, renaming somebody else's file to a
+  name of your choosing would be the way around the rule.
+
+  The bit was always stored — the mode mask has been `07777` since 0.9.0 and `chmod`
+  accepts four octal digits — so what changed is that something reads it. `ls -l` renders
+  it as `t`, or `T` when the directory is sticky without being searchable by others.
+
+### Changed
+
+- **`rm` says why it failed.** 0.9.2 stopped it discarding the return value, so
+  `rm /nope && echo GONE` no longer prints `GONE`, but it still printed nothing at all
+  and left the exit status carrying the whole message. A trailing slash is the case that
+  showed why that matters: `rm /tmp/d/` resolves to an empty basename and is refused, and
+  the silence made it indistinguishable from having removed the directory.
+
+- **`rm` in `help` says it removes an empty directory too**, which it has done since
+  directories could be removed at all.
+
 ## [0.9.3-alpha] - 2026-08-25
 
 v0.9.0 widened an entry id from one byte to two, and the release notes for it said what

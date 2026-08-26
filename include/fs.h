@@ -95,6 +95,19 @@ typedef uint16_t fs_id_t;
 #define FS_MODE_PERM_MASK    07777
 
 /**
+ * @brief The sticky bit, in the position every Unix puts it.
+ *
+ * Set on a directory it means "write here, but what you wrote is yours to
+ * remove". Set on anything else it means nothing here and is stored without
+ * being consulted, which is the same treatment the set-user-id bits get: the
+ * mask has always been 07777, so a `chmod 1777` was already recorded before
+ * anything read it back.
+ *
+ * See fs_sticky_allows_removal() for the rule.
+ */
+#define FS_MODE_STICKY       01000
+
+/**
  * @brief On-disk file entry structure representing a file or directory.
  * Packed to ensure exact byte alignment on storage media.
  *
@@ -421,8 +434,12 @@ int fs_dir_exists(fs_id_t parent_id);
  *
  * Who may call this is decided by the caller - the syscall layer, alongside the
  * other access rules. What this owns is the mechanics: the lock, the ctime, and
- * getting the change onto the disk. Bits outside the permission mask are dropped
- * rather than stored; there are no set-user-id or sticky bits here to keep.
+ * getting the change onto the disk.
+ *
+ * Bits outside FS_MODE_PERM_MASK are dropped rather than stored. The mask is
+ * 07777 and always was, so the sticky bit has been kept here since v0.9.0 - the
+ * change in v0.9.4 is that something finally reads it. The set-user-id and
+ * set-group-id bits are still stored and still consulted by nothing.
  *
  * @param entry_id Entry to change.
  * @param mode New permission bits.
@@ -479,6 +496,46 @@ static inline int fs_mode_allows(uint16_t mode, uint32_t owner_uid, uint32_t own
 #define FS_WANT_READ  4
 #define FS_WANT_WRITE 2
 #define FS_WANT_EXEC  1
+
+/**
+ * @brief Whether a sticky directory lets this caller remove this entry.
+ *
+ * The sticky bit exists for one arrangement: a directory everybody may write in,
+ * where what you wrote is still yours. `/tmp` is `0777` without it, which means
+ * anyone may create a file there *and* anyone may delete somebody else's. Write
+ * permission on a directory is the permission to remove things from it, so
+ * without a second rule the two cannot be told apart.
+ *
+ * The rule is the Unix one, and the third clause is the part people forget: the
+ * directory's own owner may remove anything in it. That is what lets root - or
+ * whoever administers a shared directory - clean it out without owning every
+ * file inside.
+ *
+ * This is asked *in addition to* write permission on the directory, never
+ * instead of it. A caller refused by the mode is refused before this is
+ * consulted.
+ *
+ * Pure and in the header for fs_mode_allows()'s reason: permission logic that is
+ * wrong is wrong silently, so it has to be reachable from a test with no disk
+ * and no screen behind it.
+ *
+ * @param dir_mode Mode of the directory the entry lives in.
+ * @param dir_owner_uid Owner of that directory.
+ * @param entry_owner_uid Owner of the entry being removed or renamed.
+ * @param uid Caller's user id.
+ * @return 1 when the removal may proceed.
+ */
+static inline int fs_sticky_allows_removal(uint16_t dir_mode, uint32_t dir_owner_uid,
+                                           uint32_t entry_owner_uid, uint32_t uid) {
+    /* Not sticky: the directory's write bit already said everything. */
+    if (!(dir_mode & FS_MODE_STICKY)) return 1;
+
+    if (uid == 0) return 1;
+    if (uid == entry_owner_uid) return 1;
+    if (uid == dir_owner_uid) return 1;
+
+    return 0;
+}
 
 
 // --- Added by Refactor Script ---

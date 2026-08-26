@@ -132,15 +132,132 @@ static void run_mode_tests(void) {
                  "[PERM] /etc/passwd at 0644 is readable by one");
     KTEST_ASSERT(fs_mode_allows(0700, 0, 0, 1000, 1000, FS_WANT_EXEC) == 0,
                  "[STRICT] [PERM] /root at 0700 cannot even be entered");
-    KTEST_ASSERT(fs_mode_allows(0777, 0, 0, 1000, 1000, FS_WANT_WRITE | FS_WANT_EXEC) == 1,
-                 "[PERM] and /tmp at 0777 can be written in");
+    KTEST_ASSERT(fs_mode_allows(01777, 0, 0, 1000, 1000, FS_WANT_WRITE | FS_WANT_EXEC) == 1,
+                 "[PERM] and /tmp at 01777 can be written in, sticky bit and all");
+}
+
+/*
+ * The enforcement half. Declared here rather than included: these live in
+ * kernel/syscall/syscalls_internal.h, which is not on the test build's include
+ * path, and test_devfs.c reaches its internals the same way.
+ */
+extern int check_file_access(fs_id_t parent_id, const char *name, int want);
+extern int check_removal_access(fs_id_t parent_id, const char *name);
+
+/**
+ * @brief The bits actually decide, rather than merely being stored.
+ *
+ * run_mode_tests() above checks fs_mode_allows(), which is pure and was already
+ * right. This checks the thing that was missing: whether anything *asks* it
+ * about a file. Until v0.9.4 nothing did - check_vfs_access() was asked about
+ * the directory an operation happened in and never about the entry, so
+ * /etc/shadow carried 0600 inside an /etc carrying 0755 and every user on the
+ * system could read it. A test over the pure function could never have caught
+ * that, because the pure function was never wrong.
+ *
+ * Runs with a uid on the calling task and puts it back afterwards, as the
+ * authentication tests below do.
+ */
+static void run_enforcement_tests(void) {
+    printk("\n--- Security: the file's own bits ---\n");
+
+    if (current_task == 0) {
+        KTEST_ASSERT(0, "[PERM] a calling task is needed to have a uid to enforce against");
+        return;
+    }
+
+    uint32_t saved_uid = current_task->uid;
+    uint32_t saved_gid = current_task->gid;
+
+    int etc_idx = fs_get_entry_idx("etc", 0);
+    int bin_idx = fs_get_entry_idx("bin", 0);
+    int tmp_idx = fs_get_entry_idx("tmp", 0);
+
+    fs_id_t etc_id = (etc_idx >= 0) ? dir_table[etc_idx].entry_id : 0;
+    fs_id_t bin_id = (bin_idx >= 0) ? dir_table[bin_idx].entry_id : 0;
+    fs_id_t tmp_id = (tmp_idx >= 0) ? dir_table[tmp_idx].entry_id : 0;
+
+    KTEST_ASSERT(etc_idx >= 0 && bin_idx >= 0 && tmp_idx >= 0,
+                 "[PERM] /etc, /bin and /tmp are all present to test against");
+    if (etc_idx < 0 || bin_idx < 0 || tmp_idx < 0) return;
+
+    current_task->uid = 1000;
+    current_task->gid = 1000;
+
+    /* --- The one this release exists for --------------------------------- */
+
+    KTEST_ASSERT(check_file_access(etc_id, "shadow", FS_WANT_READ) == 0,
+                 "[STRICT] [PERM] a user is refused read on /etc/shadow by the file's own mode");
+    KTEST_ASSERT(check_file_access(etc_id, "passwd", FS_WANT_READ) == 1,
+                 "[PERM] and allowed on /etc/passwd, which carries no secrets");
+    KTEST_ASSERT(check_file_access(etc_id, "passwd", FS_WANT_WRITE) == 0,
+                 "[STRICT] [PERM] but not to write it - 0644 root-owned says so, not its name");
+
+    /* --- Execute is a bit now, not a directory --------------------------- */
+
+    KTEST_ASSERT(check_file_access(bin_id, "sh", FS_WANT_EXEC) == 1,
+                 "[PERM] /bin/sh carries an execute bit for everyone");
+
+    const char *probe = "modeprobe";
+    int created = fs_create_file(probe, (const uint8_t *)"x", 1, tmp_id);
+    KTEST_ASSERT(created == 0, "[PERM] a file was created in /tmp to change the mode of");
+
+    if (created == 0) {
+        int probe_idx = fs_get_entry_idx(probe, tmp_id);
+        fs_id_t probe_entry = (probe_idx >= 0) ? dir_table[probe_idx].entry_id : 0;
+
+        KTEST_ASSERT(probe_idx >= 0 && dir_table[probe_idx].owner_uid == 1000,
+                     "[PERM] and it belongs to the user that created it");
+
+        KTEST_ASSERT(check_file_access(tmp_id, probe, FS_WANT_EXEC) == 0,
+                     "[STRICT] [PERM] a 0644 file is not executable, which is the point of the bit");
+
+        fs_chmod(probe_entry, 0755);
+        KTEST_ASSERT(check_file_access(tmp_id, probe, FS_WANT_EXEC) == 1,
+                     "[STRICT] [PERM] and chmod 755 makes it so - a user can run what they wrote");
+
+        /* --- Sticky, through the syscall layer's own helper --------------- */
+
+        KTEST_ASSERT(check_removal_access(tmp_id, probe) == 1,
+                     "[PERM] the owner may remove their own file from a sticky /tmp");
+
+        current_task->uid = 1001;
+        current_task->gid = 1001;
+        KTEST_ASSERT(check_removal_access(tmp_id, probe) == 0,
+                     "[STRICT] [PERM] another user may not, though /tmp is writable by both");
+        KTEST_ASSERT(check_file_access(tmp_id, probe, FS_WANT_READ) == 1,
+                     "[PERM] and can still read it, because 0755 lets them - removal is the separate question");
+
+        current_task->uid = 0;
+        current_task->gid = 0;
+        KTEST_ASSERT(check_removal_access(tmp_id, probe) == 1,
+                     "[STRICT] [PERM] root is not subject to the sticky bit either");
+
+        /*
+         * A name nothing answers to is allowed through. The caller's own lookup
+         * reports E_NOENT with better information than these functions have, and
+         * two places deciding what a missing file is would eventually disagree.
+         */
+        current_task->uid = 1000;
+        KTEST_ASSERT(check_file_access(tmp_id, "nothing_here", FS_WANT_WRITE) == 1,
+                     "[PERM] a name that does not exist is left for the caller's lookup to refuse");
+
+        current_task->uid = 0;
+        fs_delete(probe, tmp_id);
+        KTEST_ASSERT(fs_get_entry_idx(probe, tmp_id) < 0,
+                     "[PERM] and the module leaves nothing behind in /tmp");
+    }
+
+    current_task->uid = saved_uid;
+    current_task->gid = saved_gid;
 }
 
 void run_security_tests(void) {
     printk("\n--- Security and Authorization Tests ---\n");
 
     run_mode_tests();
-    
+    run_enforcement_tests();
+
     int original_uid = 0;
     if (current_task != 0) {
         original_uid = current_task->uid;

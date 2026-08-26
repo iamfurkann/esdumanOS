@@ -3,6 +3,10 @@
 
 #include "types.h"
 #include "registers.h"
+/* For fs_id_t: the access checks below name directory entries, and a header that
+ * declares them should carry the type rather than rely on every .c file having
+ * included fs.h first - which sys_utils.c does not, it includes this one first. */
+#include "fs.h"
 
 // sys_utils.c
 /** @brief Validates if a user-space pointer is safe to access */
@@ -15,8 +19,13 @@ int validate_string_pointer(const char *str, size_t max_len);
 int validate_fd(int fd);
 /** @brief Resolves a VFS path to a directory ID and extracts the basename */
 int vfs_resolve_path(const char *path, int start_dir_id, char *basename);
-/** @brief Checks if the current task has permission to access a VFS entry */
+/** @brief Checks if the current task has permission to use a directory */
 int check_vfs_access(int entry_id, int needs_write);
+/** @brief Checks a named entry's own permission bits; asked as well as, not instead of,
+ *  check_vfs_access() */
+int check_file_access(fs_id_t parent_id, const char *name, int want);
+/** @brief Checks the sticky rule for removing or renaming a named entry */
+int check_removal_access(fs_id_t parent_id, const char *name);
 /** @brief Prints a hex dump of memory at the specified address */
 /**
  * @brief Renders a hex dump into a buffer.

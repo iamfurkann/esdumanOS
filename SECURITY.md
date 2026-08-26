@@ -8,9 +8,12 @@
 | 0.8.x   | :x:                |
 | ≤ 0.7.x | :x:                |
 
-Within 0.9.x, use **0.9.1 or later**. 0.9.0 stores permission bits and enforces none of
-them, and it creates `/etc/shadow` with the default `0644`; 0.9.1 both enforces the bits
-and corrects that file's mode on every boot, including on a disk written by 0.9.0.
+Within 0.9.x, use **0.9.4 or later**, and this one is not a preference. On every release
+from 0.9.0 to 0.9.3 inclusive, `/etc/shadow` can be read by any account on the system —
+0.9.0 because it enforced no permission bits at all and created the file `0644`, and
+0.9.1 through 0.9.3 because they enforced the bits on directories only and never on the
+file. 0.9.4 asks the file's own mode and closes it. The hashes are salted
+PBKDF2-HMAC-SHA256 throughout, so what was exposed is hashes rather than passwords.
 
 Only the current minor line is supported. This table said 0.4.x for five minor
 releases; it is the current line that matters, and it is 0.9.x.
@@ -59,12 +62,9 @@ described inaccurately is worse than one described plainly — in either directi
   The seed buys distinctness between boots. It does not turn `ENTROPY_WEAK` into
   `ENTROPY_OK` and is not treated as if it could.
 - The seed file is created `0600` and owned by root, and the boot-time pass puts that
-  mode back if it drifts — the same treatment `/etc/shadow` gets. What that bit is worth
-  is bounded by how this system decides access: `check_vfs_access()` is asked about the
-  **directory** an operation happens in, not about the file, so a mode on a file is
-  recorded and reported rather than standing between a reader and its contents. `/var`
-  is `0755`. The seed is not a secret this system can currently keep, and it is written
-  down here that way rather than assumed.
+  mode back if it drifts — the same treatment `/etc/shadow` gets. As of 0.9.4 that bit is
+  worth something: `check_file_access()` asks it before an open succeeds. On 0.9.3 it was
+  not, because nothing consulted a file's own mode — see **File access control** below.
 
 ### Memory and process protection
 
@@ -84,18 +84,34 @@ described inaccurately is worse than one described plainly — in either directi
 
 ### File access control
 
-- **Permission bits decide access as of 0.9.1.** Every entry carries a mode, an owner
-  and a group, and `check_vfs_access()` reads them: search permission on every directory
-  above the entry, then read or write on the directory the operation happens in, with
-  the matching class — owner, group, other — deciding on its own and no fallthrough to
-  the next. Until 0.9.1 this compared names, so a file's permissions were a property of
-  what it was called and renaming one changed who could touch it.
+- **Permission bits decide access, and both halves are asked as of 0.9.4.**
+  `check_vfs_access()` handles the directories: search permission on every directory
+  above the entry, then read or write on the directory the operation happens in.
+  `check_file_access()` then asks the entry's own bits the same question. The matching
+  class — owner, group, other — decides on its own, with no fallthrough to the next.
+- **Between 0.9.1 and 0.9.3 a file's own mode was not consulted at all**, and that was a
+  regression rather than a gap. 0.9.0 refused reads of `shadow` by a name comparison;
+  0.9.1 retired the comparison — correctly, since a file's permissions should not be a
+  property of what it is called — and put a directory-level check in its place. The
+  result was that `/etc/shadow` carried `0600` inside an `/etc` carrying `0755` and any
+  user could read it. **On 0.9.1, 0.9.2 and 0.9.3 the password hashes are readable by
+  every account on the system.** They are salted PBKDF2-HMAC-SHA256, so what is exposed
+  is hashes rather than passwords. Both published releases carry a banner saying so.
+- **The execute bit decides what may be run, as of 0.9.4.** Before that it was decided by
+  location: anything in `/bin` for anybody, anything else for root alone. A user can now
+  run a program they wrote and `chmod 755`'d, which is the Unix arrangement — the ELF
+  validator still runs on every load and a new process gets nothing its parent lacked.
+- **The sticky bit is enforced, as of 0.9.4.** `/tmp` is `01777`: writable by everyone,
+  and removal or renaming restricted to the owner of the entry, the owner of the
+  directory, and root. Write permission on a directory is otherwise permission to remove
+  anything in it.
 - **A read asks for read *and* search on the directory.** Unix allows a `0711` directory
   to be searched without being listed; this check is not told whether its caller is
   about to list or to look up a known name, so it asks for both. Stricter than Unix,
   never looser.
-- **There is no sticky bit.** `/tmp` is `0777`, so a user can delete another user's file
-  there. Restricting deletion to the owner is a separate mechanism this does not have.
+- **The set-user-id and set-group-id bits are stored and enforced by nothing.** They can
+  be set and read back, and no program has ever run as anyone but the user who launched
+  it. There is no plan to implement them.
 - **There is no group database.** A task's group id follows its user id, so a file's
   group is always its owner's. The group bits are read and honoured, but nothing can put
   two users in one group for them to mean anything.
@@ -151,7 +167,6 @@ Security fixes will be prioritized and released as patch versions when applicabl
 Please note that as a hobby/educational OS kernel, the security model is intentionally simplified. Reports about the known limitations listed above will be acknowledged but may not result in immediate changes.
 
 We welcome contributions that improve the security posture of esdumanOS. Currently open:
-- A sticky bit, so `/tmp` being world-writable does not also make it world-deletable
 - Deriving the disk key from a boot passphrase instead of a build-time constant
 - Adding stack canaries, in the kernel and in user-space programs
 - Implementing ASLR
@@ -160,6 +175,8 @@ We welcome contributions that improve the security posture of esdumanOS. Current
 
 Already done, so no longer needed: per-user password salting (PBKDF2-HMAC-SHA256 with a
 16-byte salt); the entropy pool (interrupt-jitter sourced, with per-source budgets and
-an honest quality verdict); enforcing the permission bits, which in 0.9.1 retired the
-last of the name comparisons in `check_vfs_access()`; and persisting an entropy seed
-across boots, which 0.9.3 added — for distinctness between boots, not for quality.
+an honest quality verdict); enforcing the permission bits, which took two releases —
+0.9.1 for the directories and 0.9.4 for the files themselves, the latter also retiring
+three name comparisons still hiding in the VFS below the syscall layer; a sticky bit on
+`/tmp`, which 0.9.4 added along with them; and persisting an entropy seed across boots,
+which 0.9.3 added — for distinctness between boots, not for quality.

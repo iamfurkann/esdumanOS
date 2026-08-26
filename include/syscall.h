@@ -27,6 +27,14 @@
  * report a child that stopped as well as one that exited. With the blocking form
  * there is no pid to name, so a stopped foreground command could not be brought
  * back.
+ *
+ * Who may run what is decided by the file's execute bit as of v0.9.4, plus read
+ * and search permission on the directory holding it. Before that it was decided
+ * by location: anybody could run a program in /bin, and root alone could run one
+ * anywhere else - so executability was a property of where a file sat rather
+ * than of the file, and the `x` bit stored on every entry since v0.9.0 meant
+ * nothing. A user can now run a program they wrote and chmod'ed themselves,
+ * which is the Unix arrangement and is deliberate.
  */
 #define SYSCALL_EXEC            5
 
@@ -298,10 +306,16 @@
  * which is the same rule every Unix applies and for the same reason: a mode a
  * stranger can rewrite is not a permission, it is a suggestion.
  *
- * The bits above the permission mask are ignored rather than refused. There are
- * no set-user-id or sticky bits here yet, and a caller that sets one is asking
- * for something this system has no meaning for - silently keeping only what
- * exists is kinder than an error nobody can act on.
+ * The sticky bit, 01000, means what it means everywhere as of v0.9.4: set on a
+ * directory it restricts removal to the owner of each entry, the owner of the
+ * directory, and root. `chmod 1777 /tmp` is the arrangement it exists for. It
+ * was always stored - the mask has been 07777 since v0.9.0 - and what changed is
+ * that something reads it.
+ *
+ * The set-user-id and set-group-id bits are still kept and still consulted by
+ * nothing. A caller that sets one is asking for something this system has no
+ * meaning for, and silently keeping only what exists is kinder than an error
+ * nobody can act on.
  */
 #define SYSCALL_CHMOD           64
 

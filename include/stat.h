@@ -66,9 +66,13 @@ typedef struct {
     /**
      * Permission bits.
      *
-     * Recorded, reported, and consulted: check_vfs_access() has decided by these
-     * bits rather than by file names since v0.9.1. What is reported here is what
-     * the system actually enforces.
+     * Recorded, reported, and consulted. check_vfs_access() has decided a
+     * directory's permissions by these bits rather than by file names since
+     * v0.9.1, and check_file_access() has asked the same of the file itself
+     * since v0.9.4 - before which a mode on a file was reported here and read by
+     * nothing. What is shown is what the system enforces.
+     *
+     * Includes the sticky bit, 01000, which is meaningful on a directory.
      */
     uint16_t st_mode;
 

@@ -343,6 +343,18 @@ inside the same RTC second are no longer indistinguishable. It buys that and not
 else — the seed is credited no entropy, and a pool that reports `ENTROPY_WEAK` still
 reports it.
 
+v0.9.4 makes a file's own mode decide. Until now nothing read it: `check_vfs_access()`
+was asked about the directory an operation happened in and never about the file, so
+`/etc/shadow` carried `0600` inside an `/etc` that carried `0755` and any user on the
+system could read it. That was a regression rather than a gap — v0.9.0 refused reads of
+`shadow` by name, and v0.9.1 retired the name comparison without replacing what it did.
+`chmod 600` means something now. So does the execute bit, which decides what may be run
+instead of the directory a program happens to sit in, and so does the sticky bit on
+`/tmp`, which is `01777` and lets a shared directory be shared without letting anyone
+empty it. Three more name comparisons went with them, hidden below the syscall layer in
+the VFS, where a file called `passwd` could not be created, deleted or renamed anywhere
+on the system — including in your own home directory.
+
 It remains an early development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -855,15 +867,26 @@ Modes are octal only — no `u+x`. `chmod` is the owner's and root's; `chown` is
 alone, because giving a file away is how a user escapes a quota on a system that has
 one, and this restriction is easier to keep than to add back.
 
-The rule is the Unix one. Reaching a file needs search permission on every directory
-above it, and the operation then needs read or write on the directory it happens in.
-The matching class decides and only that class: an owner with no permission is refused
-rather than falling through to the group bits, which is what makes `chmod 077` mean
-what it says.
+The rule is the Unix one, and it is asked twice. Reaching a file needs search permission
+on every directory above it and read or write on the directory the operation happens in;
+then the file's own bits are asked the same question. The matching class decides and only
+that class: an owner with no permission is refused rather than falling through to the
+group bits, which is what makes `chmod 077` mean what it says.
+
+The execute bit decides what may be run. Before v0.9.4 that was decided by location —
+anything in `/bin` for anybody, anything else for root alone — so a program's
+executability was a property of where it sat. A program you wrote and `chmod 755`'d runs.
+
+`/tmp` is `01777`. The sticky bit is what makes a world-writable directory survivable:
+write permission on a directory is permission to remove things from it, so without it
+anyone could delete anyone else's temporary file. With it, removal and renaming are
+restricted to the owner of the entry, the owner of the directory, and root. `ls -l` shows
+it as `t` in the last position.
 
 The system's own paths are set at boot and put back if they drift: `/etc/shadow` and
-`/var/random-seed` are `0600`, `/tmp` is `0777`, `/root` is `0700`, and the rest of the
-top level is `0755`. Files are created `0644` and directories `0755`.
+`/var/random-seed` are `0600`, `/tmp` is `01777`, `/root` is `0700`, everything in `/bin`
+is `0755`, and the rest of the top level is `0755`. Files are created `0644` and
+directories `0755`.
 
 ### The Editor
 
@@ -1460,10 +1483,12 @@ The following are known constraints of the current implementation. These are doc
   default action for an unhandled signal is applied on the way out of a syscall, so a
   task spinning without one keeps its pending signal until it makes its next call. A
   registered handler is delivered at the next context switch either way.
-- **There is no sticky bit on `/tmp`.** It is `0777`, so anyone may write in it — and
-  anyone may delete what somebody else wrote there. Real systems set the sticky bit to
-  restrict deletion to the owner; that is a separate mechanism and this does not have
-  it yet.
+- **There are no set-user-id or set-group-id bits.** They are stored — the mode mask has
+  always been `07777` — and nothing consults them, so a program cannot run as anyone but
+  whoever launched it. The sticky bit was in the same position until v0.9.4 and is now
+  enforced; these two are not, and there is no plan for them: a system with no `x`-only
+  binaries and a compiled-in disk key has nothing to gain from privilege elevation it
+  cannot also protect.
 - **A read asks for both read and search permission on the directory.** Unix lets a
   `0711` directory be searched without being listed, so a caller can open a file whose
   name it already knows. `check_vfs_access()` is not told which of the two its caller is
@@ -1573,7 +1598,7 @@ Near-term priorities for the project, roughly in order:
 | P1 | Bounded string operations throughout user space |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
 | P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
-| P2 | A sticky bit on `/tmp`, so a user cannot delete another user's temporary file |
+| P2 | Validating the directory table on mount, so a crafted image cannot present a cycle |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1598,7 +1623,8 @@ that printed their output from inside the kernel. Two more left this list in v0.
 entropy seed carried across boots, and `/var/log` — which had been sitting here as a P1
 since v0.6.1 did every part of it. The log wraps, it holds records rather than a
 transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; the row
-outlived the work by five releases.
+outlived the work by five releases. And the sticky bit on `/tmp`, which v0.9.4 added
+alongside the other half of the permission enforcement: the file's own mode.
 
 ---
 

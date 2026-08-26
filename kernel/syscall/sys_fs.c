@@ -713,33 +713,6 @@ void sys_mkdir(arch_regs_t *regs) {
 }
 
 /**
- * @brief Lists a directory named by entry id.
- *
- * The id arrives in ebx and is an fs_id_t, not a byte. It was narrowed to one
- * here, which v0.9.0 made wrong the moment the table grew to 512 entries: an id
- * of 256 became 0, so the permission check was asked about the root and the
- * listing that followed was the root's. The two halves agreed with each other,
- * which is why nothing looked broken, and neither agreed with what the caller
- * had named.
- *
- * An id no entry can hold is refused rather than listed as empty. Nothing in the
- * table can answer to it, and "no such directory" is what that means - an empty
- * listing would claim the directory exists and has nothing in it.
- */
-void sys_ls_dir(arch_regs_t *regs) {
-    if (regs->ebx >= (uint32_t)MAX_FILES_IN_DIR) { regs->eax = E_NOENT; return; }
-
-    fs_id_t dir_id = (fs_id_t)regs->ebx;
-
-    if (!check_vfs_access(dir_id, 0)) {
-        klog(LOG_LEVEL_WARN, "SYSCALL", "ls: Permission denied");
-        regs->eax = E_ACCES; return;
-    }
-    fs_list_dir(dir_id);
-    regs->eax = E_OK;
-}
-
-/**
  * @brief Resolves a path to a directory entry id, relative to a base directory.
  *
  * Shared by sys_get_dir_id() and sys_chdir(), which need exactly the same

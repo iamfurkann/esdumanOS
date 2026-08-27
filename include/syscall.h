@@ -1,6 +1,51 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 
+/*
+ * ==========================================================================
+ * THE SYSCALL NUMBERS BELOW ARE FROZEN AS OF v1.0.0.
+ * ==========================================================================
+ *
+ * Frozen means one thing and it is worth being exact about, because the wrong
+ * reading of it held this release up for two minor versions: no number already
+ * assigned here changes its value, changes its meaning, or is given to a
+ * different call. It does not mean the table is closed. New calls may be added,
+ * and mount()/umount() are expected to be the next ones.
+ *
+ * Three rules follow from that, and they are the whole of the contract:
+ *
+ *   1. New calls continue from 68. Not from the lowest free number - from the
+ *      highest assigned one.
+ *
+ *   2. The holes are never filled. 11 (CAT_FILE) and 28 (LS_DIR) held calls that
+ *      were removed; 30, 31 and 32 were reserved for a crypto API that was never
+ *      designed and never will be under that reservation; 99 held YIELD until
+ *      v1.0.0 moved it to 67. Every one of them stays empty for good. A number
+ *      that once meant something and now means something else is the one failure
+ *      a frozen ABI exists to prevent, and a reservation nobody redeemed is not
+ *      a promise worth keeping to the point of burning three numbers on it.
+ *
+ *   3. Numbers >= 200 are reserved for calls that only exist in test builds.
+ *      SYSCALL_KTEST_REPORT is the only one today. Production kernels answer
+ *      E_NOSYS across the whole band, so nothing there can become load-bearing
+ *      by accident.
+ *
+ * What enforces this is tests/kernel/test_abi.c, not this comment. Every number
+ * in this file is asserted there by literal value, and so are the errno codes,
+ * the flag constants and the security levels - because a syscall number is
+ * written down in four places that no compiler compares: here, as a literal in
+ * the sources under apps/bin, as a literal string in
+ * tests/host/c/test_elf_sast.c, and in
+ * README.md's table. Prose saying "these do not change" would have done nothing
+ * about any of them. A test fails.
+ *
+ * Not frozen, and deliberately: the struct layouts that cross the boundary have
+ * their own size assertions in test_regression.c, and the limits documented in
+ * README are limits rather than promises. esd_stat_t's timestamps are seconds
+ * since the Unix epoch in a uint32_t and run out in 2106; that is a documented
+ * limit of this ABI, not a defect waiting to be fixed in it.
+ */
+
 /**
  * @brief Encoded length of the syscall trap instruction (int 0x80 is CD 80).
  *
@@ -9,8 +54,15 @@
  * place that assumption lives: syscall_handler() converts it into a recorded
  * entry address once, and every blocking site uses that recorded value instead
  * of subtracting from EIP itself.
+ *
+ * Named SYSCALL_TRAP_INSN_LEN rather than SYSCALL_INSN_LEN because it is not a
+ * syscall number and used to look exactly like one - it sat in this file, in the
+ * SYSCALL_* namespace, holding the value 2, which is also SYSCALL_IPC_SEND. Any
+ * reader or script counting the numbers in this header by their prefix got 2
+ * twice and one entry too many; that is how the count came out as 65 when the
+ * table has 62 production calls in it.
  */
-#define SYSCALL_INSN_LEN 2
+#define SYSCALL_TRAP_INSN_LEN 2
 
 /** @brief Terminate current process */
 #define SYSCALL_EXIT            1
@@ -44,8 +96,24 @@
 #define EXEC_NOWAIT             1
 /** @brief Set process scheduling priority */
 #define SYSCALL_SET_PRIORITY    7
-/** @brief Yield CPU to another process */
-#define SYSCALL_YIELD           99
+/**
+ * @brief Yield the CPU to another process.
+ *
+ * 67 as of v1.0.0. It was 99 from the beginning - far outside the run every
+ * other call sits in, for no reason anybody recorded, which is the shape of a
+ * placeholder that was never revisited. Moving it is an ABI break and v1.0.0 was
+ * the last moment one was permitted; leaving it would have frozen the outlier in
+ * place for the life of the project, and 99 is now a hole like any other.
+ *
+ * It had exactly two callers and both are in this tree, which is what made the
+ * move affordable: init's idle loop, which names the constant, and the idle task
+ * itself - whose Ring 3 loop is assembled byte by byte in init_multitasking().
+ * That one used to carry the number as a literal 0x63 in the instruction stream,
+ * where no compiler could see it disagree with this line. It is built from this
+ * constant now, and that change had to land before this one: a stale byte there
+ * does not fail a test, it stops the machine booting.
+ */
+#define SYSCALL_YIELD           67
 
 /** @brief Read from a file descriptor */
 #define SYSCALL_READ            3
@@ -71,8 +139,8 @@
  * the file and writes it itself, which is why `cat` worked and this did not.
  * Dead and wrong at once.
  *
- * The number is left free rather than reused. What becomes of it is part of
- * freezing the ABI at 1.0, along with the gap at 99 where YIELD sits.
+ * The number is retired, not free: v1.0.0 froze the rule that a hole is never
+ * filled. See the contract at the top of this file.
  */
 /** @brief Remove a file */
 #define SYSCALL_RM_FILE         22
@@ -92,8 +160,8 @@
  * v0.9.3 found that out by looking rather than by reading the comment.
  *
  * The same position CAT_FILE was in when v0.9.2 removed it, and the number gets
- * the same treatment: left free rather than reused. What becomes of 11 and 28 is
- * part of freezing the ABI at 1.0, along with the gap at 99 where YIELD sits.
+ * the same treatment: retired rather than reused. v1.0.0 made that a rule rather
+ * than a habit - see the contract at the top of this file.
  */
 /** @brief Get directory ID */
 #define SYSCALL_GET_DIR_ID      29
@@ -112,24 +180,25 @@
 /** @brief Receive IPC message */
 #define SYSCALL_IPC_RECEIVE     6
 /**
- * @brief Arms the demonstration timer. Not an alarm(2), despite the name.
+ * @brief Arm, re-arm or cancel the caller's alarm; ebx is a count of seconds.
  *
- * It said "set an alarm signal", which is three promises it does not keep: it
- * takes no duration - ebx, ecx and edx are read by nothing - it delivers no
- * signal, and it does not concern the calling process at all. What it does is
- * schedule kernel timer slot 1 for a fixed three seconds, at which point the
- * kernel prints a green line on the console.
+ * Returns the seconds left on the previous alarm, or 0 when there was none, so a
+ * caller that had to displace one can put it back. Zero cancels and still
+ * reports. An interval past what a signed tick difference can name - a little
+ * under 249 days at TIMER_HZ - is refused with E_INVAL rather than clamped.
  *
- * That is a demonstration of the timer bottom-half, and it is the last thing in
- * the table that prints from inside the kernel on a caller's behalf - the class
- * v0.9.2 otherwise cleared out.
+ * SIG_ALRM arrives when the deadline passes and terminates the process by
+ * default, which is POSIX's choice: a bound whose default is to be ignored is
+ * not a bound. A caller that means to survive its own alarm registers a handler
+ * with SIGNAL_REG.
  *
- * Its only caller is the shell's `alarm` builtin, which is one of the four not
- * offered by help or Tab-completion. **What becomes of this number is part of
- * freezing the ABI at 1.0**, alongside the free numbers at 11 and 28 and the gap
- * at 99: it can be made into a real alarm(seconds) that raises SIGALRM, removed
- * the way CAT_FILE and LS_DIR were, or frozen as what it is. Freezing it under
- * the old description was the one option worth ruling out.
+ * This was not an alarm before v1.0.0, and the entry here said it was. It read
+ * none of its arguments, sent no signal, and had no relation to the caller - it
+ * armed kernel timer slot 1 for a fixed three seconds and let the kernel print a
+ * green line, which made it the last call in this table that produced output
+ * from Ring 0 on a caller's behalf. The number was one of the four things v1.0.0
+ * had to settle before freezing, and it was settled by making the call mean what
+ * its name had been claiming.
  */
 #define SYSCALL_ALARM           18
 /** @brief Register a signal handler */
@@ -155,7 +224,19 @@
 /** @brief Halt the system */
 #define SYSCALL_HALT            21
 
-// Syscall numbers 30-32 are reserved for future crypto API.
+/*
+ * 30, 31 and 32 were "reserved for future crypto API" and are retired.
+ *
+ * The reservation was made before v0.5 and nothing was ever designed to fill it:
+ * no interface, no caller, no note saying what the three calls would have been.
+ * v0.10.1 removed an AES-256 interface from crypto.h that had been declared and
+ * never implemented, which is the same reservation in another form and is the
+ * argument against keeping this one.
+ *
+ * Retired rather than released back for general use, because the freeze has one
+ * rule about holes and three numbers are not worth making it two rules. A crypto
+ * API, if it is ever built, continues from 68 like anything else.
+ */
 /** @brief Set system security level */
 #define SYSCALL_SET_SEC_LEVEL   33
 /**
@@ -378,7 +459,11 @@
 //
 // Present in every build so user-space test payloads compile against a single
 // header, but only serviced when the kernel was linked with the test modules
-// AND booted with kernel_pass=selftest. Production kernels answer-ENOSYS.
+// AND booted with kernel_pass=selftest. Production kernels answer E_NOSYS.
+//
+// The whole band from 200 up is reserved for this, frozen alongside the rest -
+// so a production call can never be given a number a test payload might already
+// be calling, and a test build can add one without consulting the table above.
 // ==========================================================
 /** @brief Report one Ring 3 self-test result to the kernel test framework */
 #define SYSCALL_KTEST_REPORT    200

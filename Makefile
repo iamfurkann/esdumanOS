@@ -86,6 +86,7 @@ CORE_SRCS = kernel/core/kernel.c \
 CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SRCS = tests/kernel/selftest.c \
+            tests/kernel/test_abi.c \
             tests/kernel/test_string.c \
             tests/kernel/test_memory.c \
             tests/kernel/test_pipe.c \
@@ -243,11 +244,23 @@ ISO = esdumanOS-v$(OS_VERSION).iso
 # cli;hlt and never reaches isa-debug-exit, so without this the run hangs instead
 # of failing. Raise it if PBKDF2_DEFAULT_ITERATIONS makes first boot slower.
 #
+# 600 as of v1.0.0, from 300. The suite grew past the old budget: v1.0.0 added
+# test_abi, which is 131 assertions on its own, and the run reported "KERNEL
+# HUNG! No verdict within 300s" while still making normal progress through the
+# Ring 3 payload. That message names the wrong thing when the cause is the
+# budget rather than the kernel, and the failure it produces is
+# indistinguishable from a real hang until you look at where the output stopped.
+#
+# Worth watching rather than raising again by reflex. A suite that keeps
+# outgrowing this is a suite whose per-assertion cost is worth measuring; the
+# serial console is the slow part, and every assertion writes a line to it
+# whether it passes or fails.
+#
 # NOTE: the callers must use "timeout --foreground". Without it GNU timeout puts
 # QEMU in its own process group, and QEMU's -serial stdio chardev then takes
 # SIGTTOU from tcsetattr() and stops before the CPU ever starts - which looks
 # exactly like a kernel hang, but with an empty -D log and no serial output.
-QEMU_TEST_TIMEOUT ?= 300
+QEMU_TEST_TIMEOUT ?= 600
 
 # PBKDF2 cost used by self-test builds.
 #

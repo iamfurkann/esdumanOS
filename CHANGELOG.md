@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.1] - 2026-08-27
+
+The system call interface is frozen. No number already assigned changes its value or its
+meaning, retired numbers are never reused, and new calls continue from 68 — which means
+`mount` and `umount` are not blocked by this and never were. The reasoning that had
+deferred the freeze behind them was wrong: freezing stops numbers from changing meaning
+and says nothing about adding new ones. What the freeze did have to wait for was the
+on-disk format and the shared structures, and those settled in v0.10.0 and v0.10.1.
+
+### Added
+
+- **`tests/kernel/test_abi.c`, which is what the freeze actually is.** All 62 syscall
+  numbers asserted by literal value, the 34 error codes, the `exec`/`wait`/`lseek`/
+  `klog_ctl` constants, the signal numbers, the security levels, and the retired numbers
+  driven through the dispatcher to confirm they still answer `E_NOSYS`. A syscall number
+  is written down in four places no compiler compares — the header, the freestanding
+  programs under `apps/bin`, the literal strings the static analyser greps for, and the
+  table in README — so only the kernel would have noticed one changing. A comment
+  promising they would not change would have protected none of them.
+
+- **A real `alarm(seconds)`, and `SIGALRM` (14) to go with it.** `ebx` is a count of
+  seconds and 0 cancels; the return is the seconds left on any alarm it displaced, so a
+  caller can put back what it had to move. The deadline lives in the caller's process
+  control block, which is the only place it could live: the kernel timer slots are global
+  and hold a bare `void(*)(void)`, so they carry no pid to signal. `SIGALRM` terminates by
+  default, as POSIX has it — a bound whose default is to be ignored is not a bound.
+
+### Changed
+
+- **`YIELD` moved from 99 to 67.** It had sat outside the run every other call lives in
+  since the first release, for no reason anybody recorded, which is the shape of a
+  placeholder nobody revisited. Moving it is an ABI break and v1.0.0 was the last moment
+  one was permitted. 99 is retired.
+
+- **The idle task builds its syscall number from the constant.** Its Ring 3 loop is
+  assembled byte by byte in `init_multitasking()`, and the number was a literal `0x63`
+  with "mov eax, 99" in the comment beside it — the whole of what tied the scheduler's
+  fallback task to the call it makes. This had to land before `YIELD` could move: a stale
+  byte there does not fail a test, it stops the machine booting. The loop's length is
+  taken from the array now too, instead of a hand-written 9.
+
+- **`SYSCALL_INSN_LEN` is `SYSCALL_TRAP_INSN_LEN`.** It is not a syscall number, it sat
+  in the `SYSCALL_*` namespace, and it held the value 2 — which is also `SYSCALL_IPC_SEND`.
+  Anything counting the numbers in that header by their prefix counted it and got 65 calls
+  where there are 62.
+
+- **The idle task's pending-signal mask is cleared entirely rather than by name.** It
+  listed six signals, which was correct only while those were all the signals with a
+  default action; adding `SIGALRM` would have left its bit set forever on the one task
+  that can never act on it, with nothing to fail. The question being answered is "this
+  task cannot act on any signal".
+
+- **Version is `1.0.0-beta.1`.** The `-alpha` suffix had been carried since v0.2.0 with
+  the decision deferred, release after release, to 1.0. What 1.0 settles is the
+  interface; it does not settle the system underneath it, and a bare `1.0.0` would have
+  claimed the second by finishing the first.
+
+### Removed
+
+- **Numbers 30, 31 and 32, reserved for a crypto API that was never designed.** No
+  interface, no caller, and no note saying what the three calls would have been. v0.10.1
+  removed an AES-256 interface from `crypto.h` that had been declared and never
+  implemented; this is the same reservation in another form. Retired rather than released
+  back, because the freeze has one rule about holes and three numbers are not worth making
+  it two.
+
+- **`alarm_demo_callback()` and the timer slot registered for it at boot.** It printed a
+  green line from inside the kernel three seconds after `SYSCALL_ALARM` armed it, which
+  made it the last call in the table producing output from Ring 0 on a caller's behalf —
+  the class v0.9.2 otherwise cleared out. The timer slots themselves stay, and
+  `test_signal.c` exercises them through a slot of its own, so removing the demo costs no
+  coverage.
+
+### Fixed
+
+- **README said there was no way to set the clock**, five releases after `SETTIME` (66)
+  was added in v0.9.2, with the row for the call two screens above the sentence. Same
+  class as the stale version badge v0.10.1 found: documentation organised by topic gets
+  audited by section, and a claim in one section about another section's subject belongs
+  to neither.
+
+- **The signal documentation said four signals terminate by default and that no
+  `SIGALRM` reaches user space.** Five do, and one does.
+
+### Known issues
+
+- **`test_time`'s clock round trip is still not deterministic**, and the cause is still
+  not established. Unchanged from v0.10.1 and not addressed here; the freeze is an
+  interface change and this is not part of the interface.
+
+- **There is still no `mount`/`umount`.** The partition table holds four entries and the
+  kernel reads one. This is the next feature, and the freeze does not stand in its way.
+
+### Limits
+
+The interface freezes with its limits, and one of them is worth stating plainly.
+Timestamps are `uint32_t` seconds since the Unix epoch and run out in **2106**. The count
+is stored in two frozen places at once — `esd_stat_t`'s `st_mtime` and `st_ctime`, which
+cross the syscall boundary, and a directory entry's `mtime` and `ctime`, which are on the
+disk — so widening it breaks both, against an entry that is exactly 96 bytes and has a
+test saying so. It would also reopen a disk format v0.10.0 had just finished settling, to
+push a problem past the lifetime of that format. `esd_time_t` is not the limit and is
+sometimes mistaken for it: its `year` is a `uint16_t`.
+
 ## [0.10.1-alpha] - 2026-08-26
 
 An audit of the whole tree before freezing the ABI at 1.0. No new features; what
@@ -83,6 +187,16 @@ than the code did.
 
 - **`CONTRIBUTING`'s checklist listed three test targets and claimed CI runs the same
   ones.** CI runs six.
+
+- **The version badge at the top of README said 0.9.2 through three releases.** The
+  limits table, the syscall table, the table of contents and the counts were all read and
+  reconciled; the badge is the first thing on the page and was the last thing looked at.
+  The most visible part of a document is the part nobody audits, because auditing is done
+  by section and the badge belongs to no section.
+
+- **Most of the numbers in the project layout tree were wrong**, the example `qemu`
+  invocations named an ISO five minor versions old, `mkfs.py` was still listed after
+  being removed, and three programs were missing from it.
 
 ### Known issues
 

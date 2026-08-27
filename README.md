@@ -5,11 +5,11 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.10.1--alpha-blue)
+![Version](https://img.shields.io/badge/version-1.0.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
-![Status](https://img.shields.io/badge/status-alpha-orange)
+![Status](https://img.shields.io/badge/status-beta-yellow)
 [![Website](https://img.shields.io/badge/Website-Live-2ea44f)](https://iamfurkann.github.io/esdumanOS-website/)
 
 *An independent operating system, booting through GRUB via Multiboot,*
@@ -17,7 +17,17 @@
 
 </div>
 
-> **⚠️ Alpha Notice:** This is an early development release intended for testing and educational purposes only. It is not suitable for production use. Expect bugs, crashes, and incomplete features.
+> **⚠️ Beta Notice:** This is a development release intended for testing and educational
+> purposes only. It is not suitable for production use. Expect bugs, crashes, and
+> incomplete features.
+>
+> **What 1.0 means here:** the system call interface is frozen. No number already
+> assigned changes its value or its meaning, the retired numbers are never reused, and
+> new calls continue from 68 — enforced by `tests/kernel/test_abi.c`, which asserts every
+> number, errno, flag and security level by literal value. It is a promise about the
+> interface, not a claim about the system underneath it: the
+> [Known Limitations](#known-limitations) are the same list they were, one test module is
+> not deterministic, and there is still no `mount`. That is what the `-beta.1` is for.
 
 ---
 
@@ -54,9 +64,9 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 0.10.1-alpha
+**Version:** 1.0.0-beta.1
 
-esdumanOS is in the **Alpha** stage. The core kernel subsystems are functional and the
+esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
 written: the self-test suite hands control to a real Ring 3 process and asserts from
 CPL=3, and it also runs under hardware SMEP/SMAP enforcement. Before v0.2.0 every
@@ -369,7 +379,33 @@ inside the file system — which had been an open item in `SECURITY.md` for seve
 releases. A disk written by v0.9.x is recognised by name and refused; the format did not
 gain a converter and never has.
 
-It remains an early development release, intended for developers, OS enthusiasts, and
+v1.0.0 freezes the system call interface, and the work was mostly deciding rather than
+writing. Four numbers had been carrying open questions: 11 and 28 held calls that were
+removed, 30 through 32 were reserved in some early release for a crypto API nobody ever
+designed, and 99 held `YIELD` — far outside the run every other call sits in, for no
+reason anybody recorded. All of them are settled the same way: a hole is never filled,
+and new calls continue from 68. `YIELD` moved to 67, which is an ABI break and was the
+last moment one was allowed; the byte that made it possible to move was in the idle
+task's hand-assembled Ring 3 loop, which carried the number as a literal `0x63` where no
+compiler could see it disagree with the header.
+
+The fourth was `ALARM`. It kept none of the three promises its name made — no duration,
+no signal, no relation to the caller — and instead armed a kernel timer that printed a
+line on the console, the last call in the table that produced output from Ring 0 on a
+caller's behalf. Rather than removing it the way `CAT_FILE` and `LS_DIR` went, v1.0.0
+made it the call it had been claiming to be: `alarm(seconds)` delivering `SIGALRM` from a
+deadline in the caller's own process control block, returning what was left on any alarm
+it displaced.
+
+What actually enforces the freeze is a test. A syscall number is written down in four
+places no compiler compares — the header, the freestanding programs under `apps/bin`, the
+literal strings the static analyser greps for, and the table in this file — so a comment
+promising the numbers would not move would have protected none of them.
+`tests/kernel/test_abi.c` asserts all 62 of them by literal value, along with the errnos,
+the flags, the signal numbers and the security levels, and refuses the retired numbers
+through the dispatcher.
+
+It remains a development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
 **What works:**
@@ -378,7 +414,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 19 user-space programs and 33 shell builtins
-- 34 kernel self-test modules and CI pipeline
+- 35 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -465,7 +501,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 34 kernel-mode modules: string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 35 kernel-mode modules: abi, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -723,7 +759,7 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v0.10.1-alpha.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.0.0-beta.1.iso -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -746,7 +782,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v0.10.1-alpha.iso \
+    -cdrom esdumanOS-v1.0.0-beta.1.iso \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
@@ -1010,7 +1046,7 @@ make test
 # Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 34 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 35 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -1040,6 +1076,7 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
+| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 62 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS` and that 68 is still free |
 | `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes and the master boot record exactly one sector, that the superblock's geometry leaves room for the regions it describes and stays relative to the partition, that clusters 0 and 1 are reserved so a start cluster of 0 can mean "no data", that a file spanning two clusters reads back byte-for-byte, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), the mount-time table validator against four kinds of corruption, and that the system's own paths carry the permissions they must after a boot |
 | `test_memory.c` | Heap allocation, deallocation, read/write verification |
 | `test_pipe.c` | Pipe creation, ring buffer, EOF detection, syscall integration |
@@ -1175,7 +1212,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      34 kernel-mode test modules + framework
+|   |-- kernel/                      35 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1195,6 +1232,14 @@ esdumanOS/
 ## System Call Reference
 
 The kernel exposes 62 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+
+**These numbers are frozen as of v1.0.0.** None of them will change value or meaning. The
+numbers 11, 28, 30, 31, 32 and 99 are retired and will never be reused — they held calls
+that were removed, a reservation for a crypto API that was never designed, and `YIELD`
+before it moved to 67 — and new calls continue from 68. Everything from 200 up is
+reserved for calls that exist only in test builds. `tests/kernel/test_abi.c` asserts all
+of it by literal value, because a number written in a header, in freestanding programs,
+in a static analyser's patterns and in this table is a number no compiler is comparing.
 
 ### Process Management
 
@@ -1217,7 +1262,7 @@ The kernel exposes 62 system calls through `INT 0x80`. The syscall number is pas
 | 61 | `TCSETPGRP` | Hand the terminal to a process group, which is what Ctrl-C reaches |
 | 62 | `GETPGID` | Read a process's group |
 | 63 | `POLL` | Whether a read on a descriptor would block: 1 no, 0 yes. End of file counts as "no" |
-| 99 | `YIELD` | Voluntarily yield the CPU |
+| 67 | `YIELD` | Voluntarily yield the CPU. Was 99 until v1.0.0, which moved it as the last ABI break the freeze permitted; 99 is retired |
 
 `TIME` fills an `esd_time_t` (`include/esdtime.h`), shared verbatim with user space the
 same way `esd_stat_t` is. The fields are broken down — year, month, day, hour, minute,
@@ -1230,8 +1275,12 @@ done in the kernel so the calendar carry exists in one place.
 `/etc/timezone`, which holds a signed hour count rather than a zone name — there is no
 timezone database here, and `Europe/Istanbul` would be a name nothing could look up. The
 RTC itself is assumed to hold UTC, which is what QEMU presents by default; a machine whose
-CMOS holds local time wants an offset of 0. There is no way to *set* the clock, and no
-daylight saving.
+CMOS holds local time wants an offset of 0. There is no daylight saving.
+
+Setting the clock is `SETTIME` (66), added in v0.9.2 and root only. This paragraph said
+there was no way to set it for five releases after there was — the row for the call sits
+in the table two screens above this line, which is the whole difficulty with documentation
+that is organised by topic and audited by section.
 
 `EXEC` returns a negative errno when the program could not be started, and otherwise
 the child's exit status once it has finished — statuses are masked to 0-255, so the
@@ -1341,14 +1390,15 @@ sets them, `chown` sets the owner and group, and `ls -l` shows both.
 |--------|------|-------------|
 | 2 | `IPC_SEND` | Send a message to another process |
 | 6 | `IPC_RECEIVE` | Receive a message from mailbox |
-| 18 | `ALARM` | Arms the demonstration timer: a fixed three seconds, after which the kernel prints a line on the console. Takes no arguments and delivers no signal, despite the name — see `syscall.h`. What becomes of it is part of freezing the ABI at 1.0 |
+| 18 | `ALARM` | Arms, re-arms or cancels the caller's alarm; `ebx` is a count of seconds and 0 cancels. Returns the seconds left on the previous alarm, or 0 when there was none. `SIGALRM` (14) arrives when the deadline passes and terminates the process by default. An interval past ~249 days is refused with `E_INVAL`. Real as of v1.0.0 — before that it took no argument, sent no signal, and printed a line from inside the kernel |
 | 24 | `SIGNAL_REG` | Register a signal handler, or `SIG_DFL` (0) / `SIG_IGN` (1) |
 | 25 | `KILL` | Send a signal to a process, or to every member of a group when the pid is negative |
 | 27 | `SIGRETURN` | Return from signal handler |
 
-Four signals terminate a process that has not handled them: `SIGKILL` (9), `SIGTERM`
-(15), `SIGPIPE` (13) and `SIGINT` (2). The exit status is 128 plus the signal number, so
-a `wait()` reporting 141 means the child was killed writing to a broken pipe.
+Five signals terminate a process that has not handled them: `SIGKILL` (9), `SIGTERM`
+(15), `SIGPIPE` (13), `SIGINT` (2) and `SIGALRM` (14). The exit status is 128 plus the
+signal number, so a `wait()` reporting 141 means the child was killed writing to a broken
+pipe.
 
 Two stop it instead: `SIGTSTP` (20), which is what Ctrl-Z sends, and `SIGTTIN` (21),
 which a background job gets for trying to read the terminal. A stopped process keeps its
@@ -1471,6 +1521,17 @@ The following are known constraints of the current implementation. These are doc
 | Per-process kernel stack | 8 KB (`KERNEL_STACK_SIZE`) |
 | Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
 | Kernel log ring | 512 records, ~88 KB (`KLOG_RECORDS`) |
+| Longest `alarm()` interval | ~249 days (half a 32-bit tick counter at `TIMER_HZ`) |
+| Latest representable timestamp | 2106 (`uint32_t` seconds since the Unix epoch) |
+
+**Timestamps run out in 2106, and v1.0.0 froze that rather than fixing it.** The count is
+a `uint32_t` of seconds since the Unix epoch and it is stored in two places that are now
+both frozen: `esd_stat_t`'s `st_mtime` and `st_ctime`, which cross the syscall boundary,
+and a directory entry's `mtime` and `ctime`, which are on the disk. Widening it breaks
+both at once — the entry is exactly 96 bytes and there is a test that says so — and it
+would reopen a disk format that v0.10.0 had just finished settling, to move a problem
+past the lifetime of the format itself. `esd_time_t` is not the limit here and is
+sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 
 ### Architectural
 
@@ -1538,11 +1599,13 @@ The following are known constraints of the current implementation. These are doc
   catchable — which is what lets the shell and init decline them. An uncatchable stop
   would reach init the same way and there would be nothing either of them could do
   about it.
-- **`SIGPIPE` is the only signal a program receives without asking.** `SIGKILL`,
-  `SIGTERM` and `SIGTSTP` still have to be sent with `kill` or a key. There is no
-  `SIGCHLD`, no `SIGALRM` delivered to user space, `SIGCONT` reaches a program only if
-  it registered a handler, and there is no way to block a signal rather than ignoring
-  it — the disposition is one of handler, default or ignore, with no mask.
+- **`SIGPIPE` and `SIGALRM` are the only signals a program receives without another
+  process sending one.** `SIGPIPE` arrives from writing into a pipe nobody is reading,
+  and `SIGALRM` from an alarm the program set for itself; `SIGKILL`, `SIGTERM` and
+  `SIGTSTP` still have to be sent with `kill` or a key. There is no `SIGCHLD`, `SIGCONT`
+  reaches a program only if it registered a handler, and there is no way to block a
+  signal rather than ignoring it — the disposition is one of handler, default or ignore,
+  with no mask.
 - **`SIGTTOU` does not exist.** A background job that *writes* to the terminal still
   does, interleaving its output with whatever the shell is drawing. Only reading is
   stopped, which is the half that made the shell unusable.
@@ -1670,7 +1733,10 @@ entropy seed carried across boots, and `/var/log` — which had been sitting her
 since v0.6.1 did every part of it. The log wraps, it holds records rather than a
 transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; the row
 outlived the work by five releases. And the sticky bit on `/tmp`, which v0.9.4 added
-alongside the other half of the permission enforcement: the file's own mode.
+alongside the other half of the permission enforcement: the file's own mode. v1.0.0 froze
+the syscall ABI, which had been waiting on the disk format rather than on `mount` — a
+freeze stops numbers from changing meaning and says nothing about adding new ones, so
+`mount` and `umount` can take 68 and 69 whenever they are written.
 
 ---
 

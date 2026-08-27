@@ -7,14 +7,25 @@
  * MINOR : New large features
  * PATCH : Bug fixes, minor patches
  */
-#define OS_VERSION_MAJOR    0
-#define OS_VERSION_MINOR    10
-#define OS_VERSION_PATCH    1
+#define OS_VERSION_MAJOR    1
+#define OS_VERSION_MINOR    0
+#define OS_VERSION_PATCH    0
 
 /**
  * @brief Pre-release qualifier, or "" for a final release.
+ *
+ * "-alpha" from v0.2.0 to v0.10.1. The question of when it would change was
+ * deferred, release after release, to 1.0 - and 1.0 is what freezes the syscall
+ * ABI, so this is that release and this is the answer.
+ *
+ * "-beta.1" rather than nothing. What 1.0 settles is the interface: the numbers,
+ * the errnos and the structures a program compiles against will not move. It
+ * does not settle the system underneath them - there is a test that fails two
+ * runs in five, there is no mount(), and the known limitations in README are the
+ * same list they were. A bare 1.0.0 would be claiming the second thing by
+ * finishing the first.
  */
-#define OS_VERSION_PRE      "-alpha"
+#define OS_VERSION_PRE      "-beta.1"
 
 /**
  * @brief Helper macros for stringifying version numbers

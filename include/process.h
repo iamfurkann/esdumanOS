@@ -178,6 +178,34 @@ typedef struct process_s {
     uint8_t sleep_active;
 
     /*
+     * alarm() bookkeeping, and deliberately not the same pair as above.
+     *
+     * An alarm and a sleep are different things happening to the same task at
+     * the same time: sleep() parks the task and the deadline says when to wake
+     * it, while an alarm leaves the task running and the deadline says when to
+     * signal it. A task can hold both at once - a program that calls alarm() and
+     * then blocks on read() is the ordinary case, and it is the case the whole
+     * call exists for - so one deadline field could not serve both without the
+     * later caller silently cancelling the earlier one.
+     *
+     * alarm_deadline is absolute for the same reason sleep_deadline is, and is
+     * compared the same way: a signed difference against timer_get_ticks(),
+     * because the counter wraps roughly every 497 days at TIMER_HZ and a plain
+     * >= would fire every alarm at once for a while after it did.
+     *
+     * alarm_active distinguishes "no alarm" from "an alarm due at tick 0", which
+     * a deadline of 0 cannot: tick 0 is a real time that a deadline can land on
+     * after the counter wraps.
+     *
+     * Not carried across fork(). inherit_pcb_state() copies what a child should
+     * start with and this is not on the list, so a child begins with no alarm -
+     * which is POSIX's rule, and the right one: the parent asked to be told
+     * something, and the child is not the one that asked.
+     */
+    uint32_t alarm_deadline;
+    uint8_t alarm_active;
+
+    /*
      * Status this task passed to exit(), 0-255.
      *
      * sys_exit() used to discard its argument outright and nothing anywhere
@@ -625,6 +653,21 @@ extern void wakeup_tasks(int reason);
  * would wake every sleeper at once regardless of when each asked to be woken.
  */
 extern void wake_expired_sleepers(void);
+
+/**
+ * @brief Sends SIG_ALRM to every task whose alarm() deadline has passed.
+ *
+ * Called from schedule() beside wake_expired_sleepers(), and for the same
+ * reason: both are bottom halves that walk the task list, which cannot be done
+ * from the timer interrupt because that list is edited without masking
+ * interrupts.
+ *
+ * Unlike the sleeper sweep, this one does not change a task's state - it hands
+ * the signal to send_user_signal() and lets the ordinary delivery path decide
+ * what happens, so an alarm that arrives for a stopped or blocked task behaves
+ * exactly as a kill() carrying the same signal would.
+ */
+extern void expire_alarms(void);
 extern int check_free_task_slot(void);
 extern void exit_current_process(arch_regs_t *regs);
 extern void set_task_priority(int pid, uint8_t priority);

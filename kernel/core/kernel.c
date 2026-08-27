@@ -658,7 +658,13 @@ static void apply_system_modes(void) {
 
 static int init_filesystem_and_vfs(void) {
     init_kernel_timers();
-    register_kernel_timer(1, alarm_demo_callback);
+    /*
+     * No slot is registered here any more. Slot 1 used to carry
+     * alarm_demo_callback(), armed only by SYSCALL_ALARM, which v1.0.0 replaced
+     * with a real alarm(seconds) delivering SIG_ALRM from a per-process deadline.
+     * The slots stay available to any kernel-side caller that wants one; nothing
+     * in the boot path needs one.
+     */
 
     asm volatile("sti");
 

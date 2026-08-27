@@ -7,10 +7,24 @@
 #include "ktest.h"
 #include "process.h"
 #include "signal.h"
+#include "libft.h"
+#include "rtc.h"
+#include "errno.h"
 
 /*
- * Kernel timer slot used by the test below. Slot 1 belongs to the alarm demo
- * registered in kernel_main(); anything well clear of it will do.
+ * syscalls_internal.h is not on the tests' include path - they build with
+ * -Iinclude and it lives in kernel/syscall/ - so the handler is declared here,
+ * the same way test_devfs.c and test_security.c reach theirs.
+ */
+extern void sys_alarm(arch_regs_t *regs);
+
+/*
+ * Kernel timer slot used by the test below.
+ *
+ * Slot 1 used to belong to the alarm demo registered in kernel_main(). Nothing
+ * registers a slot at boot any more - v1.0.0 made SYSCALL_ALARM a real
+ * alarm(seconds) served by a deadline in the PCB - so the slots are all free and
+ * this one is picked only to keep the choice explicit.
  */
 #define KTIMER_TEST_SLOT 5
 
@@ -110,6 +124,141 @@ static void run_kernel_timer_tests(void) {
 }
 
 /**
+ * @brief Tests alarm(): arming, re-arming, cancelling, refusal, and delivery.
+ *
+ * Two halves, and they are separated on purpose. The first drives sys_alarm()
+ * and reads the PCB, which is arithmetic and answers immediately. The second
+ * asks whether expire_alarms() delivers, and it does that by writing a deadline
+ * into the PCB by hand rather than by arming a real one and waiting for it.
+ *
+ * Waiting is what makes a timing test unreliable, and this suite already has one
+ * test that fails two runs in five for want of that discipline. Nothing here
+ * depends on how long the test itself takes: a deadline one tick in the past is
+ * due no matter when it is read, and one ten thousand ticks ahead is not.
+ *
+ * The seconds assertions do have a tolerance, and it is a whole second wide: the
+ * PIT is running at TIMER_HZ underneath these lines, so the remaining count only
+ * has to survive fewer than a hundred ticks passing between arming and reading.
+ *
+ * A handler is registered for SIG_ALRM throughout. Without one the signal
+ * terminates by default, and the process it would terminate is the test - the
+ * bit would sit pending until the next return to Ring 3 and kill the payload
+ * that had nothing to do with it. The handler, the alarm fields and the pending
+ * mask are all put back at the end for the same reason.
+ *
+ * Expected Behavior:
+ * - Arming reports 0 when there was no previous alarm, and the seconds left when
+ *   there was.
+ * - A zero interval cancels and still reports what it displaced.
+ * - A negative or unrepresentable interval is refused without disturbing state.
+ * - expire_alarms() signals a due alarm, clears it, and leaves an undue one.
+ *
+ * Edge Cases Covered:
+ * - Re-arming over a live alarm.
+ * - Cancelling when there is nothing to cancel.
+ * - An interval one second past what a signed tick difference can name.
+ */
+static void run_alarm_tests(void) {
+    arch_regs_t regs;
+
+    uint32_t saved_deadline = current_task->alarm_deadline;
+    uint8_t  saved_active   = current_task->alarm_active;
+    uint32_t saved_handler  = current_task->signal_handlers[SIG_ALRM];
+    uint32_t saved_pending  = current_task->pending_signals;
+
+    current_task->signal_handlers[SIG_ALRM] = 0x80000000;
+    current_task->pending_signals &= ~(1u << SIG_ALRM);
+    current_task->alarm_active = 0;
+    current_task->alarm_deadline = 0;
+
+    /* Arming a task that holds no alarm reports nothing displaced. */
+    ft_bzero(&regs, sizeof(regs));
+    regs.ebx = 5;
+    sys_alarm(&regs);
+    KTEST_ASSERT((int)regs.eax == 0,
+                 "[ALARM] arming with no alarm outstanding reports 0 seconds left");
+    KTEST_ASSERT(current_task->alarm_active == 1,
+                 "[STRICT] [ALARM] and the task now holds one");
+
+    uint32_t ahead = current_task->alarm_deadline - timer_get_ticks();
+    KTEST_ASSERT(ahead > (uint32_t)(4 * TIMER_HZ) && ahead <= (uint32_t)(5 * TIMER_HZ),
+                 "[ALARM] the deadline lands five seconds ahead, in ticks");
+
+    /* Re-arming reports what it displaced, rounded up so that an alarm with any
+     * time left never reports the 0 that means there was none. */
+    ft_bzero(&regs, sizeof(regs));
+    regs.ebx = 10;
+    sys_alarm(&regs);
+    KTEST_ASSERT((int)regs.eax == 5,
+                 "[STRICT] [ALARM] re-arming reports the seconds left on the previous alarm");
+
+    /* Zero cancels, and still reports. */
+    ft_bzero(&regs, sizeof(regs));
+    regs.ebx = 0;
+    sys_alarm(&regs);
+    KTEST_ASSERT((int)regs.eax == 10,
+                 "[ALARM] cancelling reports what it cancelled");
+    KTEST_ASSERT(current_task->alarm_active == 0,
+                 "[STRICT] [ALARM] and the task holds no alarm afterwards");
+
+    ft_bzero(&regs, sizeof(regs));
+    regs.ebx = 0;
+    sys_alarm(&regs);
+    KTEST_ASSERT((int)regs.eax == 0,
+                 "[ALARM] cancelling nothing reports 0");
+
+    /*
+     * Refusals. ebx is read as a signed count, so a caller that passes -1 is
+     * told so rather than being given an alarm 136 years out.
+     */
+    ft_bzero(&regs, sizeof(regs));
+    regs.ebx = (uint32_t)(-1);
+    sys_alarm(&regs);
+    KTEST_ASSERT((int)regs.eax == E_INVAL,
+                 "[ALARM] a negative interval is refused");
+    KTEST_ASSERT(current_task->alarm_active == 0,
+                 "[STRICT] [ALARM] and a refused interval arms nothing");
+
+    ft_bzero(&regs, sizeof(regs));
+    regs.ebx = (0x7FFFFFFFu / TIMER_HZ) + 1;
+    sys_alarm(&regs);
+    KTEST_ASSERT((int)regs.eax == E_INVAL,
+                 "[ALARM] an interval past what a signed tick difference can name is refused");
+
+    /*
+     * Delivery. The deadline is written directly so the answer does not depend
+     * on time passing while the test runs.
+     */
+    current_task->alarm_deadline = timer_get_ticks() + (uint32_t)(100 * TIMER_HZ);
+    current_task->alarm_active = 1;
+    current_task->pending_signals &= ~(1u << SIG_ALRM);
+
+    expire_alarms();
+    KTEST_ASSERT((current_task->pending_signals & (1u << SIG_ALRM)) == 0,
+                 "[STRICT] [ALARM] an alarm that is not due yet is not delivered");
+    KTEST_ASSERT(current_task->alarm_active == 1,
+                 "[ALARM] and it is still held");
+
+    current_task->alarm_deadline = timer_get_ticks() - 1;
+
+    expire_alarms();
+    KTEST_ASSERT((current_task->pending_signals & (1u << SIG_ALRM)) != 0,
+                 "[STRICT] [ALARM] a due alarm delivers SIG_ALRM to the process that set it");
+    KTEST_ASSERT(current_task->alarm_active == 0,
+                 "[STRICT] [ALARM] and is cleared, because an alarm is one-shot");
+
+    current_task->pending_signals &= ~(1u << SIG_ALRM);
+    expire_alarms();
+    KTEST_ASSERT((current_task->pending_signals & (1u << SIG_ALRM)) == 0,
+                 "[ALARM] a cleared alarm does not deliver a second time");
+
+    current_task->alarm_deadline = saved_deadline;
+    current_task->alarm_active = saved_active;
+    current_task->signal_handlers[SIG_ALRM] = saved_handler;
+    current_task->pending_signals = saved_pending;
+}
+
+/**
  * @brief Tests the inter-process signal routing and handler registration.
  *
  * This test ensures that user-space processes can accurately map specific
@@ -142,5 +291,6 @@ void run_signal_tests(void) {
     current_task->pending_signals &= ~(1 << 9);
     current_task->signal_handlers[9] = 0;
 
+    run_alarm_tests();
     run_kernel_timer_tests();
 }

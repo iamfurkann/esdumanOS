@@ -49,25 +49,82 @@ void sys_ipc_receive(arch_regs_t *regs) {
 }
 
 /**
- * @brief Function sys_alarm
- */
-/**
- * @brief Arms the demo alarm timer.
+ * @brief The longest alarm that can be represented, in seconds.
  *
- * The delay used to be the literal 55, which at TIMER_HZ is 0.55 seconds - while
- * the message printed right above it promised three. The mismatch survived
- * because this call was compiled against the invented declaration that used to be
- * in process.h, where the second parameter was a pid rather than a tick count, so
- * neither the compiler nor a reader had reason to read 55 as a duration.
+ * Written as the relationship rather than the number it works out to. Deadlines
+ * are absolute values of a 32-bit tick counter and are compared as signed
+ * differences - see expire_alarms() - so the furthest future a deadline can name
+ * without reading as already past is half the counter's range. At TIMER_HZ that
+ * is a little under 249 days.
  *
- * Timer slot 1 is the one kernel_main() registers alarm_demo_callback() on.
+ * A request beyond it is refused rather than clamped. Clamping would answer a
+ * question the caller did not ask, and the value it would answer with is one no
+ * caller of this system has a use for.
  */
-#define ALARM_DEMO_SECONDS 3
+#define ALARM_MAX_SECONDS (0x7FFFFFFFu / TIMER_HZ)
 
+/**
+ * @brief Arms, re-arms or cancels the calling process's alarm.
+ *
+ * ebx is a count of seconds; zero cancels. eax comes back as the number of
+ * seconds that were left on the previous alarm, or 0 when there was none - which
+ * is POSIX's arrangement and is what lets a caller restore an alarm it had to
+ * displace.
+ *
+ * This was not an alarm until v1.0.0. It read none of its arguments, delivered no
+ * signal, and had no relation to the process that called it: it armed kernel
+ * timer slot 1 for a fixed three seconds and let alarm_demo_callback() print a
+ * green line on the console. The name had promised three things and kept none of
+ * them, and it was the last call in the table that printed from inside the
+ * kernel on a caller's behalf.
+ *
+ * The deadline lives in the caller's PCB rather than in a timer slot because the
+ * slots are global and hold a bare void(*)(void) - they carry no pid, so there
+ * is nobody for one to signal. That is the same reason sleep() keeps its own
+ * deadline, and the note on those fields in process.h says so.
+ *
+ * Nothing here blocks. An alarm is something that happens to a running process,
+ * and expire_alarms() delivers SIG_ALRM from schedule() when the deadline
+ * passes; a caller that wants to wait for it blocks on whatever it actually
+ * meant to wait for.
+ */
 void sys_alarm(arch_regs_t *regs) {
-    printk("Alarm set! It will ring in %d seconds...\n", ALARM_DEMO_SECONDS);
-    schedule_kernel_timer(1, TIMER_HZ * ALARM_DEMO_SECONDS);
-    regs->eax = 0;
+    int seconds = (int)regs->ebx;
+    uint32_t now = timer_get_ticks();
+    uint32_t remaining = 0;
+
+    if (seconds < 0 || (uint32_t)seconds > ALARM_MAX_SECONDS) {
+        regs->eax = E_INVAL;
+        return;
+    }
+
+    /*
+     * Read the old alarm before writing the new one: re-arming reports what it
+     * displaced, and the two share the same pair of fields.
+     */
+    if (current_task->alarm_active) {
+        int32_t left = (int32_t)(current_task->alarm_deadline - now);
+
+        /*
+         * Rounded up, so an alarm with any time at all left on it reports at
+         * least one second. Rounding down would report 0, and 0 is the answer
+         * that means there was no alarm - a caller restoring what it displaced
+         * would drop an alarm that was about to fire.
+         */
+        if (left > 0) {
+            remaining = ((uint32_t)left + TIMER_HZ - 1) / TIMER_HZ;
+        }
+    }
+
+    if (seconds == 0) {
+        current_task->alarm_active = 0;
+        current_task->alarm_deadline = 0;
+    } else {
+        current_task->alarm_deadline = now + (uint32_t)seconds * TIMER_HZ;
+        current_task->alarm_active = 1;
+    }
+
+    regs->eax = (int)remaining;
 }
 
 /**

@@ -1840,7 +1840,43 @@ void execute_command(char **args) {
         }
         last_exit_status = 0;
     }
-    else if (ft_strcmp(args[0], "alarm") == 0) { last_exit_status = syscall(18, 0, 0, 0) < 0 ? 1 : 0; }
+    else if (ft_strcmp(args[0], "alarm") == 0) {
+        /*
+         * Sets the alarm on the shell itself, because that is what alarm(2) does
+         * - it arms the calling process, and the shell is what called it.
+         *
+         * SIG_ALRM terminates by default and the shell registers no handler for
+         * it, so this ends the session when it comes due. That is not a fault to
+         * be papered over: it is the call behaving exactly as documented, and a
+         * builtin that quietly armed something else would be demonstrating a
+         * system that does not exist.
+         *
+         * It stays out of help and Tab-completion for that reason, alongside
+         * `panic`, `stack` and `testmalloc`. Until v1.0.0 it took no argument and
+         * armed a kernel timer that printed a line; it takes seconds now, and 0
+         * cancels.
+         */
+        int seconds = args[1] ? dec_to_int(args[1]) : -1;
+        if (seconds < 0) {
+            printk("Usage: alarm <seconds>   (0 cancels; SIGALRM ends this shell)\n");
+            last_exit_status = 1;
+        } else {
+            int prev = syscall(18, seconds, 0, 0);
+            if (prev < 0) {
+                printk("alarm: interval out of range\n");
+                last_exit_status = 1;
+            } else {
+                if (prev > 0) {
+                    char num[16];
+                    ft_itoa(prev, num);
+                    printk("alarm: seconds left on the previous alarm: ");
+                    printk(num);
+                    printk("\n");
+                }
+                last_exit_status = 0;
+            }
+        }
+    }
     else if (ft_strcmp(args[0], "panic") == 0) { last_exit_status = syscall(19, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "reboot") == 0) { last_exit_status = syscall(20, 0, 0, 0) < 0 ? 1 : 0; }
     else if (ft_strcmp(args[0], "halt") == 0) { last_exit_status = syscall(21, 0, 0, 0) < 0 ? 1 : 0; }

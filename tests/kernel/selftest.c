@@ -46,6 +46,11 @@ typedef struct {
  * the order is still the order, so a full run is unchanged.
  */
 static const ktest_module_t kernel_modules[] = {
+    /*
+     * First, because everything after it is only meaningful if the interface is
+     * what the programs under test were compiled against.
+     */
+    { "abi",         run_abi_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },
     { "pipe",        run_pipe_tests },
@@ -303,7 +308,7 @@ void sys_ktest_report(arch_regs_t *regs) {
         KTEST_ASSERT(trap_frame_is_live(regs),
                      "[SYSCALL] the dispatcher was handed the live interrupt frame");
         KTEST_ASSERT(current_task != 0 &&
-                     current_task->syscall_entry_eip == regs->eip - SYSCALL_INSN_LEN,
+                     current_task->syscall_entry_eip == regs->eip - SYSCALL_TRAP_INSN_LEN,
                      "[STRICT] [SYSCALL] recorded entry EIP points at the trap instruction");
 
         regs->eax = 0;

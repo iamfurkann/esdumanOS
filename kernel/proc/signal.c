@@ -70,11 +70,22 @@ void process_pending_kernel_timers(void) {
     }
 }
 
-/**
- * @brief alarm_demo_callback
+/*
+ * alarm_demo_callback() stood here and is gone.
+ *
+ * It printed a green line from inside the kernel three seconds after slot 1 was
+ * armed, and the only thing that armed slot 1 was SYSCALL_ALARM - a call that
+ * took no duration, delivered no signal, and had no relation to the process that
+ * made it. It was the last of the calls that printed on a caller's behalf from
+ * Ring 0, the class v0.9.2 otherwise cleared out.
+ *
+ * v1.0.0 turned that syscall into a real alarm(seconds), which delivers SIG_ALRM
+ * to the caller from a deadline in its own PCB. A global slot holding a bare
+ * void(*)(void) could not have served that: it carries no pid, so there is
+ * nobody for it to signal.
+ *
+ * The slots above are untouched and still register, arm, count down and drain.
+ * What they lost is their only production caller, which had never been anything
+ * but a demonstration of them; test_signal.c exercises the same machinery
+ * through a slot of its own and is the reason removing this costs no coverage.
  */
-void alarm_demo_callback(void) {
-    terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    printk("\n[KERNEL TIMER] 3 Second Alarm Triggered! (Bottom-half)\n");
-    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-}

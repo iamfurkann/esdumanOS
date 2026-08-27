@@ -48,7 +48,7 @@ void syscall_handler(arch_regs_t *regs) {
     int from_user = (regs->cs & 0x03) == 3;
 
     if (caller && from_user) {
-        caller->syscall_entry_eip = regs->eip - SYSCALL_INSN_LEN;
+        caller->syscall_entry_eip = regs->eip - SYSCALL_TRAP_INSN_LEN;
         caller->in_syscall = 1;
     }
 

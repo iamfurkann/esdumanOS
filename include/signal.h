@@ -80,6 +80,27 @@
 #define SIG_CONT 18
 
 /*
+ * Sent to a process whose alarm() has come due.
+ *
+ * Terminates by default, which is POSIX's choice and is the useful one: the
+ * call exists to put a bound on something, and a bound whose default is to be
+ * ignored bounds nothing. A program that wants to survive its own alarm says so
+ * by registering a handler, and that is the arrangement every timeout in every
+ * Unix program is built on.
+ *
+ * Number 14, as Linux does on i386 - the same convention SIG_CONT and SIG_TSTP
+ * follow here, and the reason it matters is that the shell writes signal numbers
+ * out as literals: these programs are freestanding and cannot include this
+ * header.
+ *
+ * Delivered by expire_alarms() from schedule(), not from the timer interrupt.
+ * The kernel timer slots in signal.c could not carry this - they are global,
+ * hold a bare void(*)(void), and carry no pid to signal - which is the same
+ * reason sleep() keeps its deadline in the PCB rather than in a slot.
+ */
+#define SIG_ALRM 14
+
+/*
  * Sent to a process that tries to read the terminal from the background.
  *
  * There is one keyboard and one input ring, and every blocked reader is woken
@@ -169,11 +190,20 @@ void kernel_timer_tick_handler(void);
  */
 void process_pending_kernel_timers(void);
 
-/**
- * @brief Demo callback function to test the alarm signal.
+/*
+ * alarm_demo_callback() was declared here and is gone.
+ *
+ * It was the callback kernel_main() registered on timer slot 1, and the only
+ * thing that armed that slot was SYSCALL_ALARM - which took no duration, sent no
+ * signal, and printed a green line from inside the kernel three seconds later.
+ * v1.0.0 made that call a real alarm(seconds) delivering SIG_ALRM to the caller,
+ * and a per-process deadline in the PCB is what serves it; the demo had nothing
+ * left to demonstrate.
+ *
+ * The timer slots themselves stay. They are still the mechanism behind the
+ * bottom half, and test_signal.c exercises them directly through its own slot
+ * rather than through a production caller that only ever existed as a display.
  */
-void alarm_demo_callback(void);
-
 
 // --- Added by Refactor Script ---
 extern void restore_signal_context(arch_regs_t *regs);

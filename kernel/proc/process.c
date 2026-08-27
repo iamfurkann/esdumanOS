@@ -17,7 +17,9 @@
 #include "process.h"
 #include "security.h"
 /* For WSTATUS_STOPPED: the value a stopped child is reported to wait() with,
- * which stop_task() writes into a blocked exec()'s saved frame. */
+ * which stop_task() writes into a blocked exec()'s saved frame. And for
+ * SYSCALL_YIELD, which init_multitasking() assembles into the idle task's
+ * instruction stream by hand. */
 #include "syscall.h"
 
 process_t *task_list_head = 0;
@@ -62,10 +64,31 @@ void init_multitasking(void) {
      */
     map_page(0x80000000, idle_phys, 3); // Present | Read/Write, kernel only
 
-    // Asm: mov eax, 99 (B8 63 00 00 00) | int 0x80 (CD 80) | jmp short -9 (EB F7)
-    uint8_t idle_code[] = { 0xB8, 0x63, 0x00, 0x00, 0x00, 0xCD, 0x80, 0xEB, 0xF7 };
+    /*
+     * Asm: mov eax, SYSCALL_YIELD (B8 imm32) | int 0x80 (CD 80) | jmp short -9 (EB F7)
+     *
+     * The immediate is built from the constant rather than written out as a
+     * byte. It used to be a literal 0x63, with "mov eax, 99" in the comment
+     * beside it, and that is the whole of what tied the idle task to the syscall
+     * it makes: nothing the compiler could check, in a page of machine code, for
+     * the one task the scheduler falls back on when nothing else can run. Moving
+     * SYSCALL_YIELD would have left the byte behind and the machine would not
+     * have booted - not failed a test, not printed anything, not booted.
+     *
+     * B8 takes a full 4-byte immediate, so every syscall number encodes the same
+     * way and there is no range this loop has to stay inside.
+     */
+    uint8_t idle_code[] = {
+        0xB8,
+        (uint8_t)(SYSCALL_YIELD & 0xFF),
+        (uint8_t)((SYSCALL_YIELD >> 8) & 0xFF),
+        (uint8_t)((SYSCALL_YIELD >> 16) & 0xFF),
+        (uint8_t)((SYSCALL_YIELD >> 24) & 0xFF),
+        0xCD, 0x80,
+        0xEB, 0xF7
+    };
     uint8_t *idle_page = (uint8_t *)0x80000000;
-    for(int i = 0; i < 9; i++) {
+    for(int i = 0; i < (int)sizeof(idle_code); i++) {
         idle_page[i] = idle_code[i];
     }
 
@@ -200,6 +223,8 @@ int create_process(uint32_t eip, uint32_t esp, uint32_t cr3) {
     new_task->wait_reason = WAIT_NONE;
     new_task->sleep_deadline = 0;
     new_task->sleep_active = 0;
+    new_task->alarm_deadline = 0;
+    new_task->alarm_active = 0;
     new_task->exit_code = 0;
     new_task->wait_mutex = 0;
     new_task->held_mutex = 0;
@@ -386,6 +411,21 @@ void inherit_pcb_state(process_t *child, process_t *parent) {
     ft_memcpy(child->cmd_args, parent->cmd_args, sizeof(child->cmd_args));
     ft_memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
     child->fpu_initialized = parent->fpu_initialized;
+
+    /*
+     * alarm_deadline and alarm_active are deliberately absent, and this note is
+     * here because their absence is a decision rather than an omission.
+     *
+     * POSIX clears a pending alarm in the child, and the reason holds here: the
+     * parent asked to be told something at a particular moment, and the child is
+     * not the one that asked. A child that inherited it would be signalled - and
+     * by default killed - at a time nothing in it had any part in choosing.
+     * create_process() zeroes the whole PCB before this runs, so the child
+     * starts with no alarm by construction.
+     *
+     * The sleep pair is absent for a different reason: a child is created
+     * runnable, so there is no sleep in progress to carry.
+     */
 }
 
 /**
@@ -1315,6 +1355,51 @@ void wake_expired_sleepers(void) {
 }
 
 /**
+ * @brief Send SIG_ALRM to every task whose alarm() deadline has passed.
+ *
+ * The deadline is absolute and the comparison signed, for the reason spelled out
+ * above wake_expired_sleepers(): the tick counter wraps.
+ *
+ * Collected first and signalled second, which is not tidiness. SIG_ALRM
+ * terminates by default, and send_user_signal() reaps a target that is not the
+ * running task on the spot - unlinking it from the very list a single pass would
+ * be walking, so the step after the first casualty would follow a next pointer
+ * out of a freed node. send_signal_to_group() collects into an array for exactly
+ * this reason and this is the same hazard; MAX_TASKS is the ceiling by
+ * construction, since no more tasks can hold an alarm than exist.
+ *
+ * The flag is cleared before the signal goes out rather than after. An alarm is
+ * one-shot - a caller that wants another says so with another alarm() - and
+ * clearing afterwards would mean a handler that calls alarm() from inside the
+ * delivery had its new deadline wiped by the sweep that delivered the old one.
+ *
+ * The idle task is skipped. It cannot call alarm(), so it can never hold one,
+ * and the check costs a comparison against the case where something else has
+ * gone wrong enough to give it one.
+ */
+void expire_alarms(void) {
+    uint32_t now = timer_get_ticks();
+    int targets[MAX_TASKS];
+    int count = 0;
+
+    for (process_t *p = task_list_head; p != 0 && count < MAX_TASKS; p = p->next) {
+        if (p == idle_task) continue;
+        if (p->state == TASK_EMPTY || p->state == TASK_DEAD) continue;
+        if (!p->alarm_active) continue;
+
+        if ((int32_t)(now - p->alarm_deadline) >= 0) {
+            p->alarm_active = 0;
+            p->alarm_deadline = 0;
+            targets[count++] = p->pid;
+        }
+    }
+
+    for (int i = 0; i < count; i++) {
+        send_user_signal(targets[i], SIG_ALRM);
+    }
+}
+
+/**
  * @brief Schedule the next task to run.
  * 
  * @param regs Pointer to the current CPU registers.
@@ -1393,16 +1478,23 @@ void schedule(arch_regs_t *regs) {
      * harmless for callbacks that only touch kernel mappings and is not a
      * property worth depending on.
      *
-     * Both now run on every entry, on the caller's own stack and directory, and
-     * before the selection passes - so a task either of them makes runnable can
+     * All three now run on every entry, on the caller's own stack and directory,
+     * and before the selection passes - so a task any of them makes runnable can
      * be chosen in this same pass instead of waiting for the next one. That
      * ordering is load-bearing for wake_expired_sleepers(): a sweep after the
      * selection would leave a due sleeper waiting one more scheduling round.
      *
-     * Running either from IRQ0 instead would mean walking the task list from an
-     * interrupt, and that list is edited without masking interrupts - see the
-     * note above. This is the same reasoning that made kernel timers a bottom
-     * half in the first place.
+     * expire_alarms() joins them for the same reason and answers to the same
+     * constraint: it walks the task list, so it cannot run from the interrupt
+     * either. It is last of the three because an alarm that comes due for a
+     * sleeping task should find that task already woken by the sweep above -
+     * the signal is delivered when the task next runs, and a task the scheduler
+     * is about to pick runs sooner than one it has passed over.
+     *
+     * Running any of them from IRQ0 instead would mean walking the task list
+     * from an interrupt, and that list is edited without masking interrupts -
+     * see the note above. This is the same reasoning that made kernel timers a
+     * bottom half in the first place.
      *
      * Progress does not depend on another task being awake: the idle task is a
      * Ring 3 loop of "mov eax, SYSCALL_YIELD; int 0x80" (init_multitasking()),
@@ -1410,6 +1502,7 @@ void schedule(arch_regs_t *regs) {
      */
     process_pending_kernel_timers();
     wake_expired_sleepers();
+    expire_alarms();
 
     if (current_task != 0 && regs) {
         current_task->regs = *regs;
@@ -1673,12 +1766,18 @@ int register_user_signal(int sig_num, uint32_t handler_addr) {
  * SIG_INT joined them in v0.8.0 and this line did not, which is the kind of drift
  * that makes a comment worth less than no comment.
  *
+ * SIG_ALRM joins in v1.0.0, when alarm() became a call that actually signals the
+ * process that made it. Terminating is POSIX's default and it is the one that
+ * makes the call mean anything: alarm() exists to put a bound on something, and
+ * a bound whose default is to be ignored is not a bound. A program that means to
+ * survive its own alarm registers a handler and says so.
+ *
  * @param sig_num The signal number.
- * @return 1 for SIG_KILL, SIG_TERM, SIG_PIPE and SIG_INT, 0 otherwise.
+ * @return 1 for SIG_KILL, SIG_TERM, SIG_PIPE, SIG_INT and SIG_ALRM, 0 otherwise.
  */
 static int signal_terminates_by_default(int sig_num) {
     return sig_num == SIG_KILL || sig_num == SIG_TERM || sig_num == SIG_PIPE ||
-           sig_num == SIG_INT;
+           sig_num == SIG_INT || sig_num == SIG_ALRM;
 }
 
 /**
@@ -1935,11 +2034,17 @@ void apply_default_signal_action(arch_regs_t *regs) {
      * records the signal before it decides what to do with it, so the bit can be
      * sitting here even though the send declined to act on it; drop it rather
      * than walking into an exit that reap_task() will refuse anyway.
+     *
+     * Every bit, not a list of them. This cleared six named signals until
+     * v1.0.0, which was correct only while those were all the signals with a
+     * default action - adding SIG_ALRM to signal_terminates_by_default() would
+     * have left its bit set here forever, on the one task that can never act on
+     * it, with nothing to fail and nothing to notice. The condition being
+     * answered is "this task cannot act on any signal", and that is what the
+     * code should say.
      */
     if (curr == idle_task) {
-        curr->pending_signals &= ~((1u << SIG_KILL) | (1u << SIG_TERM) |
-                                   (1u << SIG_PIPE) | (1u << SIG_INT) |
-                                   (1u << SIG_TSTP) | (1u << SIG_TTIN));
+        curr->pending_signals = 0;
         return;
     }
 

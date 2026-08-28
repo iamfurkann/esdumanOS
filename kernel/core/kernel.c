@@ -821,7 +821,7 @@ static void apply_system_modes(void) {
     }
 
     if (home_id >= 0) {
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 0; i < fs_max_entries; i++) {
             if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)home_id &&
                 dir_table[i].file_type == FT_DIR) {
                 ensure_mode(dir_table[i].filename, (fs_id_t)home_id, 0755);
@@ -846,7 +846,7 @@ static void apply_system_modes(void) {
      * permission layer - but a file that is a program should read as one.
      */
     if (bin_id >= 0) {
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 0; i < fs_max_entries; i++) {
             if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)bin_id &&
                 dir_table[i].file_type == FT_REGULAR) {
                 ensure_mode(dir_table[i].filename, (fs_id_t)bin_id, 0755);
@@ -961,12 +961,14 @@ static int init_filesystem_and_vfs(void) {
     if (tmp_id != -1) {
         klog(LOG_LEVEL_INFO, "VFS", "Cleaning /tmp on boot.");
         /*
-         * MAX_FILES_IN_DIR, not 256. This loop was written when the table held
-         * 256 entries and stayed at 256 when v0.9.0 doubled it, so anything in
-         * /tmp landing in a high slot survived the boot that was supposed to
-         * clear it - which is the opposite of what /tmp promises.
+         * fs_max_entries, not a number. This loop was written when the table
+         * held 256 entries and stayed at 256 when v0.9.0 doubled it, so anything
+         * in /tmp landing in a high slot survived the boot that was supposed to
+         * clear it - the opposite of what /tmp promises. Writing the count as a
+         * literal has been wrong here twice; since v1.3.0 it is not even a
+         * constant, because the table is sized from the disk.
          */
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 0; i < fs_max_entries; i++) {
             if (dir_table[i].is_used == 1 && dir_table[i].parent_id == tmp_id) {
                 fs_delete(dir_table[i].filename, tmp_id);
             }

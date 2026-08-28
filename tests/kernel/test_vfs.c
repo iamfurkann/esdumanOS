@@ -333,13 +333,15 @@ void test_vfs_boundary_and_depth(void) {
     while (backtrack_id != 0) {
         int next_parent = -1;
         /*
-         * The whole table, not a hardcoded 32. MAX_FILES_IN_DIR is 256; the
-         * comment that used to sit here claiming otherwise was stale, and the
-         * short scan missed every entry past index 32 - which is where a boot
+         * The whole table, not a hardcoded 32. fs_max_entries is whatever the
+         * mounted disk holds - 512 on a disk written before v1.3.0, more on a
+         * larger one - and the comment that used to sit here named a fixed
+         * number that had already been wrong twice. The short scan missed every
+         * entry past index 32, which is where a boot
          * has already put the directories this test creates. It never showed
          * because the nesting loop above was failing before it produced any.
          */
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 0; i < fs_max_entries; i++) {
             if (dir_table[i].is_used && dir_table[i].entry_id == backtrack_id) {
                 next_parent = dir_table[i].parent_id;
                 break;
@@ -445,7 +447,7 @@ static void test_disk_format(void) {
                  fs_super.format_version == FS_FORMAT_VERSION,
                  "[STRICT] [VFS] the superblock says what it is and which version");
     KTEST_ASSERT(fs_super.entry_size == sizeof(disk_file_entry_t) &&
-                 fs_super.max_entries <= MAX_FILES_IN_DIR,
+                 fs_super.max_entries <= FS_MAX_ENTRIES_CAP,
                  "[STRICT] [VFS] and describes entries this build agrees with");
     KTEST_ASSERT(fs_super.dir_start < fs_super.fat_start &&
                  fs_super.fat_start < fs_super.data_start,
@@ -464,6 +466,34 @@ static void test_disk_format(void) {
     KTEST_ASSERT(fs_total_clusters * sizeof(uint32_t)
                      <= (fs_super.data_start - fs_super.fat_start) * 512u,
                  "[STRICT] [VFS] the allocation table fits before the data does");
+
+    /* ------------------------------------------------------------------
+     * What v1.3.0 changed: the tables are allocated at mount, sized from the
+     * disk, and every loop in the tree is bounded by fs_max_entries. If that
+     * count and the superblock's ever disagree, the loops run off the end of an
+     * allocation - silently, in forty-odd places. This is the assertion that
+     * says they cannot.
+     * ------------------------------------------------------------------ */
+    KTEST_ASSERT(dir_table != 0 && file_allocation_table != 0,
+                 "[STRICT] [VFS] the tables a mount allocates are actually there");
+    KTEST_ASSERT((uint32_t)fs_max_entries == fs_super.max_entries,
+                 "[STRICT] [VFS] and hold exactly what the superblock says they do");
+    KTEST_ASSERT(fs_total_clusters == fs_super.total_clusters,
+                 "[STRICT] [VFS] the same for the allocation table");
+
+    /*
+     * The geometry the format chose. 512 is the floor - what every disk written
+     * before v1.3.0 has - and the table is kept under a twentieth of the
+     * partition so that a small disk does not spend a third of itself on entries
+     * it could never fill.
+     */
+    KTEST_ASSERT(fs_max_entries >= 512 && fs_max_entries <= FS_MAX_ENTRIES_CAP,
+                 "[VFS] the entry count is between the old fixed size and the cap");
+    KTEST_ASSERT((fs_max_entries & (fs_max_entries - 1)) == 0,
+                 "[VFS] and is a power of two, which is what the doubling produces");
+    KTEST_ASSERT(fs_super.dir_sectors * 20u <= fs_max_sectors ||
+                 fs_super.max_entries == 512,
+                 "[STRICT] [VFS] the directory table stays under a twentieth of the partition");
 
     /* ------------------------------------------------------------------
      * The partition table, and the offset every address now goes through.
@@ -510,7 +540,7 @@ static void test_disk_format(void) {
     KTEST_ASSERT(fs_super.cluster_sectors == FS_CLUSTER_SECTORS,
                  "[STRICT] [VFS] the allocation unit is a cluster of eight sectors");
     KTEST_ASSERT(fs_total_clusters > FS_FIRST_DATA_CLUSTER &&
-                 fs_total_clusters <= FS_MAX_CLUSTERS,
+                 fs_total_clusters <= FS_MAX_CLUSTERS_CAP,
                  "[VFS] and there are clusters to allocate from");
     KTEST_ASSERT(file_allocation_table[0] == FAT_EOF &&
                  file_allocation_table[1] == FAT_EOF,
@@ -567,7 +597,7 @@ static void test_disk_format(void) {
         int dir_slot  = -1;
         int free_slot = -1;
 
-        for (int i = 1; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 1; i < fs_max_entries; i++) {
             if (!dir_table[i].is_used) { if (free_slot < 0) free_slot = i; continue; }
             if (dir_table[i].file_type == FT_REGULAR && file_slot < 0) file_slot = i;
             if (dir_table[i].file_type == FT_DIR     && dir_slot  < 0) dir_slot  = i;
@@ -629,7 +659,7 @@ static void test_disk_format(void) {
     {
         int slot = -1;
 
-        for (int i = 1; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 1; i < fs_max_entries; i++) {
             if (dir_table[i].is_used == 0) { slot = i; break; }
         }
         KTEST_ASSERT(slot > 0, "[VFS] the directory table has room to test with");
@@ -777,7 +807,7 @@ static void test_system_modes(void) {
         int programs = 0;
         int without_x = 0;
 
-        for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+        for (int i = 0; i < fs_max_entries; i++) {
             if (dir_table[i].is_used && dir_table[i].parent_id == (fs_id_t)bin_entry &&
                 dir_table[i].file_type == FT_REGULAR) {
                 programs++;

@@ -18,7 +18,7 @@
 #include "esdtime.h"
 #include "rtc.h"
 #include "entropy.h"
-disk_file_entry_t dir_table[MAX_FILES_IN_DIR];
+disk_file_entry_t *dir_table = 0;
 
 /*
  * Whether this boot is the one that created the file system.
@@ -36,12 +36,90 @@ int fs_was_formatted = 0;
  * which was the old cap and therefore a plausible-looking wrong answer for
  * anything that read it before the mount; nothing should, and zero says so. */
 uint32_t fs_max_sectors = 0;
-uint32_t file_allocation_table[FS_MAX_CLUSTERS];
+uint32_t *file_allocation_table = 0;
 
 disk_superblock_t fs_super;
 int fs_mounted = 0;
 uint32_t fs_part_start = 0;
 uint32_t fs_total_clusters = 0;
+
+/*
+ * Entries the mounted file system holds, as the superblock recorded them.
+ *
+ * The runtime counterpart of FS_MAX_ENTRIES_CAP, and the bound of every loop over
+ * dir_table. Those loops used the cap as their bound until v1.3.0, which was
+ * correct while the table was a static array of exactly that size and is a read
+ * past the end of an allocation now. Renaming the constant is what forced every
+ * one of them to be visited; see the note on FS_MAX_ENTRIES_CAP in fs.h.
+ */
+int fs_max_entries = 0;
+
+/*
+ * One lock per directory entry, and therefore exactly as long as dir_table: the
+ * index into one is the index into the other. It sat further down this file as a
+ * static array; it is up here now because the allocator below has to treat the
+ * three tables as one unit, and because a reader looking for what mount
+ * allocates should find all of it in one place.
+ */
+rwlock_t *inode_locks = 0;
+
+/**
+ * @brief Releases the tables a previous mount allocated.
+ *
+ * init_fs() is callable more than once - test_vfs.c calls it twice to prove that
+ * a disk which cannot be read is refused - so a mount that allocated without
+ * releasing would leak the better part of two megabytes each time. That the leak
+ * would have been introduced here at all was caught by a test written for
+ * something else entirely.
+ */
+static void fs_tables_free(void) {
+    if (dir_table)             { kfree(dir_table);             dir_table = 0; }
+    if (file_allocation_table) { kfree(file_allocation_table); file_allocation_table = 0; }
+    if (inode_locks)           { kfree(inode_locks);           inode_locks = 0; }
+    fs_max_entries = 0;
+}
+
+/**
+ * @brief Allocates the directory table, the allocation table and the inode locks.
+ *
+ * All three or none: a mount holding two of them is a mount that will read past
+ * the end of the third. inode_locks is easy to forget because nothing outside
+ * this file names it, and it has to be exactly as long as dir_table - the index
+ * into one is the index into the other.
+ *
+ * @param entries  Directory entries to make room for.
+ * @param clusters Allocation table entries.
+ * @return E_OK, or E_NOMEM with nothing allocated.
+ */
+static int fs_tables_alloc(uint32_t entries, uint32_t clusters) {
+    fs_tables_free();
+
+    if (entries == 0 || clusters == 0) return E_INVAL;
+    if (entries > FS_MAX_ENTRIES_CAP || clusters > FS_MAX_CLUSTERS_CAP) return E_INVAL;
+
+    dir_table             = (disk_file_entry_t *)kmalloc(entries * sizeof(disk_file_entry_t));
+    file_allocation_table = (uint32_t *)kmalloc(clusters * sizeof(uint32_t));
+    inode_locks           = (rwlock_t *)kmalloc(entries * sizeof(rwlock_t));
+
+    if (!dir_table || !file_allocation_table || !inode_locks) {
+        klog(LOG_LEVEL_ERROR, "VFS", "Not enough kernel memory for the file system tables.");
+        fs_tables_free();
+        return E_NOMEM;
+    }
+
+    ft_memset(dir_table, 0, entries * sizeof(disk_file_entry_t));
+    ft_memset(file_allocation_table, 0, clusters * sizeof(uint32_t));
+
+    for (uint32_t i = 0; i < entries; i++) {
+        rwlock_init(&inode_locks[i]);
+    }
+
+    fs_max_entries = (int)entries;
+
+    klog_int(LOG_LEVEL_INFO, "VFS", "Directory entries this disk holds", (int)entries);
+    klog_int(LOG_LEVEL_INFO, "VFS", "Clusters this disk holds", (int)clusters);
+    return E_OK;
+}
 
 int fs_get_entry_idx(const char *name, fs_id_t parent_id);
 
@@ -103,7 +181,7 @@ static uint32_t fs_now(void) {
 int fs_dir_exists(fs_id_t parent_id) {
     if (parent_id == 0) return 1;
 
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used &&
             dir_table[i].file_type == FT_DIR &&
             dir_table[i].entry_id == parent_id) {
@@ -128,7 +206,6 @@ static void safe_strcpy(char *dest, const char *src, size_t max_len) {
 }
 
 static mutex_t vfs_mutex;
-rwlock_t inode_locks[MAX_FILES_IN_DIR];
 static int vfs_lock_owner = -1;
 static int vfs_lock_count = 0;
 
@@ -235,7 +312,7 @@ static uint32_t allocate_fat_chain(uint32_t count) {
  */
 static void save_directory_to_disk(void) {
     uint8_t *dir_ptr = (uint8_t *)dir_table;
-    uint32_t total_bytes = sizeof(disk_file_entry_t) * MAX_FILES_IN_DIR;
+    uint32_t total_bytes = sizeof(disk_file_entry_t) * fs_max_entries;
     uint32_t sectors_needed = (total_bytes + 511) / 512;
 
     for (uint32_t i = 0; i < sectors_needed; i++) {
@@ -353,38 +430,110 @@ static int write_mbr(uint32_t disk_sectors) {
 /**
  * @brief Lays a fresh file system into the partition.
  *
- * The geometry comes from the FS_ constants here and is then written down in the
- * superblock, which is what everything afterwards reads. Changing the constants
- * later therefore changes what new disks are formatted as, and cannot change how
- * an existing one is read.
+ * The geometry is chosen from the size of the device and then written down in the
+ * superblock, which is what everything afterwards reads. It came from fixed
+ * FS_ constants until v1.3.0, which is why a 16 GB disk and a 2 MB one were laid
+ * out identically and both held 512 entries. Changing what this picks changes
+ * what new disks are formatted as and cannot change how an existing one is read
+ * - a disk written by an older release still says 512 in its own superblock, and
+ * that is what it is mounted with.
  *
  * Clusters 0 and 1 are marked in use and never handed out. That is what lets a
  * start_cluster of 0 mean "no data at all" - which is what a directory and a
  * freshly created empty file both record - without colliding with a real
  * allocation. Every FAT ever written reserves the same two for the same reason.
  */
-static void format_disk(void) {
+/**
+ * @brief Sectors a directory table of @p entries occupies.
+ */
+static uint32_t dir_sectors_for(uint32_t entries) {
+    uint32_t bytes = entries * (uint32_t)sizeof(disk_file_entry_t);
+    return (bytes + 511) / 512;
+}
+
+/**
+ * @brief How many entries a partition of this size should be given.
+ *
+ * Doubling from the old fixed 512 for as long as the table stays under a
+ * twentieth of the partition. The bound is a share rather than a number because
+ * the cost of guessing wrong is asymmetric: a table too small caps the file
+ * system, and a table too large is space the user cannot get back - on the 2 MB
+ * image the test suite uses, the cap of 8192 entries would be 1536 sectors of a
+ * 4032-sector partition, well over a third of the disk spent on a table that
+ * could never be filled.
+ *
+ * A disk written before v1.3.0 keeps whatever its own superblock says.
+ */
+static uint32_t entries_for_partition(uint32_t partition_sectors) {
+    uint32_t entries = 512;
+
+    while (entries * 2 <= FS_MAX_ENTRIES_CAP &&
+           dir_sectors_for(entries * 2) * 20 <= partition_sectors) {
+        entries *= 2;
+    }
+    return entries;
+}
+
+static int format_disk(void) {
     uint8_t zero[512];
 
     klog(LOG_LEVEL_INFO, "VFS", "Blank disk; writing a partition table and a new file system.");
+
+    /*
+     * Entries, then the table, then the allocation table, then where the data
+     * can start - in that order, because each depends on the one before it. The
+     * count of clusters depends on data_start, which depends on how many sectors
+     * the allocation table needs, which depends on the count of clusters; the
+     * loop below settles that rather than solving it, and settles in two passes
+     * because shrinking the cluster count can only shrink the table.
+     */
+    uint32_t entries    = entries_for_partition(fs_max_sectors);
+    uint32_t dir_start  = FS_DIR_START_SECTOR;
+    uint32_t dir_secs   = dir_sectors_for(entries);
+    uint32_t fat_start  = dir_start + dir_secs;
+    uint32_t clusters   = fs_total_clusters;
+    uint32_t fat_secs   = 0;
+    uint32_t data_start = 0;
+
+    /*
+     * Capped before the loop, not after. The caller already clamps, so this is
+     * belt and braces - but applying it afterwards would size the allocation
+     * table for a count larger than the one recorded, and an invariant that
+     * holds only because of what the caller happens to do is not an invariant.
+     */
+    if (clusters > FS_MAX_CLUSTERS_CAP) clusters = FS_MAX_CLUSTERS_CAP;
+
+    for (int pass = 0; pass < 2; pass++) {
+        fat_secs   = (clusters * 4 + 511) / 512;
+        data_start = fat_start + fat_secs;
+
+        uint32_t usable = (fs_max_sectors > data_start) ? (fs_max_sectors - data_start) : 0;
+        uint32_t fit    = usable / FS_CLUSTER_SECTORS;
+
+        if (fit < clusters) clusters = fit;
+    }
+
+    fs_total_clusters = clusters;
+
+    if (fs_tables_alloc(entries, clusters) != E_OK) {
+        klog(LOG_LEVEL_ERROR, "VFS", "Format abandoned: the tables would not fit in memory.");
+        return E_NOMEM;
+    }
 
     ft_memset(&fs_super, 0, sizeof(fs_super));
     fs_super.magic = FS_SUPER_MAGIC;
     fs_super.format_version = FS_FORMAT_VERSION;
     fs_super.sector_size = 512;
     fs_super.total_sectors = fs_max_sectors;
-    fs_super.dir_start = FS_DIR_START_SECTOR;
-    fs_super.dir_sectors = FS_DIR_SECTOR_COUNT;
-    fs_super.max_entries = MAX_FILES_IN_DIR;
+    fs_super.dir_start = dir_start;
+    fs_super.dir_sectors = dir_secs;
+    fs_super.max_entries = entries;
     fs_super.entry_size = (uint16_t)sizeof(disk_file_entry_t);
     fs_super.cluster_sectors = FS_CLUSTER_SECTORS;
-    fs_super.fat_start = FS_FAT_START_SECTOR;
-    fs_super.data_start = FS_DATA_START_SECTOR;
+    fs_super.fat_start = fat_start;
+    fs_super.data_start = data_start;
     fs_super.total_clusters = fs_total_clusters;
     fs_super.flags = 0;
-
-    ft_memset(dir_table, 0, sizeof(dir_table));
-    ft_memset(file_allocation_table, 0, sizeof(file_allocation_table));
 
     for (uint32_t i = 0; i < FS_FIRST_DATA_CLUSTER && i < fs_total_clusters; i++) {
         file_allocation_table[i] = FAT_EOF;
@@ -406,6 +555,7 @@ static void format_disk(void) {
      * disk" rather than "slot lost".
      */
     fs_was_formatted = 1;
+    return E_OK;
 }
 
 /**
@@ -437,10 +587,10 @@ static int load_superblock(void) {
     }
     if (fs_super.sector_size != 512 ||
         fs_super.entry_size != (uint16_t)sizeof(disk_file_entry_t) ||
-        fs_super.max_entries > MAX_FILES_IN_DIR ||
+        fs_super.max_entries > FS_MAX_ENTRIES_CAP ||
         fs_super.cluster_sectors != FS_CLUSTER_SECTORS ||
         fs_super.total_clusters == 0 ||
-        fs_super.total_clusters > FS_MAX_CLUSTERS ||
+        fs_super.total_clusters > FS_MAX_CLUSTERS_CAP ||
         fs_super.dir_start == 0 ||
         fs_super.fat_start <= fs_super.dir_start ||
         fs_super.data_start <= fs_super.fat_start) {
@@ -540,7 +690,15 @@ static int load_partition(uint32_t disk_sectors) {
  * @return 1 when every used entry is consistent.
  */
 int fs_validate_directory_table(void) {
-    for (uint32_t i = 0; i < fs_super.max_entries && i < MAX_FILES_IN_DIR; i++) {
+    /*
+     * One bound, not two. This read "i < fs_super.max_entries && i < the cap",
+     * which was a guard against a superblock claiming more entries than the
+     * static array could hold. The table is allocated to exactly what the
+     * superblock asked for now - load_superblock() refuses a count above the cap
+     * before anything is allocated - so fs_max_entries is that number and the
+     * second test was the same test written twice.
+     */
+    for (int i = 0; i < fs_max_entries; i++) {
         if (!dir_table[i].is_used) continue;
 
         if (dir_table[i].entry_id != (fs_id_t)i) {
@@ -563,15 +721,15 @@ int fs_validate_directory_table(void) {
          * count is what turns a cycle into a refusal instead of a hang: a chain
          * longer than the table cannot be acyclic.
          */
-        uint32_t curr = dir_table[i].parent_id;
-        uint32_t hops = 0;
+        int curr = (int)dir_table[i].parent_id;
+        int hops = 0;
 
         while (curr != 0) {
-            if (++hops > MAX_FILES_IN_DIR) {
+            if (++hops > fs_max_entries) {
                 klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: parent chain does not reach the root", (int)i);
                 return 0;
             }
-            if (curr >= MAX_FILES_IN_DIR || !dir_table[curr].is_used ||
+            if (curr < 0 || curr >= fs_max_entries || !dir_table[curr].is_used ||
                 dir_table[curr].entry_id != (fs_id_t)curr ||
                 dir_table[curr].file_type != FT_DIR) {
                 klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: parent is not a directory that exists", (int)i);
@@ -609,9 +767,13 @@ int fs_validate_directory_table(void) {
  */
 void init_fs(void) {
     mutex_init(&vfs_mutex);
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
-        rwlock_init(&inode_locks[i]);
-    }
+
+    /*
+     * The inode locks are initialised by fs_tables_alloc(), which is the only
+     * place that knows how many there are. A loop here would have run over the
+     * previous mount's count - zero on the first boot - and left the new table's
+     * locks holding whatever kmalloc handed back.
+     */
     bcache_init();
 
     /*
@@ -630,7 +792,14 @@ void init_fs(void) {
     fs_mounted = 0;
     fs_part_start = 0;
     fs_total_clusters = 0;
-    ft_memset(dir_table, 0, sizeof(dir_table));
+
+    /*
+     * Released rather than cleared. This cleared a static array; the tables are
+     * allocated per mount now and the next disk may want different sizes, so
+     * holding the old ones would both leak and mislead. init_fs() is called more
+     * than once - test_vfs.c does it deliberately - so this path is live.
+     */
+    fs_tables_free();
 
     /*
      * Before anything subtracts from it. The partition begins at
@@ -661,12 +830,25 @@ void init_fs(void) {
         uint32_t usable = (fs_max_sectors > FS_DATA_START_SECTOR)
                               ? (fs_max_sectors - FS_DATA_START_SECTOR) : 0;
         fs_total_clusters = usable / FS_CLUSTER_SECTORS;
-        if (fs_total_clusters > FS_MAX_CLUSTERS) fs_total_clusters = FS_MAX_CLUSTERS;
+        if (fs_total_clusters > FS_MAX_CLUSTERS_CAP) fs_total_clusters = FS_MAX_CLUSTERS_CAP;
 
         if (!load_superblock()) {
             klog(LOG_LEVEL_ERROR, "VFS", "Partition found, but no file system this kernel can read.");
             printk("\n[VFS] The partition on this disk does not hold a file system this\n");
             printk("      version can read. Nothing has been written to it.\n\n");
+            return;
+        }
+
+        /*
+         * Sized from what the superblock says this disk holds, not from the caps.
+         * A disk written before v1.3.0 records 512 entries and is mounted with
+         * exactly 512 - which is what keeps the format compatible without a
+         * converter, and what makes fs_max_entries the only correct bound for a
+         * loop over the table.
+         */
+        if (fs_tables_alloc(fs_super.max_entries, fs_super.total_clusters) != E_OK) {
+            printk("\n[VFS] There is not enough kernel memory to mount this disk.\n");
+            printk("      Nothing has been written to it.\n\n");
             return;
         }
     } else {
@@ -725,7 +907,7 @@ void init_fs(void) {
         uint32_t usable = (fs_max_sectors > FS_DATA_START_SECTOR)
                               ? (fs_max_sectors - FS_DATA_START_SECTOR) : 0;
         fs_total_clusters = usable / FS_CLUSTER_SECTORS;
-        if (fs_total_clusters > FS_MAX_CLUSTERS) fs_total_clusters = FS_MAX_CLUSTERS;
+        if (fs_total_clusters > FS_MAX_CLUSTERS_CAP) fs_total_clusters = FS_MAX_CLUSTERS_CAP;
 
         if (fs_total_clusters < FS_FIRST_DATA_CLUSTER + 1) {
             klog(LOG_LEVEL_ERROR, "VFS", "Disk is too small to hold a file system.");
@@ -744,7 +926,11 @@ void init_fs(void) {
             printk("      has not been formatted. Nothing usable was left behind.\n\n");
             return;
         }
-        format_disk();
+        if (format_disk() != E_OK) {
+            printk("\n[VFS] The file system could not be laid down on this disk.\n");
+            printk("      Nothing usable was left behind.\n\n");
+            return;
+        }
     }
 
     uint8_t *dir_ptr = (uint8_t *)dir_table;
@@ -804,7 +990,7 @@ void init_fs(void) {
         printk("\n[VFS] The directory table on this disk is inconsistent with itself.\n");
         printk("      Refusing to mount rather than guess at what it should say.\n");
         printk("      See the kernel log for the entry that failed.\n\n");
-        ft_memset(dir_table, 0, sizeof(dir_table));
+        fs_tables_free();
         return;
     }
 
@@ -978,7 +1164,7 @@ void fs_list_files(void) {
     printk("File List:\n");
     printk("----------------------------------------\n");
     int found = 0;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used == 1) {
             printk("    %s \t\t Size: %d Byte \t Cluster: %d\n",
             dir_table[i].filename, dir_table[i].file_size, dir_table[i].start_cluster);
@@ -998,7 +1184,7 @@ void fs_list_files(void) {
  * @return int
  */
 int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
-    if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) {
+    if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries) {
         /*
          * No interrupt frame is passed. This runs several frames below the
          * syscall entry and does not have the live one; handing over
@@ -1011,7 +1197,7 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
         rwlock_acquire_read(&inode_locks[file->inode_idx], 0);
     }
     if (file->current_offset >= file->file_size) { 
-        if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) rwlock_release_read(&inode_locks[file->inode_idx]); 
+        if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries) rwlock_release_read(&inode_locks[file->inode_idx]); 
         return 0; 
     }
 
@@ -1033,7 +1219,7 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
 
     for (uint32_t i = 0; i < clusters_to_skip; i++) {
         if (current_cluster == FAT_EOF || current_cluster >= fs_total_clusters) {
-            if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR)
+            if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries)
                 rwlock_release_read(&inode_locks[file->inode_idx]);
             return 0;
         }
@@ -1071,7 +1257,7 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
         current_cluster = file_allocation_table[current_cluster];
         offset_in_cluster = 0;
     }
-    if (file->inode_idx >= 0 && file->inode_idx < MAX_FILES_IN_DIR) {
+    if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries) {
         rwlock_release_read(&inode_locks[file->inode_idx]);
     }
     return bytes_read;
@@ -1165,7 +1351,7 @@ int fs_commit_writes(vfs_file_t *file) {
 
     int res = E_OK;
 
-    if (file->inode_idx < 0 || file->inode_idx >= MAX_FILES_IN_DIR) {
+    if (file->inode_idx < 0 || file->inode_idx >= fs_max_entries) {
         res = E_BADF;
     } else {
         fs_id_t parent_id = dir_table[file->inode_idx].parent_id;
@@ -1274,7 +1460,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
 
     int existing_idx = -1;
     int free_idx = -1;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
             existing_idx = i;
         }
@@ -1390,7 +1576,7 @@ int fs_open(const char *name, fs_id_t parent_id, vfs_file_t *file) {
     if (!fs_mounted) return E_NODEV;
 
     vfs_lock();
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used == 1 && 
             dir_table[i].parent_id == parent_id && 
             ft_strcmp(dir_table[i].filename, name) == 0) {
@@ -1439,7 +1625,7 @@ int fs_delete(const char *name, fs_id_t parent_id) {
      * Deleting from /etc needs write permission on /etc, which is 0755 and
      * root's, and the syscall layer asks that before this is reached. */
 
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used == 1 &&
             dir_table[i].parent_id == parent_id &&
             ft_strcmp(dir_table[i].filename, name) == 0) {
@@ -1472,7 +1658,7 @@ int fs_delete(const char *name, fs_id_t parent_id) {
              * orphaned exactly what this check exists to protect.
              */
             if (dir_table[i].file_type == FT_DIR) {
-                for (int c = 0; c < MAX_FILES_IN_DIR; c++) {
+                for (int c = 0; c < fs_max_entries; c++) {
                     if (dir_table[c].is_used == 1 && dir_table[c].parent_id == dir_table[i].entry_id) {
                         klog(LOG_LEVEL_WARN, "VFS", "Refusing to delete a directory that is not empty.");
                         vfs_unlock(); return E_NOTEMPTY;
@@ -1537,14 +1723,14 @@ int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
      * itself reserved system-wide - a user could not call their own file that in
      * their own home directory. */
 
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used == 1 && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, new_name) == 0) {
             klog(LOG_LEVEL_WARN, "VFS", "Rename failed: File with target name already exists!");
             vfs_unlock(); return E_EXIST;
         }
     }
 
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used == 1 && 
             dir_table[i].parent_id == parent_id && 
             ft_strcmp(dir_table[i].filename, old_name) == 0) {
@@ -1585,7 +1771,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
     vfs_lock();
     
     int orig_idx = -1;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
             orig_idx = i; break;
         }
@@ -1611,7 +1797,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
     vfs_lock(); // Lock again for the swap operation
     int tmp_idx = -1;
     orig_idx = -1;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id) {
             if (ft_strcmp(dir_table[i].filename, name) == 0) orig_idx = i;
             if (ft_strcmp(dir_table[i].filename, tmp_name) == 0) tmp_idx = i;
@@ -1628,7 +1814,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
     uint32_t old_cluster = dir_table[orig_idx].start_cluster;
     uint32_t old_size = dir_table[orig_idx].file_size;
 
-    if (orig_idx >= 0 && orig_idx < MAX_FILES_IN_DIR && tmp_idx >= 0 && tmp_idx < MAX_FILES_IN_DIR) {
+    if (orig_idx >= 0 && orig_idx < fs_max_entries && tmp_idx >= 0 && tmp_idx < fs_max_entries) {
         /* No live interrupt frame here either; see fs_read_raw(). */
         rwlock_acquire_write(&inode_locks[orig_idx], 0);
         
@@ -1663,7 +1849,7 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
  * @return Slot index, or -1.
  */
 static int fs_slot_of(fs_id_t entry_id) {
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].entry_id == entry_id) return i;
     }
     return -1;
@@ -1729,7 +1915,7 @@ int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid) {
  */
 int fs_get_entry_idx(const char *name, fs_id_t parent_id) {
     vfs_lock();
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && 
             dir_table[i].parent_id == parent_id && 
             ft_strcmp(dir_table[i].filename, name) == 0) {
@@ -1760,14 +1946,14 @@ int fs_mkdir(const char *name, fs_id_t parent_id) {
         vfs_unlock(); return E_NOENT;
     }
 
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
             vfs_unlock(); return E_EXIST;
         }
     }
 
     int free_idx = -1;
-    for (int i = 1; i < MAX_FILES_IN_DIR; i++) { 
+    for (int i = 1; i < fs_max_entries; i++) { 
         if (dir_table[i].is_used == 0) {
             free_idx = i;
             break;

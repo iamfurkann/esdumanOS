@@ -755,7 +755,7 @@ static int resolve_dir_from_cwd(const char *path) {
     else if (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0') {
         /* Root is its own parent; anything unfound falls back to root. */
         target = 0;
-        for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
+        for (int k = 0; k < fs_max_entries; k++) {
             if (dir_table[k].entry_id == parent && dir_table[k].file_type == FT_DIR &&
                 dir_table[k].is_used == 1) {
                 target = dir_table[k].parent_id;
@@ -834,7 +834,7 @@ void sys_getcwd(arch_regs_t *regs) {
         if (depth >= GETCWD_MAX_DEPTH) { regs->eax = E_NAMETOOLONG; return; }
 
         int idx = -1;
-        for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
+        for (int k = 0; k < fs_max_entries; k++) {
             if (dir_table[k].entry_id == id && dir_table[k].file_type == FT_DIR &&
                 dir_table[k].is_used == 1) {
                 idx = k;
@@ -884,7 +884,7 @@ void sys_getcwd(arch_regs_t *regs) {
  * @return Index into dir_table, or -1 when no live entry carries that id.
  */
 static int dir_index_of_entry_id(fs_id_t id) {
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used == 1 && dir_table[i].entry_id == id) return i;
     }
     return -1;
@@ -936,7 +936,7 @@ static void stat_fill_root(esd_stat_t *out) {
  * @return E_OK on success, or a negative error code.
  */
 static int stat_fill_from_index(esd_stat_t *out, int idx, vfs_file_t *open_file) {
-    if (idx < 0 || idx >= MAX_FILES_IN_DIR || dir_table[idx].is_used != 1) return E_NOENT;
+    if (idx < 0 || idx >= fs_max_entries || dir_table[idx].is_used != 1) return E_NOENT;
 
     out->st_ino = dir_table[idx].entry_id;
     out->st_uid = dir_table[idx].owner_uid;
@@ -1314,7 +1314,7 @@ void sys_readdir(arch_regs_t *regs) {
     if (!kbuf) { regs->eax = E_NOMEM; return; }
 
     uint32_t offset = 0;
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].parent_id == parent_id) {
             uint32_t name_len = 0;
             while (dir_table[i].filename[name_len] && name_len < MAX_FILENAME - 1) name_len++;

@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0-beta.1] - 2026-08-28
+
+The file system is sized from the device it is on. Both of its tables were static arrays,
+so a 16 GB stick and a 2 MB image were laid out identically.
+
+### Changed
+
+- **The directory table and the allocation table are allocated at mount**, from what the
+  superblock records, and the format chooses that from the size of the partition — up to
+  8192 entries and a little under 1 GB of data. They were `disk_file_entry_t[512]` and
+  `uint32_t[4096]`, which is why a large disk was capped at its first 16 MB and held 512
+  files whatever it was. `inode_locks` moved with them: it must be exactly as long as the
+  directory table, and nothing outside `vfs.c` names it.
+
+  This is an improvement rather than a fix, and the release note says so. A large disk
+  mounted and worked before, capped. What was wrong is that raising the cap alone would
+  have bought nothing: 512 entries at 64 KB each is 32 MB of content, so the disk was
+  already within twice what the file system could hold. That is why both moved together.
+
+- **No format change.** The superblock has recorded `max_entries`, `dir_sectors`,
+  `fat_start`, `data_start` and `total_clusters` since v0.10.0, and
+  `fs_cluster_to_sector()` has read those rather than the constants. Turning the
+  constants into ceilings was enough. A disk written by v1.1.0 or v1.2.0 mounts unchanged
+  with its own 512 entries, and there is no converter because none is needed.
+
+- **`MAX_FILES_IN_DIR` and `FS_MAX_CLUSTERS` were deleted rather than redefined.** They
+  bounded forty-three loops between them, and a loop bounded by a ceiling over a table
+  allocated to something smaller compiles perfectly and reads past the end. Deleting the
+  names is what made the compiler point at all forty-three: two of them meant a ceiling
+  and became `FS_MAX_ENTRIES_CAP` / `FS_MAX_CLUSTERS_CAP`, the rest meant a count and
+  became `fs_max_entries` / `fs_total_clusters`. The same mistake in the other direction —
+  a widening that compiled everywhere and was wrong in eight places — cost v0.9.0 three
+  releases.
+
+- **`fs_max_entries` is signed**, because an entry index is an `int` everywhere in this
+  tree: `fs_get_entry_idx()` returns one and uses -1 for "no such entry", and every
+  `inode_idx` is an `int`. A `uint32_t` would have put a signed comparison in twenty-seven
+  loops and ten bounds checks, and the warning would have been right. The count is typed
+  the way the indices are typed instead of being cast at every use.
+
+### Fixed
+
+- **`format_disk()` reports failure.** It could not before, and now it can fail: the
+  tables are allocated inside it. A caller that did not check would have gone on to read
+  the directory table through a null pointer.
+
+- **Three `ft_memset(dir_table, 0, sizeof(dir_table))` calls** would have cleared four
+  bytes once the table became a pointer. Two are now `fs_tables_free()`, which is what the
+  call sites actually wanted, and the third is done by the allocator.
+
+- **The cluster ceiling was applied after the geometry was computed from it**, so a count
+  above the cap would have sized the allocation table for more clusters than the
+  superblock then recorded. The caller already clamped, but an invariant that holds
+  because of what the caller happens to do is not an invariant.
+
+### Known issues
+
+- **A device larger than about 1 GB is used up to that and no further.** The ceiling is a
+  1 MB budget for the allocation table at 4 KB clusters; going beyond it means variable
+  cluster sizes, which `fs_cluster_to_sector()` already supports and `load_superblock()`
+  does not yet accept.
+
+- **A file is still capped at 64 KB** (`MAX_FILE_WRITE_BYTES`), untouched here.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status v1.2.0
+  gave them.
+
 ## [1.2.0-beta.1] - 2026-08-28
 
 A disk that cannot be read is no longer mistaken for a disk with nothing on it. It was,

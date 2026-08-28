@@ -78,7 +78,7 @@ void run_regression_tests(void) {
     // which is the shape of a regression test that has stopped tracking its bug.
     KTEST_ASSERT(fs_cluster_to_sector(fs_total_clusters) <= fs_max_sectors,
                  "[STRICT] REG-03: the last addressable cluster stays inside the partition");
-    KTEST_ASSERT(fs_total_clusters <= FS_MAX_CLUSTERS,
+    KTEST_ASSERT(fs_total_clusters <= FS_MAX_CLUSTERS_CAP,
                  "[STRICT] REG-03: and inside the allocation table that describes it");
 
     // =========================================================

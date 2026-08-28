@@ -2,32 +2,41 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.9.x   | :white_check_mark: |
-| 0.8.x   | :x:                |
-| ≤ 0.7.x | :x:                |
+| Version  | Supported          |
+| -------- | ------------------ |
+| 1.1.x    | :white_check_mark: |
+| 1.0.x    | :x:                |
+| ≤ 0.10.x | :x:                |
 
-Use **0.9.4 or later**, and this is not a preference. On every release from 0.9.0 to
-0.9.3 inclusive, `/etc/shadow` can be read by any account on the system — 0.9.0 because
-it enforced no permission bits at all and created the file `0644`, and 0.9.1 through
-0.9.3 because they enforced the bits on directories only and never on the file. 0.9.4
-asks the file's own mode and closes it. The hashes are salted PBKDF2-HMAC-SHA256
-throughout, so what was exposed is hashes rather than passwords.
+Only the current minor line is supported. This table said 0.4.x for five minor releases
+and then 0.9.x for two more; the line that matters is the current one, and it is 1.1.x.
 
-0.10.0 changed the on-disk format again and **will not read a disk written by 0.9.x**.
-It recognises one and says so rather than reading it as though the layout had not moved.
+**Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
+release before it encrypted the file system under a key compiled into the kernel image,
+which is tamper resistance and not confidentiality: anyone holding the binary held the
+key. Those releases said so in their own boot logs and documentation, so this is a
+documented limitation rather than a vulnerability — but it is the difference between a
+disk that is encrypted and a disk that is protected. 1.1.0 derives the key from a
+passphrase entered at boot.
 
-Only the current minor line is supported. This table said 0.4.x for five minor
-releases; it is the current line that matters, and it is 0.9.x.
+Also avoid anything before **0.9.4**. On every release from 0.9.0 to 0.9.3 inclusive,
+`/etc/shadow` can be read by any account on the system — 0.9.0 because it enforced no
+permission bits at all and created the file `0644`, and 0.9.1 through 0.9.3 because they
+enforced the bits on directories only and never on the file. 0.9.4 asks the file's own
+mode and closes it. The hashes are salted PBKDF2-HMAC-SHA256 throughout, so what was
+exposed is hashes rather than passwords.
+
+The on-disk format has changed twice since and there is no converter for either step:
+0.10.0 **will not read a disk written by 0.9.x**, and 1.1.0 **will not read a disk
+written by 0.10.x or 1.0.x**. Each recognises the older layout and says so rather than
+reading it as though nothing had moved.
 
 Releases before 0.4.2 carry known memory-safety defects fixed in that patch and should
-not be used at all. Everything between 0.4.2 and 0.8.4 works but is unsupported, and
-0.9.0 will not read a disk written by any of them — see below.
+not be used at all. Everything between 0.4.2 and 0.8.4 works but is unsupported.
 
 ## ⚠️ Important Notice
 
-esdumanOS is an **Alpha** educational/experimental operating system. It is **not designed for production use** and should not be used to protect sensitive data. The security features implemented are for learning and demonstration purposes.
+esdumanOS is a **Beta** educational/experimental operating system. It is **not designed for production use** and should not be used to protect sensitive data. The security features implemented are for learning and demonstration purposes.
 
 ## Known Security Limitations
 
@@ -36,12 +45,29 @@ described inaccurately is worse than one described plainly — in either directi
 
 ### Key management
 
-- **The disk encryption key is a build-time constant compiled into the kernel image.**
-  It is set from `ESDUMAN_ELF_KEY_HEX` at build time and embedded in the binary. This
-  provides *tamper resistance* — a modified `/bin` program will not decrypt — and
-  **not** confidentiality at rest: anyone holding the kernel image holds the key. The
-  kernel states this in its own boot log. It is not exposed in the GRUB configuration.
-- Deriving the key from a boot passphrase instead is on the roadmap.
+- **The disk encryption key is derived from a passphrase entered at boot**, as of
+  1.1.0. Two levels: PBKDF2-HMAC-SHA256 over the passphrase produces a key-encryption
+  key, which unwraps a random data key held in a key slot in the superblock. The data
+  key encrypts the file system; the key slot holds the salt, the iteration count, the
+  IV, the wrapped key and an HMAC-SHA256 tag over all of them. A wrong passphrase
+  produces a wrong key-encryption key and the tag does not verify — three attempts,
+  then the machine stops.
+- **There is no fallback to a compiled-in key and no recovery path.** A disk whose key
+  slot was zeroed would otherwise decrypt under a key extractable from the binary,
+  which would be a downgrade an attacker could force by editing 116 bytes; a disk in
+  the older v2 format is refused by its recorded version instead. The other side of
+  that is real: a forgotten passphrase is a disk nobody can read, and there is one key
+  slot rather than the several LUKS offers.
+- **The passphrase protects the disk at rest and nothing beyond it.** After boot the
+  key is in RAM and any root process reads every file through the mounted file system.
+  `LOCKDOWN` zeroes it.
+- **A separate build-time constant remains**, set from `ESDUMAN_ELF_KEY_HEX`, and it
+  decrypts only the `/bin` images embedded in the kernel image. It provides *tamper
+  resistance* — a modified embedded program will not decrypt — and never claimed more.
+  Those images are re-encrypted under the passphrase-derived key as they are written to
+  disk; before 1.1.0 they were stored exactly as the build had encrypted them, so every
+  program in `/bin` was readable on disk to anyone holding the kernel image regardless
+  of the file system key. It is not exposed in the GRUB configuration.
 
 ### Entropy
 
@@ -174,11 +200,12 @@ Security fixes will be prioritized and released as patch versions when applicabl
 Please note that as a hobby/educational OS kernel, the security model is intentionally simplified. Reports about the known limitations listed above will be acknowledged but may not result in immediate changes.
 
 We welcome contributions that improve the security posture of esdumanOS. Currently open:
-- Deriving the disk key from a boot passphrase instead of a build-time constant
 - Adding stack canaries, in the kernel and in user-space programs
 - Implementing ASLR
 
-Already done, so no longer needed: per-user password salting (PBKDF2-HMAC-SHA256 with a
+Already done, so no longer needed: deriving the disk key from a boot passphrase, which
+1.1.0 added along with re-encrypting the embedded `/bin` images under it; per-user
+password salting (PBKDF2-HMAC-SHA256 with a
 16-byte salt); the entropy pool (interrupt-jitter sourced, with per-source budgets and
 an honest quality verdict); validating the directory table on mount, which 0.10.0 added
 so that a crafted image cannot present a tree with a cycle in it or an entry whose id is

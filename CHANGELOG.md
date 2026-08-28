@@ -5,6 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0-beta.1] - 2026-08-28
+
+The disk is confidential at rest now. Every release before this one encrypted the file
+system under a key compiled into the kernel image, which is tamper resistance and not
+confidentiality — the boot log said so itself. The key comes from a passphrase entered
+at boot instead, and the release is named for what that buys: a machine you can carry.
+
+### Added
+
+- **A passphrase-derived file system key, in two levels.** PBKDF2-HMAC-SHA256 turns the
+  passphrase into a key-encryption key; that unwraps a random data key held in a key slot
+  in the superblock; the data key encrypts the file system. Two levels rather than one
+  because a single level would make changing a passphrase mean re-encrypting every file
+  on the disk, and a passphrase change that can fail halfway through is a disk that
+  nothing opens.
+
+- **The key slot**, 116 bytes: a 32-byte salt, the iteration count, the IV, the wrapped
+  key and an HMAC-SHA256 tag over all of them. The tag covers the salt and IV as well as
+  the ciphertext, which is what stops an attacker keeping the wrapped key and
+  substituting a salt they chose. A wrong passphrase produces a wrong key-encryption key,
+  the tag does not verify, and the disk is refused — three attempts, then the machine
+  stops with no way past it.
+
+- **`SYSCALL_SETKEY` (68) and the `setkey` builtin**, root only. Changes the passphrase by
+  re-wrapping the same data key under a fresh salt, so the files are never touched and a
+  wrong old passphrase returns `E_ACCES` having changed nothing. It is 68 because the
+  freeze says new numbers continue from the highest assigned one rather than filling the
+  holes at 11, 28, 30, 31, 32 and 99 — the first number handed out since v1.0.0, and the
+  rule working rather than an exception to it. The next call takes 69.
+
+- **`tests/kernel/test_keyslot.c`**, against the slot alone: round trip, a wrong
+  passphrase refused with the caller's buffer left untouched, every field of the slot
+  edited in turn, iteration counts above and below what this build accepts, and the same
+  data key wrapped under a second passphrase to prove a passphrase change preserves it.
+  The delivery half writes deadlines directly rather than waiting on anything, so nothing
+  in it depends on how long the test takes.
+
+### Fixed
+
+- **The programs in `/bin` were stored on disk under the build-time key.** They are baked
+  into the kernel image encrypted and were written out with `fs_create_file_raw()`,
+  which stores a blob exactly as it arrives — so every system binary on every disk sat
+  there readable to anyone holding the kernel image, whatever the file system key was.
+  A passphrase would have protected the user's files and left the system's own untouched.
+  They are decrypted once with the asset key and re-encrypted under the disk key now.
+
+  This was missed twice before being caught. The audit for this release read the key's
+  consumers and concluded no ELF was encrypted at all, which made the work look smaller
+  than it was; the code said otherwise.
+
+- **`fs_keyslot_rewrap()` wrote sector 0 with no `IMMUTABLE` check.** Every other write
+  path in the VFS refuses at that level and this one did not, so the passphrase could be
+  changed on a disk the system had been told was read-only. The guard sits with the other
+  eight rather than in the syscall, because a rule enforced at the syscall layer is a rule
+  the next in-kernel caller does not get.
+
+- **`QEMU_TEST_TIMEOUT` was too low for the suite it runs.** It reported
+  `KERNEL HUNG! No verdict within 300s` while the Ring 3 payload was still making normal
+  progress. It is 600 now, and the message names the wrong thing when the cause is the
+  budget rather than the kernel.
+
+- **`make run` could not reboot into a formatted disk.** The kernel writes an MBR whose
+  signature is `0xAA55`, because the file system uses that signature to recognise its own
+  partition table at mount — but its 446-byte boot area is zero and nothing there was ever
+  meant to run. The BIOS cannot tell those apart, so on the second boot of a formatted
+  image it called the disk bootable, jumped into 446 bytes of zeros and stopped at
+  "Booting from Hard Disk...". `-boot d` pins the boot to the CD-ROM. The trap has existed
+  since v0.10.0 and went unnoticed because a blank disk carries no signature, so only a
+  reboot with the disk still attached reaches it.
+
+### Changed
+
+- **The on-disk format is v3, and a v2 disk is refused by name.** There is deliberately no
+  "the key slot is empty, so use the built-in key" path: that would be a downgrade an
+  attacker could force by zeroing 116 bytes, which is a hole written into the format
+  rather than found in it. Same treatment v0.10.0 gave v0.9.x disks, and for a better
+  reason.
+
+- **`init_elf_master_key()` is `init_image_asset_key()`**, and it fills `elf_asset_key`
+  rather than `kernel_master_key`. The old name described what the constant was for and
+  the old code used it for something else; the two are separate keys now, with the build
+  constant reduced to what it always honestly claimed — tamper resistance for the
+  embedded images.
+
+- **`CONTRIBUTING`'s list of valid commit prefixes described a rule the project has never
+  followed.** Three of the last forty commits matched it.
+
+- **`SECURITY`'s supported-versions table said 0.9.x**, two minor lines after that stopped
+  being true — and four lines below a sentence observing that the same table had said
+  0.4.x for five releases.
+
+- **README's syscall reference still called 30-32 "reserved for future crypto API"**, one
+  release after v1.0.0 retired them.
+
+### Known issues
+
+- **`test_time`'s clock round trip is still not deterministic** and the cause is still not
+  established. Not touched here.
+
+- **A forgotten passphrase is a disk nobody can read.** There is one key slot, not the
+  several LUKS offers, and no recovery path anywhere. That is the design rather than an
+  oversight, and it is the cost of the guarantee.
+
+- **The disk claims to be bootable and is not.** Its MBR carries a valid signature with no
+  boot code, which is invisible inside QEMU now that `-boot d` pins the boot medium, and
+  will not be invisible on real hardware or a USB stick.
+
+- **There is still no `mount`/`umount`.**
+
 ## [1.0.0-beta.1] - 2026-08-27
 
 The system call interface is frozen. No number already assigned changes its value or its

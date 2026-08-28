@@ -179,7 +179,20 @@ int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_siz
      * anyway and which is what adds the partition offset.
      */
     uint8_t sector[512];
-    fs_read_sector(fs_cluster_to_sector(file->start_cluster), sector);
+
+    /*
+     * Checked rather than left to the magic test below.
+     *
+     * A failed read arrives as zeros, decrypts to garbage, and fails that test -
+     * so this case was already refused, but as "wrong key or corrupted header",
+     * which is a different thing from "the disk did not answer" and points the
+     * reader at a different problem. The two causes are separated here because
+     * the caller can act on the difference.
+     */
+    if (fs_read_sector(fs_cluster_to_sector(file->start_cluster), sector) != E_OK) {
+        klog(LOG_LEVEL_ERROR, "CRYPTO", "Could not read the header sector of an encrypted file.");
+        return E_IO;
+    }
 
     /* Aligned because the header fields are read back through a uint32_t view. */
     uint8_t block[AES_BLOCKLEN] __attribute__((aligned(4)));

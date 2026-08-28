@@ -11,6 +11,7 @@
 #include "libft.h"
 #include "security.h"
 #include "bcache.h"
+#include "blockdev.h"
 static inline int ktest_syscall(int num, int arg1, int arg2, int arg3) {
     int ret;
     asm volatile("int $0x80" : "=a" (ret) : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3) : "memory");
@@ -844,6 +845,85 @@ static void test_system_modes(void) {
                  "[STRICT] [VFS] and the directory's own owner may clear out what is in it");
 }
 
+
+/*
+ * A device that refuses every read, for the one assertion this release is named
+ * after.
+ */
+static int mount_fail_read(void *ctx, uint32_t lba, uint8_t *buf) {
+    (void)ctx; (void)lba; (void)buf;
+    return E_IO;
+}
+
+static int mount_fail_writes = 0;
+
+static int mount_fail_write(void *ctx, uint32_t lba, const uint8_t *buf) {
+    (void)ctx; (void)lba; (void)buf;
+    mount_fail_writes++;
+    return E_IO;
+}
+
+static blockdev_t unreadable_dev = {
+    .name         = "unreadable0",
+    .sector_size  = 512,
+    .sector_count = 4096,
+    .read         = mount_fail_read,
+    .write        = mount_fail_write,
+    .ctx          = 0
+};
+
+/**
+ * @brief Tests that a disk which cannot be read is not mistaken for a blank one.
+ *
+ * This is the defect v1.2.0 exists for. Every failure path in the ATA driver
+ * zeroes the caller's buffer, the block cache discarded the driver's status and
+ * cached those zeros as data, and the mount path read a run of zeros as "this
+ * disk is blank" - and formatted it. A loose cable, a drive that failed
+ * IDENTIFY, or an IRQ that never arrived would all have arrived at
+ * format_disk().
+ *
+ * It cannot be provoked by hand, and that is worth stating plainly: QEMU's IDE
+ * disk does not fail, so the only way to reach the failure branch is to put a
+ * device there that does. The block layer added in this release is what makes
+ * that possible; before it there was nothing to inject at.
+ *
+ * The real disk is flushed first and remounted afterwards, and the remount is
+ * asserted rather than assumed. Every module after this one uses the file system,
+ * so a restore that quietly failed would not show up here - it would show up
+ * somewhere unrelated, as the wrong kind of failure.
+ */
+static void test_mount_refuses_unreadable_disk(void) {
+    blockdev_t *saved = blockdev_root();
+
+    KTEST_ASSERT(bcache_flush() == E_OK,
+                 "[VFS] the disk is clean before the mount test swaps the device");
+    KTEST_ASSERT(fs_mounted == 1,
+                 "[VFS] and the real file system is mounted to begin with");
+
+    blockdev_set_root(&unreadable_dev);
+    mount_fail_writes = 0;
+    init_fs();
+
+    KTEST_ASSERT(fs_mounted == 0,
+                 "[STRICT] [VFS] a disk whose sectors cannot be read is not mounted");
+
+    /*
+     * The assertion with teeth, and it is counted at the device rather than read
+     * off the file system's own state: refusing to mount would be worth little if
+     * the disk had been formatted on the way to refusing. Checking dir_table here
+     * would prove nothing - init_fs() zeroes it on entry, so it reads empty
+     * whether or not a format ran.
+     */
+    KTEST_ASSERT(mount_fail_writes == 0,
+                 "[STRICT] [VFS] and not one sector was written to it on the way to refusing");
+
+    blockdev_set_root(saved);
+    init_fs();
+
+    KTEST_ASSERT(fs_mounted == 1,
+                 "[STRICT] [VFS] and the real disk mounts again once it is back");
+}
+
 void run_vfs_tests(void) {
     printk("\n--- VFS (Virtual File System) Tests ---\n");
 
@@ -879,4 +959,5 @@ void run_vfs_tests(void) {
     test_vfs_rmdir_semantics();
     test_disk_format();
     test_system_modes();
+    test_mount_refuses_unreadable_disk();
 }

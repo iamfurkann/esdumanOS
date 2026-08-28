@@ -427,10 +427,19 @@ static inline uint32_t fs_cluster_to_sector(uint32_t cluster) {
  * @param rel_sector Sector, counted from the first sector of the partition.
  * @param buffer 512 bytes.
  */
-void fs_read_sector(uint32_t rel_sector, uint8_t *buffer);
+/**
+ * @brief Reads a sector named relative to the partition.
+ *
+ * Returns a status as of v1.2.0. It returned void, so nothing above it could
+ * learn that the disk had failed - and the block cache handed back a zeroed
+ * buffer on failure, which the mount path read as a blank disk and formatted.
+ *
+ * @return E_OK, or a negative errno from the device.
+ */
+int fs_read_sector(uint32_t rel_sector, uint8_t *buffer);
 
 /** @brief Writes a partition-relative sector. See fs_read_sector(). */
-void fs_write_sector(uint32_t rel_sector, uint8_t *buffer);
+int fs_write_sector(uint32_t rel_sector, uint8_t *buffer);
 
 /**
  * @brief Checks the directory table's own invariants.

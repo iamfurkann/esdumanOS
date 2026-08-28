@@ -6,6 +6,9 @@
  */
 #include "kernel.h"
 #include "init_elf.h"
+/* The boot path is where hardware is brought up, so this is where the disk
+ * driver is named. Nothing under fs/ includes it any more. */
+#include "ata.h"
 #include "keyboard.h" 
 #include "crypto.h"
 #include "entropy.h"
@@ -866,6 +869,21 @@ static int init_filesystem_and_vfs(void) {
     asm volatile("sti");
 
     boot_ok("Kernel Heap & Signal Handlers Registered");
+
+    /*
+     * Bring the disk up before mounting anything on it.
+     *
+     * This call used to be the first line of init_fs(), which meant the file
+     * system knew which driver it was sitting on and named it. It brings the
+     * drive up, learns its capacity and registers it as the root block device;
+     * init_fs() then asks the block layer how big the disk is and never learns
+     * that the answer came from an IDE controller. Moving it here is what makes
+     * that true rather than nearly true.
+     *
+     * A disk that does not answer registers nothing, and init_fs() refuses to
+     * mount rather than formatting - see the blank-disk path there.
+     */
+    ata_identify();
 
     init_fs();
 

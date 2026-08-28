@@ -35,8 +35,20 @@ void init_pmm(multiboot_info_t *mboot_info);
 /**
  * @brief Allocates a single physical frame.
  * Scans the bitmap for a free frame, marks it as used, and returns its physical address.
- * 
- * @return The physical address of the allocated 4KB frame, or 0 if no memory is available.
+ *
+ * The frame is contiguous by definition, which is the whole of what a device
+ * doing its own memory access needs from one page: v1.5.0's AHCI driver puts its
+ * command list, FIS area, command table and sector buffer inside a single frame
+ * rather than asking for several in a row.
+ *
+ * @return The physical address of the allocated 4 KB frame, or 0xFFFFFFFF when
+ *         there is none. This said "or 0 if no memory is available" from the
+ *         first release until v1.5.0, and zero is a physical address the
+ *         allocator deliberately never hands out - so a caller that believed the
+ *         header would have treated every failure as a valid low frame. Every
+ *         caller in the tree tested against 0xFFFFFFFF and none was ever misled;
+ *         the header was wrong on its own, which is how ata.h's return contract
+ *         also went four years before anybody read it.
  */
 uint32_t pmm_alloc_frame(void);
 

@@ -136,9 +136,63 @@ void unmap_page(uint32_t virtual_addr) {
     uint32_t *pt_virt = (uint32_t *)(RECURSIVE_PT_VADDR + (pd_index * PAGE_SIZE));
 
     if (pd_virt[pd_index] & 1) {
-        pt_virt[pt_index] = 0; 
-        asm volatile("invlpg (%0)" ::"r"(virtual_addr) : "memory"); 
+        pt_virt[pt_index] = 0;
+        asm volatile("invlpg (%0)" ::"r"(virtual_addr) : "memory");
     }
+}
+
+/*
+ * Next free address in the device window.
+ *
+ * A bump allocator with no free, and that is a decision rather than an omission.
+ * Device mappings in this kernel are taken once, on the boot path, by a driver
+ * that is never unloaded - there is no mechanism to unload one - so a free list
+ * would be a structure with no caller, which this project deletes. The window is
+ * 16 MB and the only thing that maps into it needs 8 KB; if that ever stops
+ * being true, the release that makes it untrue is the release that grows this.
+ */
+static uint32_t device_window_next = DEVICE_WINDOW_BASE;
+
+void *vmm_map_device(uint32_t phys, uint32_t size) {
+    if (size == 0) return 0;
+
+    /*
+     * The offset within the page is kept and handed back on the end, so a caller
+     * with a register file that does not start on a page boundary gets a pointer
+     * to its registers rather than to the page they happen to sit in.
+     */
+    uint32_t page_offset = phys & 0xFFF;
+    uint32_t phys_base   = phys & 0xFFFFF000;
+    uint32_t bytes       = (page_offset + size + 0xFFF) & 0xFFFFF000;
+
+    if (bytes < size) return 0;   /* the rounding above wrapped */
+    if (device_window_next + bytes > DEVICE_WINDOW_END ||
+        device_window_next + bytes < device_window_next) {
+        klog(LOG_LEVEL_ERROR, "VMM", "Device window exhausted; mapping refused.");
+        return 0;
+    }
+
+    uint32_t vaddr = device_window_next;
+
+    for (uint32_t off = 0; off < bytes; off += PAGE_SIZE) {
+        if (map_page(vaddr + off, phys_base + off, PAGE_KERNEL_MMIO) != E_OK) {
+            /*
+             * Unwind what was installed. A half-mapped region handed back as a
+             * failure would leave entries pointing at device memory that nothing
+             * remembers owning, and the window's bump pointer would still be
+             * where it was - so the next caller would map over them.
+             */
+            for (uint32_t done = 0; done < off; done += PAGE_SIZE) {
+                unmap_page(vaddr + done);
+            }
+            klog(LOG_LEVEL_ERROR, "VMM", "Device mapping refused by the page tables.");
+            return 0;
+        }
+    }
+
+    device_window_next = vaddr + bytes;
+
+    return (void *)(vaddr + page_offset);
 }
 
 /**

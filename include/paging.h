@@ -63,6 +63,25 @@
 #define TEMP_MAP_VADDR     0xE0000000
 
 /**
+ * @brief The window device registers and DMA buffers are mapped into.
+ *
+ * Kernel space is 0xC0000000 upwards and most of it is empty: the first 16 MB of
+ * physical memory sits at 0xC0000000, the kernel heap grows upwards from
+ * 0xD0000000, TEMP_MAP_VADDR takes a single page at 0xE0000000, and the
+ * recursive page tables live at the very top. Everything from here to
+ * DEVICE_WINDOW_END was unclaimed, and a driver needs somewhere to put a
+ * controller's registers that is not backed by RAM.
+ *
+ * 16 MB, which is far more than anything this kernel will map - an AHCI
+ * controller's register file is under 8 KB - and it costs nothing but address
+ * space on a machine that has 128 MB of memory and 4 GB of addresses.
+ */
+#define DEVICE_WINDOW_BASE 0xE1000000
+
+/** @brief One past the last address vmm_map_device() will hand out. */
+#define DEVICE_WINDOW_END  0xE2000000
+
+/**
  * @brief Standard page size (4 KB).
  */
 #ifndef PAGE_SIZE
@@ -105,6 +124,26 @@
 #define PAGE_COW           0x200
 
 /**
+ * @brief Kernel mapping for memory that is not memory.
+ *
+ * Present, writable, kernel-only - and with PWT (bit 3) and PCD (bit 4) set, so
+ * the processor neither caches reads from it nor lets writes to it sit in a
+ * cache line waiting to be flushed.
+ *
+ * That is not an optimisation choice, it is the difference between a driver that
+ * works and one that does not. A control register mapped write-back accepts a
+ * write into the cache and the device never sees it; a status register read the
+ * same way answers with whatever the cache remembers rather than what the device
+ * is saying now. The failure has no symptom other than the device ignoring
+ * everything, which is why it is worth a named constant rather than a literal at
+ * the call site.
+ *
+ * map_page() needs no change to honour this: it already passes flags through as
+ * (flags & 0xFFF), and both bits are inside that mask.
+ */
+#define PAGE_KERNEL_MMIO   0x1B
+
+/**
  * @brief Initializes the paging subsystem.
  * Sets up the kernel page directory and enables hardware paging.
  */
@@ -119,6 +158,24 @@ void init_paging(void);
  * @return 0 on success, or a negative error code on failure.
  */
 int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+
+/**
+ * @brief Maps a physical region into the device window, uncached.
+ *
+ * For a controller's register file, and for the buffers handed to a controller
+ * that reads memory on its own. kmalloc() cannot serve the second of those: it
+ * maps one page at a time from wherever the physical allocator happened to be,
+ * so a heap block is contiguous in virtual addresses and scattered in physical
+ * ones, and a device given the address of the first page would walk into
+ * somebody else's.
+ *
+ * @param phys Physical base. Need not be page aligned; the offset within the
+ *             page is preserved in the returned pointer.
+ * @param size Bytes required from @p phys.
+ * @return A kernel pointer to @p phys, or 0 when the window is exhausted or the
+ *         mapping was refused.
+ */
+void *vmm_map_device(uint32_t phys, uint32_t size);
 
 /**
  * @brief Unmaps a previously mapped virtual address.

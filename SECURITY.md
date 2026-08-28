@@ -4,12 +4,12 @@
 
 | Version  | Supported          |
 | -------- | ------------------ |
-| 1.1.x    | :white_check_mark: |
-| 1.0.x    | :x:                |
-| ≤ 0.10.x | :x:                |
+| 1.2.x    | :white_check_mark: |
+| 1.1.x    | :x:                |
+| ≤ 1.0.x  | :x:                |
 
 Only the current minor line is supported. This table said 0.4.x for five minor releases
-and then 0.9.x for two more; the line that matters is the current one, and it is 1.1.x.
+and then 0.9.x for two more; the line that matters is the current one, and it is 1.2.x.
 
 **Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
 release before it encrypted the file system under a key compiled into the kernel image,
@@ -37,6 +37,15 @@ not be used at all. Everything between 0.4.2 and 0.8.4 works but is unsupported.
 ## ⚠️ Important Notice
 
 esdumanOS is a **Beta** educational/experimental operating system. It is **not designed for production use** and should not be used to protect sensitive data. The security features implemented are for learning and demonstration purposes.
+
+**Use 1.2.0 or later if the disk matters to you at all.** Every release before it could
+format a disk it had merely failed to read. The ATA driver zeroes its buffer on every
+failure path and reported the outcome through a return value nothing looked at, so a drive
+that failed to identify, an out-of-range sector, a timed-out interrupt or a hardware error
+all reached the mount path as a run of zeros - which it read as an empty disk and
+formatted. It cannot happen under QEMU, whose disk does not fail, and it is exactly what
+happens on real hardware with a loose cable. This is data loss rather than disclosure, so
+it is here rather than in the list below, and it is the strongest reason to move.
 
 ## Known Security Limitations
 

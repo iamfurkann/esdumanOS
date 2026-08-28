@@ -1015,6 +1015,7 @@ void show_help(void) {
     printk("\n  Settings:\n");
     printk("    layout tr|us      Set keyboard layout\n");
     printk("    lockdown          Switch system to safe mode\n");
+    printk("    setkey            Change the disk passphrase asked for at boot (root)\n");
     printk("    clear             Clear the screen\n");
     printk("\n  Operators: | (pipe, up to four stages), > (redirect), && (AND), || (OR)\n");
     printk("  Note: > and | cannot be combined in one command.\n");
@@ -1937,6 +1938,68 @@ void execute_command(char **args) {
             last_exit_status = 1;
         }
     }
+    else if (ft_strcmp(args[0], "setkey") == 0) {
+        /*
+         * Changes the passphrase the disk is unlocked with at boot, which is a
+         * different secret from the one `su` asks for. The login password lives
+         * in /etc/shadow, on the disk; the disk passphrase is what makes that
+         * file readable in the first place, so it cannot be stored there.
+         *
+         * The new one is asked for twice. A typo here is not recoverable by any
+         * means this system offers - the data key is wrapped under whatever was
+         * typed, and nothing anywhere else knows it.
+         *
+         * Read masked, like `su`, and each buffer is cleared before returning
+         * rather than left on the shell's stack.
+         */
+        char cur_pass[64];
+        char new_pass[64];
+        char confirm[64];
+
+        printk("Current disk passphrase: ");
+        if (read_line(cur_pass, 1, 64) < 0) {
+            last_exit_status = 130;
+        } else {
+            printk("\nNew disk passphrase: ");
+            if (read_line(new_pass, 1, 64) < 0) {
+                last_exit_status = 130;
+            } else {
+                printk("\nRepeat new passphrase: ");
+                if (read_line(confirm, 1, 64) < 0) {
+                    last_exit_status = 130;
+                } else if (ft_strcmp(new_pass, confirm) != 0) {
+                    printk("\nsetkey: the two entries do not match; nothing changed\n");
+                    last_exit_status = 1;
+                } else {
+                    int r = syscall(68, (int)cur_pass, (int)new_pass, 0);
+                    if (r == 0) {
+                        printk("\nsetkey: passphrase changed. The next boot asks for the new one.\n");
+                        last_exit_status = 0;
+                    } else {
+                        /*
+                         * The kernel distinguishes these and the user can act on
+                         * the difference, so the shell does not flatten them into
+                         * one message - the mistake the exec path made until
+                         * v0.9.4.
+                         */
+                        if (r == E_PERM)        printk("\nsetkey: only root may change the disk passphrase\n");
+                        else if (r == E_ACCES)  printk("\nsetkey: current passphrase rejected; nothing changed\n");
+                        else if (r == E_ROFS)   printk("\nsetkey: the disk is read-only at this security level\n");
+                        else if (r == E_INVAL)  printk("\nsetkey: passphrase must not be empty and must fit in 63 characters\n");
+                        else                    printk("\nsetkey: the passphrase could not be changed\n");
+                        last_exit_status = 1;
+                    }
+                }
+            }
+        }
+
+        {
+            volatile char *a = cur_pass;
+            volatile char *b = new_pass;
+            volatile char *c = confirm;
+            for (int i = 0; i < 64; i++) { a[i] = 0; b[i] = 0; c[i] = 0; }
+        }
+    }
     else if (ft_strcmp(args[0], "dmesg") == 0) {
         /*
          * Read a slice, write a slice. The kernel used to print the whole log
@@ -2335,7 +2398,7 @@ void run_with_redirect(char **args, char *redirect_file) {
 /**
  * @brief What Tab offers, which is deliberately not the list of what runs.
  *
- * Thirty-three words reach a builtin branch in execute_command(). Thirty-one are
+ * Thirty-four words reach a builtin branch in execute_command(). Thirty-two are
  * here, and the four that are missing are missing on purpose: `panic` deliberately
  * crashes the kernel, and `stack`, `testmalloc` and `alarm` are debugging tools
  * that exist to be typed by somebody who already knows they are there. Offering
@@ -2354,7 +2417,7 @@ static const char *builtin_commands[] = {
     "bg", "fg", "jobs", "wait",
     "exit", "export", "halt", "help", "hexdump", "kill", "layout",
     "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
-    "rm", "sleep", "su", "sync", "write",
+    "rm", "setkey", "sleep", "su", "sync", "write",
     0  // sentinel
 };
 

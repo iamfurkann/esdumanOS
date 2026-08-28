@@ -20,11 +20,71 @@
 #include "rtc.h"
 #include "uaccess.h"
 #include "kheap.h"
+/* For fs_keyslot_rewrap() and KEYSLOT_MAX_PASSPHRASE, which sys_setkey() needs.
+ * fs.h pulls in keyslot.h, so the passphrase ceiling comes with it. */
+#include "fs.h"
 
 /* Ceiling on the kernel staging buffer for a dmesg read. Mirrors
  * READDIR_STAGE_MAX in sys_fs.c and exists for the same reason: the size comes
  * from user space. */
 #define DMESG_STAGE_MAX 4096
+
+/**
+ * @brief Changes the disk passphrase; ebx is the old one, ecx the new one.
+ *
+ * The first call added after the ABI froze, and the freeze is why it is 68: the
+ * rule is that new numbers continue from the highest assigned one, not that they
+ * fill the gaps at 11, 28, 30, 31, 32 and 99.
+ *
+ * Root only, and the reason is narrower than it looks. This does not protect the
+ * files from the caller - root can already read every one of them through the
+ * mounted file system, because the disk is unlocked the moment the machine
+ * booted. What it protects is the disk at rest: whoever can change the
+ * passphrase decides who can mount this disk on the next boot, and that is not a
+ * decision a second user gets to make.
+ *
+ * No brute-force throttle, unlike sys_auth(). A caller who is already root has
+ * nothing to gain by guessing the old passphrase - everything it would unlock is
+ * already open to them - and PBKDF2 at the configured work factor is its own
+ * rate limit besides.
+ *
+ * Both buffers are wiped before returning. They sit on the kernel stack, which
+ * the next syscall will reuse without clearing.
+ */
+void sys_setkey(arch_regs_t *regs) {
+    char old_pass[KEYSLOT_MAX_PASSPHRASE];
+    char new_pass[KEYSLOT_MAX_PASSPHRASE];
+    int res;
+
+    if (current_task->uid != 0) {
+        klog(LOG_LEVEL_WARN, "SEC", "setkey: refused, only root may change the disk passphrase.");
+        regs->eax = E_PERM;
+        return;
+    }
+
+    if (!validate_string_pointer((const char *)regs->ebx, sizeof(old_pass)) ||
+        !validate_string_pointer((const char *)regs->ecx, sizeof(new_pass)) ||
+        copy_string_from_user(old_pass, (const char *)regs->ebx, sizeof(old_pass)) != E_OK ||
+        copy_string_from_user(new_pass, (const char *)regs->ecx, sizeof(new_pass)) != E_OK) {
+        regs->eax = E_FAULT;
+        return;
+    }
+
+    /*
+     * fs_keyslot_rewrap() carries the whole operation, including the refusal
+     * under IMMUTABLE and the rule that a failed re-wrap leaves the live slot
+     * untouched. Nothing is re-implemented here.
+     */
+    res = fs_keyslot_rewrap(old_pass, new_pass);
+
+    {
+        volatile char *o = old_pass;
+        volatile char *n = new_pass;
+        for (uint32_t i = 0; i < sizeof(old_pass); i++) { o[i] = 0; n[i] = 0; }
+    }
+
+    regs->eax = res;
+}
 
 /**
  * @brief Function sys_auth

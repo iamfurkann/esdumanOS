@@ -146,6 +146,7 @@ void sys_setuid_call(arch_regs_t *regs);
 void sys_set_layout(arch_regs_t *regs);
 /** @brief Syscall handler for setting the system security level */
 void sys_set_sec_level(arch_regs_t *regs);
+void sys_setkey(arch_regs_t *regs);
 /** @brief Syscall handler for locking down the system */
 void sys_lockdown(arch_regs_t *regs);
 /** @brief Syscall handler for triggering a kernel panic */

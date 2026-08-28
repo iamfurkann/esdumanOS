@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0-beta.1] - 2026-08-28
+
+The kernel can ask the machine what it has. Every piece of hardware it uses, it has so
+far assumed: the disk at 0x1F0, the keyboard at 0x60, the screen at 0xB8000. Each of
+those is true of the machine this has always been tested on and false of the machine it
+is aiming at, and there was no way to find out which one had booted.
+
+### Added
+
+- **PCI bus enumeration** (`drivers/pci.c`, `include/pci.h`). Configuration space through
+  the ports at 0xCF8 and 0xCFC, not the memory-mapped window a modern chipset also
+  offers — the ports work on every PC that has ever had PCI and need nothing this kernel
+  does not already have, where ECAM would need device memory mapped. Buses behind a
+  bridge are walked from a worklist rather than by recursion, with a visited set: the
+  kernel stack is 8 KB with interrupts landing on it, and a bridge that names itself as
+  its own secondary bus is then a bounded mistake instead of an unbounded one. Up to 32
+  functions are recorded (`PCI_MAX_DEVICES`), and a machine with more gets a log line
+  saying the list stops there.
+
+- **`inl` and `outl`** in `include/io.h`. The last thing missing from that header, and
+  the reason the roadmap had listed PCI as the prerequisite of a prerequisite for three
+  releases: configuration space is addressed and read as doublewords, and nothing here
+  could write one.
+
+- **`SYSCALL_PCIINFO` (69) and `/bin/lspci`**, the twentieth program. Built the way
+  `free` was rebuilt in v0.9.2 — the kernel renders the text and the program writes it to
+  descriptor 1 — so `lspci > devices.txt` produces a file with something in it. Root
+  only, through the same `diag_ready()` check `MEMINFO`, `HEXDUMP` and `STACK_DUMP` use.
+  The second number assigned since the freeze, continuing from `SETKEY` at 68 rather than
+  filling one of the holes, which is what makes 68 a rule rather than a one-off.
+
+- **`tests/kernel/test_pci.c`**, the 38th module. There is no fake device: configuration
+  space is two I/O ports and nothing can stand between the driver and them, so the
+  assertions are about the enumeration rather than the hardware. That the stored vendor
+  and class match a fresh read of the same registers is the one that matters most — an
+  offset wrong by two bytes fills the table with plausible numbers.
+
+### Fixed
+
+- **`ata_identify()` could hang forever, and on the target machine it would.** The wait
+  for the busy bit after `IDENTIFY` was written out inline with no timeout, ninety lines
+  below an `ata_wait_bsy()` that has always had one and that every other wait in the
+  driver goes through. An undecoded x86 port reads back 0xFF, BSY is bit 7, so on a bus
+  with no IDE controller the loop never ended: the kernel did not report a missing disk,
+  it stopped — before `init_fs()`, before anything reached the screen. QEMU's i440fx
+  always carries a PIIX3 IDE controller, which is why no release ever produced the
+  condition: the loop has been there since v0.1.0-alpha, so every release this project has
+  made carried it and not one of them could have found it. `-M q35` produces it
+  immediately, and README now documents that invocation. An all-ones status is also recognised by name now, so the answer is
+  immediate rather than a timeout.
+
+  Same shape as the v1.2.0 defect: the helper existed, and the code beside it did not
+  call it.
+
+- **`ATA_TIMEOUT_MS` is `ATA_TIMEOUT_TICKS`.** It was never milliseconds. Every use
+  compares it against a difference of `timer_get_ticks()` and `TIMER_HZ` is 100, so the
+  budget has always been two seconds. Renamed rather than rescaled — the behaviour is the
+  one every release was tested with; the name was the wrong half.
+
+- **A test that had been reading past the end of its own buffer.** `test_vfs`'s "an id
+  past 255 survives the trip to the sector and back" read one sector and copied 96 bytes
+  from an offset within it. An entry is 96 bytes and a sector is 512, which do not divide,
+  so an entry beginning later than byte 416 finishes in the next sector — two slots in
+  every sixteen. For those two the copy ran off the end of a 512-byte stack buffer and
+  asserted on whatever followed it. It passed because the first free slot had never landed
+  on one of those residues; adding a twentieth program to `/bin` moved it onto one.
+
+  The straddle is correct and expected — `save_directory_to_disk()` writes the table as a
+  flat byte stream, so an entry across a boundary is the disk's ordinary shape. The test
+  now reads it in the two pieces the disk stores it in, which also means the assertion
+  covers the straddling case instead of having avoided it for eleven releases.
+
+- **Three stale documentation claims.** The roadmap said `mount` and `umount` could take
+  68 and 69, written before `SETKEY` took 68 and left standing for three releases four
+  lines below a paragraph saying `SETKEY` took 68; they take 70 and 71. The `test_abi.c`
+  row claimed 62 syscall numbers and "that 68 is still free". The shell was listed with
+  33 builtins where `sh.c` itself counts 34.
+
+### Changed
+
+- **The boot path enumerates the bus before probing the disk**, and says what it found
+  about storage next to where the probe happens: an IDE controller by name, or a storage
+  controller this kernel has no driver for, or nothing. On the target machine that line
+  is the difference between "no disk" and "the disk is behind a controller this kernel
+  cannot drive".
+
+  Nothing is gated on it. Making the ATA probe conditional on the enumeration's verdict
+  would be the v1.2.0 mistake again — two defensible decisions with an unwatched link
+  between them, where a wrong answer from the new subsystem silently removes the disk.
+  What stops the probe hanging is its own timeout.
+
+### Known issues
+
+- **Nothing on the bus is driven.** The base address registers are read and reported and
+  none is mapped, so a machine whose disk is behind an AHCI controller is now a machine
+  that says so and still cannot read the disk. Mapping them needs device memory mapped
+  and, for anything that transfers, DMA — neither exists here.
+
+- **The enumeration is a snapshot taken once, on the boot path.** Nothing rescans and
+  there is no hotplug.
+
+- **No BAR sizing.** Finding out how large a region is means writing all ones to the
+  register and reading back, and that write moves where the device decodes for as long as
+  it takes. Nothing here has a reason to map a region yet, so nothing here has a reason
+  to take that risk.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status v1.2.0
+  gave them. A device larger than about 1 GB is still used only up to that.
+
 ## [1.3.0-beta.1] - 2026-08-28
 
 The file system is sized from the device it is on. Both of its tables were static arrays,

@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.3.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.4.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -23,8 +23,9 @@
 >
 > **What 1.0 means here:** the system call interface is frozen. No number already
 > assigned changes its value or its meaning, the retired numbers are never reused, and
-> new calls continue from the highest assigned number — `SETKEY` took 68 in v1.1.0 and
-> the next one takes 69. Enforced by `tests/kernel/test_abi.c`, which asserts every
+> new calls continue from the highest assigned number — `SETKEY` took 68 in v1.1.0,
+> `PCIINFO` took 69 in v1.4.0, and the next one takes 70. Enforced by
+> `tests/kernel/test_abi.c`, which asserts every
 > number, errno, flag and security level by literal value. It is a promise about the
 > interface, not a claim about the system underneath it: the
 > [Known Limitations](#known-limitations) are the same list they were, one test module is
@@ -425,7 +426,8 @@ the format, so a v2 disk is refused by name the way v0.9.x disks have been since
 
 `SETKEY` is 68 — the first number assigned since the freeze, and the freeze working
 rather than an exception to it: new calls continue from the highest assigned number, so
-the next one takes 69.
+the next one takes 69. `PCIINFO` took it three releases later, which is what turns that
+sentence from a claim into a habit.
 
 v1.2.0 stops a failed disk read from looking like an empty disk. Until now the ATA driver
 zeroed its buffer on every failure path and reported the outcome through a return value
@@ -482,7 +484,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 19 user-space programs and 34 shell builtins
-- 37 kernel self-test modules and CI pipeline
+- 38 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -501,7 +503,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 63 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 64 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -541,7 +543,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Driver | Description |
 |--------|-------------|
-| **ATA/IDE** | PIO-mode disk I/O with IRQ-based waiting, 28-bit LBA, single-sector read/write, cache flush |
+| **ATA/IDE** | PIO-mode disk I/O with IRQ-based waiting, 28-bit LBA, single-sector read/write, cache flush. Every wait is bounded, including the one after `IDENTIFY` that was not until v1.4.0 |
+| **PCI** | Bus enumeration only. Configuration space through ports 0xCF8/0xCFC, the buses behind bridges walked from a worklist, up to 32 functions recorded with their class, IDs and base address registers. It drives nothing: the BARs are read and reported, never mapped |
 | **PS/2 Keyboard** | IRQ1 handler, US and Turkish layouts, Shift/CapsLock/AltGr, 256-byte ring buffer |
 | **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management |
 | **RTC** | CMOS real-time clock, BCD/binary auto-detection, 12/24-hour conversion |
@@ -561,8 +564,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **Shell** | Login screen, 33 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more), four-stage pipelines, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion, line editing with history, and Tab completion that walks its candidates |
-| **Programs** | 19 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown` |
+| **Shell** | Login screen, 34 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more; four are deliberately absent from Tab completion and `help`, `panic` among them), four-stage pipelines, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion, line editing with history, and Tab completion that walks its candidates |
+| **Programs** | 20 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown`, `lspci` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -570,7 +573,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 37 kernel-mode modules: abi, keyslot, blockdev, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 38 kernel-mode modules: abi, keyslot, blockdev, pci, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -842,7 +845,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.3.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.4.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -872,7 +875,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.3.0-beta.1.iso \
+    -cdrom esdumanOS-v1.4.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -889,6 +892,26 @@ The ISO filename carries the version, and the Makefile derives it from the
 `OS_VERSION_*` macros in `include/kernel.h` — so it changes on a version bump and
 there is no second place to update. Run `make -pn | grep '^ISO ='` if you are not
 sure what the current build produces.
+
+### Booting a machine with no IDE controller
+
+Everything above runs on QEMU's default i440fx, which carries a PIIX3 IDE
+controller whether or not a disk is attached to it. The machine this project is
+aiming at does not have one at all, and until v1.4.0 that was not a missing
+feature but a hang: the wait for the busy bit after `IDENTIFY` had no timeout, and
+an undecoded port answers with all ones, which has that bit set. To boot the class
+of machine where that mattered:
+
+```
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.4.0-beta.1.iso -boot d \
+    -serial file:kernel_log_q35.txt -display curses
+```
+
+What this demonstrates is a diagnosable stop, not a working system. There is no
+disk, so nothing mounts and there is no passphrase prompt; what the log should
+show is the PCI inventory, a line saying no IDE controller answered on the primary
+bus, and the file system refusing to mount rather than formatting something it
+cannot read. A kernel built before v1.4.0 shows none of it and simply stops.
 
 ### Keyboard Shortcuts (Inside the OS)
 
@@ -1171,7 +1194,8 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
-| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 62 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS` and that 68 is still free |
+| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 64 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
+| `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
 | `test_keyslot.c` | The passphrase key slot, against the slot alone — no disk, no prompt: round trip, a wrong passphrase refused with the caller's buffer left untouched, every field of the slot edited in turn to confirm the tag covers the salt and IV as well as the ciphertext, iteration counts above and below what the build accepts, and the same data key wrapped under a second passphrase to prove a passphrase change preserves it |
 | `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes and the master boot record exactly one sector, that the superblock's geometry leaves room for the regions it describes and stays relative to the partition, that clusters 0 and 1 are reserved so a start cluster of 0 can mean "no data", that a file spanning two clusters reads back byte-for-byte, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), the mount-time table validator against four kinds of corruption, and that the system's own paths carry the permissions they must after a boot |
@@ -1238,7 +1262,7 @@ esdumanOS/
 |   |   |-- pipe.c                   Anonymous and named pipes
 |   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   |-- syscall.c                Dispatcher, 63 system calls
+|   |   |-- syscall.c                Dispatcher, 64 system calls
 |   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
 |       |-- security.c               Security levels, master key lifetime
@@ -1259,6 +1283,7 @@ esdumanOS/
 |
 |-- drivers/
 |   |-- ata.c                        ATA/IDE PIO disk driver
+|   |-- pci.c                        PCI bus enumeration (no device drivers)
 |   |-- keyboard.c                   PS/2 keyboard (US + Turkish)
 |   |-- tty.c                        VGA text mode, 3 virtual terminals
 |   +-- rtc.c                        Real-time clock
@@ -1295,6 +1320,7 @@ esdumanOS/
 |       |-- edit.c                   Modal text editor, vi-shaped
 |       |-- chmod.c                  Change permission bits
 |       |-- chown.c                  Change owner and group
+|       |-- lspci.c                  List the PCI devices found at boot
 |       +-- stat.c                   Show a file's size, type, owner, mode and times
 |
 |-- include/                         44 header files
@@ -1309,7 +1335,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      37 kernel-mode test modules + framework
+|   |-- kernel/                      38 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1328,13 +1354,14 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 63 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 64 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 **These numbers are frozen as of v1.0.0.** None of them will change value or meaning. The
 numbers 11, 28, 30, 31, 32 and 99 are retired and will never be reused — they held calls
 that were removed, a reservation for a crypto API that was never designed, and `YIELD`
 before it moved to 67 — and new calls continue from the highest assigned number, which is
-why `SETKEY` took 68 in v1.1.0 and the next call takes 69. Everything from 200 up is
+why `SETKEY` took 68 in v1.1.0, `PCIINFO` took 69 in v1.4.0, and the next call takes 70.
+Everything from 200 up is
 reserved for calls that exist only in test builds. `tests/kernel/test_abi.c` asserts all
 of it by literal value, because a number written in a header, in freestanding programs,
 in a static analyser's patterns and in this table is a number no compiler is comparing.
@@ -1545,6 +1572,7 @@ for future crypto API" for one release after that stopped being true.*
 | 21 | `HALT` | Halt the CPU (root only) |
 | 39 | `DMESG` | Copy a slice of the kernel log into a user buffer (root only) |
 | 42 | `GET_ARGS` | Retrieve process command-line arguments |
+| 69 | `PCIINFO` | Render the PCI inventory the kernel took at boot into `ebx`, capacity in `ecx` (root only). Reports what the enumeration recorded; it does not re-read configuration space |
 
 ---
 
@@ -1639,6 +1667,7 @@ The following are known constraints of the current implementation. These are doc
 | Pipes, system-wide | 16 (`MAX_SYSTEM_PIPES`, shared by named and anonymous) |
 | Per-process kernel stack | 8 KB (`KERNEL_STACK_SIZE`) |
 | Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
+| PCI functions recorded | 32 (`PCI_MAX_DEVICES`). A machine with more gets the first 32 and a log line saying the list stops there |
 | Kernel log ring | 512 records, ~88 KB (`KLOG_RECORDS`) |
 | Longest `alarm()` interval | ~249 days (half a 32-bit tick counter at `TIMER_HZ`) |
 | Latest representable timestamp | 2106 (`uint32_t` seconds since the Unix epoch) |
@@ -1757,6 +1786,11 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   return, rather than mapping on first touch. A program that reserves a large range
   and uses a little of it pays for all of it.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
+- **The PCI bus is enumerated and nothing on it is driven.** v1.4.0 added the walk,
+  not a driver: the base address registers are read and reported, and none of them
+  is mapped. A machine whose disk is behind an AHCI controller is now a machine
+  that says so at boot and still cannot read the disk. The enumeration is also a
+  snapshot taken once, on the boot path — nothing rescans, and there is no hotplug.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.
 - **No dynamic linking.** All user-space programs are statically linked.
 - **The log is written at checkpoints, not continuously.** `sync`, `halt` and
@@ -1838,7 +1872,6 @@ Near-term priorities for the project, roughly in order:
 |----------|------|
 | P1 | `mount` and `umount`, so the second partition the table makes room for can be used |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
-| P2 | PCI bus enumeration — neither AHCI nor USB can be written without it, and `io.h` has no 32-bit port access yet |
 | P2 | Variable cluster sizes, for a device larger than the ~1 GB a 1 MB allocation table can describe at 4 KB clusters |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
@@ -1876,7 +1909,18 @@ bit on `/tmp`, which v0.9.4 added
 alongside the other half of the permission enforcement: the file's own mode. v1.0.0 froze
 the syscall ABI, which had been waiting on the disk format rather than on `mount` — a
 freeze stops numbers from changing meaning and says nothing about adding new ones, so
-`mount` and `umount` can take 68 and 69 whenever they are written.
+`mount` and `umount` take 70 and 71 whenever they are written. That sentence said "68 and
+69" until v1.4.0, having been written before `SETKEY` took 68 and left standing for three
+releases four lines below the paragraph that says `SETKEY` took 68.
+
+PCI bus enumeration left this list in v1.4.0, and it left carrying more than the row
+promised. The row called it the thing neither AHCI nor USB can be written without, which
+is true and was not the reason to do it first: `ata_identify()` waited for the busy bit
+with no timeout, and a bus with no controller on it answers every read with all ones,
+which has that bit set. On the hardware this project is aiming at — a modern board, where
+there is no IDE controller at 0x1F0 — the kernel did not fail to find a disk, it stopped,
+before the file system and before anything reached the screen. The wait is bounded now,
+and the enumeration is what lets the machine say what it has instead of being assumed.
 
 ---
 

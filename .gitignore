@@ -81,7 +81,11 @@ passwords.txt
 # QEMU logs
 qemu.log
 # Serial output from `make run` and `make run-dev`, written by QEMU_FLAGS.
-kernel_log.txt
+#
+# The glob rather than the one name: v1.4.0 documents a second invocation that
+# writes kernel_log_q35.txt, and the *.log rule above matches by extension, so
+# neither of the two existing lines would have caught it.
+kernel_log*.txt
 
 # Generated test files
 message.txt

@@ -99,7 +99,15 @@ int ata_write_sector(uint32_t lba, uint8_t *buffer);
 /**
  * @brief Identifies the disk and registers it as the root block device.
  *
- * @return Total sectors, or 0 when no usable disk answered.
+ * Bounded. It used to be possible for this call never to return: the wait for
+ * BSY to clear after the IDENTIFY command was written out inline with no
+ * timeout, and a bus with no controller on it reads 0xFF from every port, which
+ * has BSY set. Since v1.4.0 an absent controller is recognised by that answer
+ * and reported, and the wait itself goes through the same timeout every other
+ * wait in the driver uses.
+ *
+ * @return Total sectors, or 0 when no usable disk answered - which now covers a
+ *         bus that answered nothing at all.
  */
 extern uint32_t ata_identify(void);
 

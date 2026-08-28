@@ -60,10 +60,10 @@ static int dispatch_retired(uint32_t number) {
 /**
  * @brief The frozen system call numbers.
  *
- * Sixty-three production calls, one assertion each, so a failure names the
+ * Sixty-four production calls, one assertion each, so a failure names the
  * number that moved instead of reporting that something in the table did. It was
- * sixty-two at the freeze; SETKEY is the one added since, and adding numbers is
- * what the freeze permits.
+ * sixty-two at the freeze; SETKEY and PCIINFO are the two added since, and
+ * adding numbers is what the freeze permits.
  */
 static void run_syscall_number_assertions(void) {
     /* Process and scheduling. */
@@ -95,6 +95,12 @@ static void run_syscall_number_assertions(void) {
      * gap at 11, 28, 30, 31 or 32.
      */
     KTEST_ASSERT(SYSCALL_SETKEY == 68,       "[STRICT] [ABI] SETKEY is 68, the first number assigned after the freeze");
+
+    /*
+     * And the second, three releases later, which is what makes 68 a rule rather
+     * than a one-off: 69 continues from 68 instead of filling a hole.
+     */
+    KTEST_ASSERT(SYSCALL_PCIINFO == 69,      "[STRICT] [ABI] PCIINFO is 69, continuing from SETKEY");
 
     /* Descriptors and I/O. */
     KTEST_ASSERT(SYSCALL_READ == 3,          "[STRICT] [ABI] READ is 3");
@@ -196,13 +202,14 @@ static void run_retired_number_assertions(void) {
                  "[STRICT] [ABI] 99 stays retired - YIELD left it for 67 at the freeze");
 
     /*
-     * 69 is where the next call goes, and it must be free until one is written.
+     * 70 is where the next call goes, and it must be free until one is written.
      * This is the assertion that catches a number being taken quietly. It said
-     * 68 until v1.1.0 assigned that one, which is what this line is for: the
-     * frontier moves by somebody editing it deliberately, not by drifting.
+     * 68 until v1.1.0 assigned that one and 69 until v1.4.0 assigned that, which
+     * is what this line is for: the frontier moves by somebody editing it
+     * deliberately, not by drifting. Both times it moved by failing first.
      */
-    KTEST_ASSERT(dispatch_retired(69) == E_NOSYS,
-                 "[STRICT] [ABI] 69 is unassigned, and is where the next call continues from");
+    KTEST_ASSERT(dispatch_retired(70) == E_NOSYS,
+                 "[STRICT] [ABI] 70 is unassigned, and is where the next call continues from");
 }
 
 /**

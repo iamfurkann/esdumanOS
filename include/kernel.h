@@ -8,7 +8,7 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    1
-#define OS_VERSION_MINOR    3
+#define OS_VERSION_MINOR    4
 #define OS_VERSION_PATCH    0
 
 /**
@@ -183,5 +183,6 @@ extern unsigned char stat_elf[]; extern unsigned int stat_elf_len;
 extern unsigned char edit_elf[]; extern unsigned int edit_elf_len;
 extern unsigned char chmod_elf[]; extern unsigned int chmod_elf_len;
 extern unsigned char chown_elf[]; extern unsigned int chown_elf_len;
+extern unsigned char lspci_elf[]; extern unsigned int lspci_elf_len;
 
 #endif //KERNEL_H

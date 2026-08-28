@@ -66,6 +66,7 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/edit_elf_data.c \
 			src/resources/chmod_elf_data.c \
 			src/resources/chown_elf_data.c \
+			src/resources/lspci_elf_data.c \
 			drivers/blockdev.c \
 			fs/bcache.c \
             fs/vfs.c \
@@ -90,6 +91,7 @@ CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_abi.c \
             tests/kernel/test_blockdev.c \
+            tests/kernel/test_pci.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
             tests/kernel/test_memory.c \
@@ -172,6 +174,7 @@ ifeq ($(ARCH), x86)
                 drivers/tty.c \
                 drivers/keyboard.c \
                 drivers/ata.c \
+                drivers/pci.c \
                 drivers/rtc.c \
                 drivers/serial.c
 
@@ -429,6 +432,9 @@ apps/bin/chmod.elf: apps/bin/chmod.c
 apps/bin/chown.elf: apps/bin/chown.c
 	$(CC) $(USER_CFLAGS) apps/bin/chown.c -o apps/bin/chown.elf
 
+apps/bin/lspci.elf: apps/bin/lspci.c
+	$(CC) $(USER_CFLAGS) apps/bin/lspci.c -o apps/bin/lspci.elf
+
 
 # Ring 3 half of the kernel self-test suite. Built, encrypted and embedded the
 # same way as the /bin programs, but only linked into $(TEST_BIN).
@@ -582,6 +588,12 @@ src/resources/chown_elf_data.c: apps/bin/chown.elf tools/encrypt_tool
 	@./tools/encrypt_tool apps/bin/chown.elf apps/bin/chown_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i apps/bin/chown_encrypted.elf | \
 	sed 's/apps_bin_chown_encrypted_elf/chown_elf/g' > src/resources/chown_elf_data.c
+
+src/resources/lspci_elf_data.c: apps/bin/lspci.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/lspci.elf apps/bin/lspci_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/lspci_encrypted.elf | \
+	sed 's/apps_bin_lspci_encrypted_elf/lspci_elf/g' > src/resources/lspci_elf_data.c
 
 src/resources/edit_elf_data.c: apps/bin/edit.elf tools/encrypt_tool
 	@mkdir -p src/resources

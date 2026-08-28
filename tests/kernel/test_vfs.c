@@ -689,11 +689,38 @@ static void test_disk_format(void) {
             /*
              * And it survives the disk. An entry only 96 bytes wide in memory
              * proves nothing about what lands in the sector; this reads the
-             * bytes back out of the block the entry was written into.
+             * bytes back out of the blocks the entry was written into.
+             *
+             * Blocks, plural, and that is the correction. 96 does not divide
+             * 512, so an entry starting later than byte 416 finishes in the next
+             * sector - two slots in every sixteen. This read one sector and
+             * copied 96 bytes from an offset that can be 480, which walked off
+             * the end of sec_buf and asserted on whatever followed it. It passed
+             * for as long as it did because the first free slot had never landed
+             * on one of those two residues; adding a twentieth program to /bin
+             * in v1.4.0 moved it onto one, and the assertion that had been
+             * reading past its buffer all along finally read something that
+             * disagreed.
+             *
+             * The straddle itself is correct and expected.
+             * save_directory_to_disk() writes the table as a flat byte stream,
+             * so an entry across a boundary is the disk's ordinary shape; what
+             * was wrong was reading it back through a window one sector wide.
+             * Reading it in the two pieces the disk stores it in also means this
+             * assertion now covers the straddling case instead of avoiding it.
              */
+            uint32_t first = 512u - within;
+            if (first > sizeof(disk_file_entry_t)) first = sizeof(disk_file_entry_t);
+
             fs_create_file_raw("wide_probe", (const uint8_t *)"x", 1, 300);
             fs_read_sector(sector, sec_buf);
-            ft_memcpy(&readback, &sec_buf[within], sizeof(disk_file_entry_t));
+            ft_memcpy(&readback, &sec_buf[within], first);
+
+            if (first < sizeof(disk_file_entry_t)) {
+                fs_read_sector(sector + 1, sec_buf);
+                ft_memcpy((uint8_t *)&readback + first, sec_buf,
+                          sizeof(disk_file_entry_t) - first);
+            }
 
             KTEST_ASSERT(readback.entry_id == 300 && readback.parent_id == 0,
                          "[STRICT] [VFS] an id past 255 survives the trip to the sector and back");

@@ -150,6 +150,8 @@ void run_abi_tests(void);
 void run_keyslot_tests(void);
 /** @brief The seam between the file system and the device it is stored on. */
 void run_blockdev_tests(void);
+/** @brief The bus, and what the machine says is attached to it. */
+void run_pci_tests(void);
 void run_string_tests(void);
 void run_memory_tests(void);
 void run_pipe_tests(void);

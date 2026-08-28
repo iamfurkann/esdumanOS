@@ -19,6 +19,7 @@
  */
 #include "pci.h"
 #include "io.h"
+#include "errno.h"
 #include "klog.h"
 #include "libft.h"
 #include "stdio.h"
@@ -99,6 +100,51 @@ uint16_t pci_config_read16(uint8_t bus, uint8_t device, uint8_t function, uint8_
 uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset) {
     uint32_t dword = pci_config_read32(bus, device, function, offset);
     return (uint8_t)((dword >> ((offset & 3) * 8)) & 0xFF);
+}
+
+void pci_config_write32(uint8_t bus, uint8_t device, uint8_t function,
+                        uint8_t offset, uint32_t value) {
+    outl(PCI_CONFIG_ADDRESS, pci_config_address(bus, device, function, offset));
+    outl(PCI_CONFIG_DATA, value);
+}
+
+void pci_config_write16(uint8_t bus, uint8_t device, uint8_t function,
+                        uint8_t offset, uint16_t value) {
+    /*
+     * Read the doubleword, replace the half that was asked for, write it back.
+     * The data port only takes doublewords, so writing sixteen bits means
+     * knowing what the other sixteen were - and guessing zero for them would
+     * clear whatever the firmware had configured in the same register.
+     */
+    uint32_t shift = (offset & 2) * 8;
+    uint32_t dword = pci_config_read32(bus, device, function, offset);
+
+    dword &= ~((uint32_t)0xFFFF << shift);
+    dword |= (uint32_t)value << shift;
+
+    pci_config_write32(bus, device, function, offset, dword);
+}
+
+int pci_enable_device(const pci_device_t *dev) {
+    if (dev == 0) return E_INVAL;
+
+    uint16_t command = pci_config_read16(dev->bus, dev->device, dev->function,
+                                         PCI_OFF_COMMAND);
+
+    /*
+     * Set rather than assign. The register carries more than these two bits -
+     * interrupt disable, parity checking, whatever the firmware decided - and a
+     * driver that writes the value it wants instead of the bits it needs takes
+     * responsibility for settings it never looked at.
+     */
+    uint16_t wanted = (uint16_t)(command | PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);
+
+    if (wanted != command) {
+        pci_config_write16(dev->bus, dev->device, dev->function,
+                           PCI_OFF_COMMAND, wanted);
+    }
+
+    return E_OK;
 }
 
 /**

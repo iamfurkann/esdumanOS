@@ -92,6 +92,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_abi.c \
             tests/kernel/test_blockdev.c \
             tests/kernel/test_pci.c \
+            tests/kernel/test_ahci.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
             tests/kernel/test_memory.c \
@@ -175,6 +176,7 @@ ifeq ($(ARCH), x86)
                 drivers/keyboard.c \
                 drivers/ata.c \
                 drivers/pci.c \
+                drivers/ahci.c \
                 drivers/rtc.c \
                 drivers/serial.c
 
@@ -324,7 +326,7 @@ else
     KERNEL_PASS := selftest:$(strip $(MODULE))
 endif
 
-.PHONY: all clean run run-dev debug restart reset-disk test test_kernel test_smap fuzz start
+.PHONY: all clean run run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_smap fuzz start
 
 all: $(ISO)
 
@@ -651,6 +653,57 @@ test_kernel: hello.elf
 		fi; \
 	fi
 
+# The same suite on a machine with no IDE controller, where the disk is reached
+# through AHCI instead.
+#
+# One flag changes, and it is -M q35. The drive line is character for character
+# the one test_kernel uses: "if=ide" asks QEMU for the machine's IDE interface,
+# and on q35 that interface is provided by the ICH9 AHCI controller rather than
+# by a PIIX3. The same request reaches a different controller, which is precisely
+# the difference this target exists to exercise.
+#
+# It was written as an explicit "-device ide-hd,bus=ich9-ahci.0" first, on a
+# guess about the built-in controller's qdev name, and QEMU rejected it before
+# the kernel started. Naming the interface instead of the device is both correct
+# and smaller.
+#
+# q35 still provides the PS/2 controller in its ICH9 LPC bridge and still boots
+# through SeaBIOS with VGA text mode, so the keyboard, terminal and timer tests
+# are asking the same questions they ask on i440fx. Everything that touches
+# storage - test_vfs, test_bcache, test_blockdev, and the file system underneath
+# all of them - therefore exercises the AHCI driver without a single assertion
+# being written for it.
+#
+# It reports the same number of assertions as test_kernel. If it ever does not,
+# some assertion has learned which machine it is running on, and that is worth
+# knowing rather than working around.
+test_kernel_q35:
+	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+	@echo "--- Running Kernel QEMU Self-Tests on q35 (disk behind AHCI) ---"
+	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
+	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
+	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
+	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -M q35 -kernel $(TEST_BIN) $(QEMU_TEST_CPU) \
+		-append "kernel_pass=$(KERNEL_PASS)" \
+		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-d int,cpu_reset -D qemu_q35.log \
+		-serial stdio -display none -no-reboot; then \
+		echo "ERROR: QEMU exited unexpectedly!"; exit 1; \
+	else \
+		RET=$$?; \
+		if [ $$RET -eq 33 ]; then \
+			echo "ALL KERNEL TESTS PASSED ON q35! (disk driven by AHCI)"; exit 0; \
+		elif [ $$RET -eq 35 ]; then \
+			echo "KERNEL TESTS FAILED ON q35! (Some modules did not pass)"; exit 1; \
+		elif [ $$RET -eq 124 ]; then \
+			echo "KERNEL HUNG ON q35! No verdict within $(QEMU_TEST_TIMEOUT)s."; exit 1; \
+		else \
+			echo "KERNEL PANIC/CRASH ON q35! (Exit Code: $$RET)"; exit 1; \
+		fi; \
+	fi
+
 # SMAP test target: runs the full self-test suite on a SMAP/SMEP-capable CPU.
 # The default QEMU CPU exposes neither feature, so this is the only configuration
 # in which the uaccess paths are actually enforced by hardware. Gated on the same
@@ -742,7 +795,7 @@ clean:
 	rm -f $(ARCH_ASM_SRCS:.asm=.o)
 	rm -f lib/*.o lib/*.d lib/libc.a
 	# Left by the test targets: QEMU's instruction log and the host SAST binary.
-	rm -f qemu.log
+	rm -f qemu.log qemu_q35.log
 	rm -rf tests/host/bin
 	# Not removed on purpose: .vscode/ and compile_commands.json are editor state,
 	# not build output. Deleting the compilation database would silently break

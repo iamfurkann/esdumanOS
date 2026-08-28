@@ -152,6 +152,8 @@ void run_keyslot_tests(void);
 void run_blockdev_tests(void);
 /** @brief The bus, and what the machine says is attached to it. */
 void run_pci_tests(void);
+/** @brief Device memory, and the SATA controller reached through it. */
+void run_ahci_tests(void);
 void run_string_tests(void);
 void run_memory_tests(void);
 void run_pipe_tests(void);

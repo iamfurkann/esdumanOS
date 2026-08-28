@@ -42,21 +42,35 @@ jobs:
         run: make
 
       - name: 4. Run Kernel QEMU Integration & Regression Tests
-        # Runs the 23 kernel-mode modules and then hands control to the Ring 3
+        # Runs every kernel-mode module and then hands control to the Ring 3
         # payload (tests/user/ktest_user.c), which exercises the syscall and
-        # uaccess boundary from CPL=3.
+        # uaccess boundary from CPL=3. This comment said "the 23 kernel-mode
+        # modules" until v1.5.0, having been written when there were 23.
         #
         # The default QEMU i386 model exposes neither RDRAND nor SMEP/SMAP, so
-        # this is the run that covers the weak-entropy fallback path.
+        # this is the run that covers the weak-entropy fallback path. The machine
+        # is i440fx, so the disk is reached through the IDE driver.
         run: make test_kernel
 
-      - name: 5. Kernel Tests with RDRAND
-        # Covers the ENTROPY_OK branch, which step 6 cannot reach: "-cpu max"
+      - name: 5. Kernel Tests on q35, disk behind AHCI
+        # The same suite with one variable changed: a machine with no IDE
+        # controller, where the disk is on a SATA controller instead. q35 still
+        # provides the PS/2 controller and VGA text mode, so every module is
+        # asking the questions it asks in step 4 - and everything that touches
+        # storage exercises the AHCI driver without an assertion being written
+        # for it.
+        #
+        # It must report the same assertion total as step 4. A different total
+        # means some assertion has learned which machine it is on.
+        run: make test_kernel_q35
+
+      - name: 6. Kernel Tests with RDRAND
+        # Covers the ENTROPY_OK branch, which step 7 cannot reach: "-cpu max"
         # brings RDRAND *and* SMAP, and under SMAP the kernel-mode modules are
         # skipped. Asking for RDRAND on its own gets there.
         run: make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
 
-      - name: 6. SMAP/SMEP Runtime Test
+      - name: 7. SMAP/SMEP Runtime Test
         # The only configuration where the uaccess rules are enforced by hardware
         # rather than by convention: a supervisor access to user memory that
         # bypasses copy_to_user() faults here instead of silently working.

@@ -54,6 +54,7 @@
 /* Offsets into the configuration header this code reads. */
 #define PCI_OFF_VENDOR_ID   0x00
 #define PCI_OFF_DEVICE_ID   0x02
+#define PCI_OFF_COMMAND     0x04
 #define PCI_OFF_REVISION    0x08
 #define PCI_OFF_PROG_IF     0x09
 #define PCI_OFF_SUBCLASS    0x0A
@@ -70,6 +71,11 @@
  * same 0xFF that hung ata_identify() until v1.4.0, read as a word.
  */
 #define PCI_NO_DEVICE 0xFFFF
+
+/* Command register bits. A device decodes nothing until these are set. */
+#define PCI_CMD_IO_SPACE    0x0001
+#define PCI_CMD_MEM_SPACE   0x0002
+#define PCI_CMD_BUS_MASTER  0x0004
 
 /** @brief Set in the header type byte when functions 1-7 may also exist. */
 #define PCI_HEADER_MULTIFUNCTION 0x80
@@ -122,6 +128,34 @@ uint16_t pci_config_read16(uint8_t bus, uint8_t device, uint8_t function, uint8_
 
 /** @brief The 8-bit read at @p offset. Errors as pci_config_read32(). */
 uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
+
+/**
+ * @brief Writes a doubleword into a function's configuration space.
+ *
+ * v1.4.0 read configuration space and never wrote it, which was the right size
+ * for an inventory. A driver is a different thing: it has to be able to turn the
+ * device on.
+ */
+void pci_config_write32(uint8_t bus, uint8_t device, uint8_t function,
+                        uint8_t offset, uint32_t value);
+
+/** @brief The 16-bit write at @p offset, leaving the other half alone. */
+void pci_config_write16(uint8_t bus, uint8_t device, uint8_t function,
+                        uint8_t offset, uint16_t value);
+
+/**
+ * @brief Turns on memory decoding and bus mastering for a device.
+ *
+ * Firmware usually sets both before the operating system runs, and "usually" is
+ * exactly the word that makes a driver work on the machine it was written on and
+ * do nothing at all on the next one. A device whose memory space is disabled
+ * answers every register read with all ones; one that is not a bus master reads
+ * no memory, so a command is accepted and never completes.
+ *
+ * @param dev A recorded function.
+ * @return E_OK, or E_INVAL for a null device.
+ */
+int pci_enable_device(const pci_device_t *dev);
 
 /**
  * @brief Walks the bus and records what answered.

@@ -53,6 +53,7 @@ static const ktest_module_t kernel_modules[] = {
     { "abi",         run_abi_tests },
     { "keyslot",     run_keyslot_tests },
     { "blockdev",    run_blockdev_tests },
+    { "pci",         run_pci_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },
     { "pipe",        run_pipe_tests },

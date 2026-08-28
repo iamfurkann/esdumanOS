@@ -61,4 +61,37 @@ static inline void outw(uint16_t port, uint16_t value) {
     asm volatile ("outw %1, %0" : : "dN" (port), "a" (value));
 }
 
+/*
+ * The 32-bit pair, added in v1.4.0 because PCI configuration space cannot be
+ * reached without it: the address is written to port 0xCF8 and the data read
+ * back from 0xCFC, both as doublewords, and a 32-bit register is the only unit
+ * either port accepts.
+ *
+ * They were the last thing missing from this header, and their absence is why
+ * PCI enumeration had been the prerequisite of the prerequisite for three
+ * releases - the roadmap said so in the same row.
+ */
+
+/**
+ * @brief Reads a doubleword (32 bits) from the specified I/O port.
+ *
+ * @param port The 16-bit I/O port address.
+ * @return uint32_t The 32-bit value read from the port.
+ */
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    asm volatile ("inl %1, %0" : "=a" (ret) : "dN" (port));
+    return ret;
+}
+
+/**
+ * @brief Writes a doubleword (32 bits) to the specified I/O port.
+ *
+ * @param port The 16-bit I/O port address.
+ * @param value The 32-bit value to write to the port.
+ */
+static inline void outl(uint16_t port, uint32_t value) {
+    asm volatile ("outl %1, %0" : : "dN" (port), "a" (value));
+}
+
 #endif

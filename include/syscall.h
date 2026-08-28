@@ -15,9 +15,9 @@
  * Three rules follow from that, and they are the whole of the contract:
  *
  *   1. New calls continue from the highest assigned number, not from the lowest
- *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0, which
- *      is the rule working rather than an exception to it, and the next call
- *      takes 69.
+ *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0 and
+ *      SYSCALL_PCIINFO took 69 in v1.4.0, which is the rule working rather than
+ *      an exception to it, and the next call takes 70.
  *
  *   2. The holes are never filled. 11 (CAT_FILE) and 28 (LS_DIR) held calls that
  *      were removed; 30, 31 and 32 were reserved for a crypto API that was never
@@ -237,7 +237,8 @@
  *
  * Retired rather than released back for general use, because the freeze has one
  * rule about holes and three numbers are not worth making it two rules. A crypto
- * API, if it is ever built, continues from 68 like anything else.
+ * API, if it is ever built, continues from the highest assigned number like
+ * anything else.
  */
 /** @brief Set system security level */
 #define SYSCALL_SET_SEC_LEVEL   33
@@ -473,6 +474,26 @@
  * returns E_ACCES and changes nothing.
  */
 #define SYSCALL_SETKEY          68
+
+/**
+ * @brief Render the PCI inventory into the caller's buffer.
+ *
+ * ebx is the buffer, ecx its capacity. Returns the number of bytes written, or a
+ * negative errno. Root only, like every other diagnostic that hands back text
+ * the kernel rendered - it goes through the same check MEMINFO, HEXDUMP and
+ * STACK_DUMP do.
+ *
+ * The second number handed out after the freeze, continuing from SETKEY at 68
+ * rather than filling a hole. mount() and umount(), which the ABI comment above
+ * has been promising since v1.0.0, take 70 and 71 when they are written; the
+ * README said they would take 68 and 69 and was two releases out of date when it
+ * said it.
+ *
+ * It reports what the bus was asked at boot rather than re-reading configuration
+ * space. A user-space call that poked at 0xCF8 on every invocation would be a
+ * different and much larger thing to have to defend.
+ */
+#define SYSCALL_PCIINFO         69
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

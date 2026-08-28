@@ -9,7 +9,10 @@
 /* The boot path is where hardware is brought up, so this is where the disk
  * driver is named. Nothing under fs/ includes it any more. */
 #include "ata.h"
-#include "keyboard.h" 
+/* And this is where the machine is asked what else it has, which is a question
+ * only the boot path has any business asking. */
+#include "pci.h"
+#include "keyboard.h"
 #include "crypto.h"
 #include "entropy.h"
 #include "serial.h"
@@ -856,6 +859,39 @@ static void apply_system_modes(void) {
     ensure_mode("init.elf", 0, 0755);
 }
 
+/**
+ * @brief Says what the bus reports about storage, next to where the disk is
+ *        probed.
+ *
+ * The interesting case is not the one this machine has. QEMU's i440fx carries a
+ * PIIX3 IDE controller and always has, so here the line confirms what the driver
+ * is about to find anyway. On the hardware this project is aiming at there is no
+ * IDE controller and there is an AHCI one, and the difference between "the disk
+ * probe found nothing" and "the disk probe found nothing because the disk is
+ * behind a controller this kernel cannot drive" is the whole of what somebody
+ * standing in front of that machine needs to know.
+ *
+ * It says it and stops. No driver is selected, nothing is disabled.
+ */
+static void report_storage_controllers(void) {
+    const pci_device_t *ide = pci_find_class(PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_IDE);
+
+    if (ide) {
+        klog(LOG_LEVEL_INFO, "PCI", "An IDE controller is present; the disk probe can use it.");
+        return;
+    }
+
+    const pci_device_t *storage = pci_find_class(PCI_CLASS_MASS_STORAGE, 0xFF);
+
+    if (storage) {
+        klog(LOG_LEVEL_WARN, "PCI",
+             "A storage controller is present that this kernel has no driver for.");
+        klog(LOG_LEVEL_WARN, "PCI", pci_class_name(storage->class_code, storage->subclass));
+    } else {
+        klog(LOG_LEVEL_WARN, "PCI", "No storage controller was found on the bus.");
+    }
+}
+
 static int init_filesystem_and_vfs(void) {
     init_kernel_timers();
     /*
@@ -869,6 +905,25 @@ static int init_filesystem_and_vfs(void) {
     asm volatile("sti");
 
     boot_ok("Kernel Heap & Signal Handlers Registered");
+
+    /*
+     * Ask the machine what it is, before assuming it.
+     *
+     * This runs ahead of the disk probe so that the log reads in the order a
+     * person debugging a strange machine would want it: here is what the bus
+     * says is present, and then here is what happened when the driver went
+     * looking at the address it has always used.
+     *
+     * Nothing below is gated on the answer. It would be easy to make the ATA
+     * probe conditional on PCI reporting an IDE controller, and it would be the
+     * v1.2.0 mistake again - two defensible decisions with an unwatched link
+     * between them, where a wrong verdict from the new subsystem silently
+     * removes the disk. What stops the probe hanging is its own timeout. This
+     * only reports.
+     */
+    pci_init();
+    boot_ok("PCI Bus Enumerated");
+    report_storage_controllers();
 
     /*
      * Bring the disk up before mounting anything on it.
@@ -1003,6 +1058,7 @@ static int init_filesystem_and_vfs(void) {
                 fs_install_image_asset("edit", edit_elf, edit_elf_len, bin_id);
                 fs_install_image_asset("chmod", chmod_elf, chmod_elf_len, bin_id);
                 fs_install_image_asset("chown", chown_elf, chown_elf_len, bin_id);
+                fs_install_image_asset("lspci", lspci_elf, lspci_elf_len, bin_id);
                 fs_install_image_asset("hello", hello_elf, hello_elf_len, bin_id);
                 fs_install_image_asset("clear", clear_elf, clear_elf_len, bin_id);
                 fs_install_image_asset("echo", echo_elf, echo_elf_len, bin_id);

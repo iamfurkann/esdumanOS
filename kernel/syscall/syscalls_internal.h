@@ -83,6 +83,8 @@ void sys_meminfo(arch_regs_t *regs);
 void sys_test_malloc(arch_regs_t *regs);
 /** @brief Syscall handler for displaying a memory hex dump */
 void sys_hexdump(arch_regs_t *regs);
+/** @brief Syscall handler for listing the PCI devices found at boot */
+void sys_pciinfo(arch_regs_t *regs);
 
 // sys_fs.c
 /** @brief Syscall handler for reading from a file descriptor */

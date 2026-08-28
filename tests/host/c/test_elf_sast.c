@@ -158,6 +158,14 @@ int main() {
     run_static_test("apps/bin/free.c", "syscall(4,", "free.c -> Uses SYSCALL_WRITE (4) to emit what the kernel rendered", &fail_count);
     run_static_test("apps/bin/free.c", "syscall(1,", "free.c -> Uses SYSCALL_EXIT (1)", &fail_count);
 
+    // lspci.c tests
+    run_static_test("apps/bin/lspci.c", "syscall(69,", "lspci.c -> Uses SYSCALL_PCIINFO (69)", &fail_count);
+    /* Built the same way free was rebuilt in v0.9.2: the kernel renders, this
+     * writes. A version that printed from inside the kernel would make
+     * `lspci > devices.txt` an empty file that reported success. */
+    run_static_test("apps/bin/lspci.c", "syscall(4,", "lspci.c -> Uses SYSCALL_WRITE (4) to emit what the kernel rendered", &fail_count);
+    run_static_test("apps/bin/lspci.c", "syscall(1,", "lspci.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
     // whoami.c tests
     run_static_test("apps/bin/whoami.c", "syscall(43,", "whoami.c -> Uses SYSCALL_GETUID (43)", &fail_count);
     run_static_test("apps/bin/whoami.c", "syscall(1,", "whoami.c -> Uses SYSCALL_EXIT (1)", &fail_count);

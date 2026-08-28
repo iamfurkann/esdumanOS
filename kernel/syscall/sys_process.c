@@ -21,6 +21,7 @@
 #include "bcache.h"
 #include "paging.h"
 #include "rtc.h"
+#include "pci.h"
 /* For the exec() modes and the wait() flags and status bits. */
 #include "syscall.h"
 
@@ -727,6 +728,36 @@ void sys_meminfo(arch_regs_t *regs) {
                  (pmm_get_shared_frames() * PAGE_SIZE) / 1024);
 
     deliver_text(regs, ubuf, ucap, text, n);
+}
+
+/**
+ * @brief Hands back the PCI inventory the boot enumeration recorded.
+ *
+ * Staged on the heap rather than on the kernel stack, for the same reason
+ * sys_stack_dump() is: PCI_MAX_DEVICES lines is over a kilobyte at full table,
+ * and an 8 KB kernel stack with interrupts landing on it is not where that
+ * belongs. sys_meminfo() gets away with a stack buffer because its answer is one
+ * line long.
+ *
+ * Root only, through the same diag_ready() every other rendered diagnostic uses.
+ * A hardware inventory is not a secret in the way a password hash is, but the
+ * check that decides who may read one already exists and is already audited, and
+ * a second path that repeats three of its four tests is exactly the shape of
+ * omission this tree has been bitten by before.
+ */
+void sys_pciinfo(arch_regs_t *regs) {
+    void *ubuf = (void *)regs->ebx;
+    uint32_t ucap = (uint32_t)regs->ecx;
+
+    if (!diag_ready(regs, ubuf, ucap)) return;
+
+    char *text = (char *)kmalloc(PCIINFO_BUF);
+    if (!text) { regs->eax = E_NOMEM; return; }
+
+    int n = pci_format_inventory(text, PCIINFO_BUF);
+
+    deliver_text(regs, ubuf, ucap, text, n);
+    kfree(text);
 }
 
 /**

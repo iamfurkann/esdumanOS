@@ -7,6 +7,26 @@
 #include "libft.h"
 
 /**
+ * @brief Function crypto_ct_cmp_bytes
+ *
+ * Here rather than in a file of its own because what it exists to compare is a
+ * MAC: the tag on the disk key slot and the derived half of a shadow entry are
+ * both outputs of the function above it.
+ *
+ * The accumulator is volatile so that the loop cannot be turned into an early
+ * return. A compiler is entitled to notice that the result is already non-zero
+ * and stop, and stopping is the whole of what this is written to avoid.
+ */
+int crypto_ct_cmp_bytes(const uint8_t *a, const uint8_t *b, uint32_t len) {
+    volatile int diff = 0;
+
+    for (uint32_t i = 0; i < len; i++) {
+        diff |= (a[i] ^ b[i]);
+    }
+    return diff;
+}
+
+/**
  * @brief Compute HMAC-SHA256
  *
  * Streams "key_pad || message" through an incremental SHA-256 context rather

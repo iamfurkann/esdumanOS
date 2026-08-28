@@ -81,12 +81,14 @@ CORE_SRCS = kernel/core/kernel.c \
 			crypto/sha256.c \
 			crypto/hmac.c \
 			crypto/pbkdf2.c \
-			crypto/chacha20.c
+			crypto/chacha20.c \
+			crypto/keyslot.c
 
 CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_abi.c \
+            tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
             tests/kernel/test_memory.c \
             tests/kernel/test_pipe.c \
@@ -140,7 +142,20 @@ ifeq ($(ARCH), x86)
     USER_LDFLAGS = -m elf_i386
 
     QEMU = qemu-system-i386
-    QEMU_FLAGS = -cdrom $(ISO) -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+    # -boot d pins the boot to the CD-ROM, and it is not optional.
+    #
+    # The kernel writes an MBR when it formats a disk, and that MBR carries a
+    # valid 0xAA55 signature because the file system uses the signature to
+    # recognise its own partition table at mount. Its 446-byte boot area is
+    # zero and always has been - nothing on this disk was ever meant to boot.
+    #
+    # The BIOS cannot tell those two facts apart. It sees a signature, calls the
+    # disk bootable, and on the second boot of a formatted image it jumps into
+    # 446 bytes of zeros and stops at "Booting from Hard Disk...". The first
+    # boot works because a blank disk has no signature yet, which is exactly why
+    # this went unnoticed from v0.10.0 until a release whose manual test
+    # rebooted with the disk still attached.
+    QEMU_FLAGS = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
     
     ARCH_ASM_SRCS = arch/x86/boot/boot.asm \
                 arch/x86/cpu/gdt_s.asm \

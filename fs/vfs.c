@@ -17,7 +17,21 @@
 #include "kheap.h"
 #include "esdtime.h"
 #include "rtc.h"
+#include "entropy.h"
 disk_file_entry_t dir_table[MAX_FILES_IN_DIR];
+
+/*
+ * Whether this boot is the one that created the file system.
+ *
+ * The key slot is installed from outside init_fs(), because installing it means
+ * asking the user for a passphrase and the file system has no business running a
+ * prompt. That leaves the caller with a question it cannot otherwise answer: a
+ * disk with no slot is either one this boot has just formatted, which should be
+ * given a passphrase, or one that had a slot and lost it, which must be refused
+ * - offering to set a new passphrase there would generate a fresh data key and
+ * turn every existing file into noise.
+ */
+int fs_was_formatted = 0;
 /* Zero until init_fs() learns the partition's size. It used to default to 4096,
  * which was the old cap and therefore a plausible-looking wrong answer for
  * anything that read it before the mount; nothing should, and zero says so. */
@@ -368,6 +382,13 @@ static void format_disk(void) {
     save_fat_to_disk();
     save_directory_to_disk();
     bcache_flush();
+
+    /*
+     * Set last, and only here. The superblock this wrote carries a zeroed key
+     * slot, and this flag is what tells the boot path that the zero means "new
+     * disk" rather than "slot lost".
+     */
+    fs_was_formatted = 1;
 }
 
 /**
@@ -684,6 +705,162 @@ void init_fs(void) {
 
     fs_mounted = 1;
     save_fat_to_disk();
+}
+
+/* --- DISK KEY SLOT --- *
+ *
+ * The passphrase never reaches this file as anything but a string, and the data
+ * key never leaves it as anything at all: it goes straight to
+ * install_master_key(). Everything below is the disk half of the arrangement -
+ * reading and writing the slot, and deciding what a missing one means. The
+ * cryptography is in crypto/keyslot.c and the prompt is in kernel/core/kernel.c,
+ * which is the only place that should know how to ask a human for anything.
+ */
+
+/**
+ * @brief Whether the mounted disk carries a key slot.
+ */
+int fs_keyslot_present(void) {
+    return fs_mounted && keyslot_is_present(&fs_super.keyslot);
+}
+
+/**
+ * @brief Creates this disk's data key and locks it behind a passphrase.
+ *
+ * For a disk that has just been formatted, and only then - the caller checks
+ * fs_was_formatted first. The data key is generated here rather than derived
+ * from anything, so that changing the passphrase later can leave it alone.
+ *
+ * @param passphrase What the user typed.
+ * @return E_OK, or a negative errno with nothing written to the disk.
+ */
+int fs_keyslot_install(const char *passphrase) {
+    uint8_t dek[KEYSLOT_KEY_LEN];
+    int res;
+
+    if (!fs_mounted) return E_NODEV;
+
+    /*
+     * A weak pool is survivable and a dead one is not. generate_random_bytes()
+     * reports ENTROPY_WEAK when it could not reach RDRAND, and what it still
+     * guarantees in that case is uniqueness - which is enough for this key to be
+     * different on every install, and is written down in entropy.h as not being
+     * enough for it to be unpredictable. ENTROPY_FAIL means the pool was never
+     * seeded, and a data key from an unseeded pool is not a key.
+     */
+    if (generate_random_bytes(dek, KEYSLOT_KEY_LEN) == ENTROPY_FAIL) {
+        klog(LOG_LEVEL_ERROR, "VFS", "Refusing to create a data key: entropy pool unavailable.");
+        return E_IO;
+    }
+
+    res = keyslot_create(&fs_super.keyslot, passphrase, dek);
+    if (res != E_OK) {
+        volatile uint8_t *p = dek;
+        for (uint32_t i = 0; i < KEYSLOT_KEY_LEN; i++) p[i] = 0;
+        return res;
+    }
+
+    save_superblock();
+    bcache_flush();
+
+    install_master_key(dek);
+
+    {
+        volatile uint8_t *p = dek;
+        for (uint32_t i = 0; i < KEYSLOT_KEY_LEN; i++) p[i] = 0;
+    }
+    return E_OK;
+}
+
+/**
+ * @brief Opens the slot with a passphrase and hands the data key to the kernel.
+ *
+ * @param passphrase What the user typed.
+ * @return E_OK, E_ACCES when the passphrase is wrong, E_INVAL for a slot this
+ *         build will not work with, or E_NODEV when nothing is mounted.
+ */
+int fs_keyslot_unlock(const char *passphrase) {
+    uint8_t dek[KEYSLOT_KEY_LEN];
+    int res;
+
+    if (!fs_mounted) return E_NODEV;
+    if (!keyslot_is_present(&fs_super.keyslot)) return E_INVAL;
+
+    res = keyslot_unwrap(&fs_super.keyslot, passphrase, dek);
+    if (res == E_OK) install_master_key(dek);
+
+    {
+        volatile uint8_t *p = dek;
+        for (uint32_t i = 0; i < KEYSLOT_KEY_LEN; i++) p[i] = 0;
+    }
+    return res;
+}
+
+/**
+ * @brief Moves the slot to a new passphrase, leaving the data key alone.
+ *
+ * This is the whole reason the slot wraps a key instead of being one. The disk
+ * is not touched beyond the superblock: every file stays encrypted under the
+ * same data key it always was, and a passphrase change is one sector rather than
+ * a pass over the file system that cannot be made atomic.
+ *
+ * The old passphrase is verified by unwrapping rather than by comparing anything
+ * - there is nothing stored to compare against, and that is deliberate.
+ *
+ * Its caller is the SETKEY syscall, which arrives in the next commit. It is
+ * written here because it belongs beside the two functions above and because
+ * splitting it out would put this file in two commits.
+ *
+ * @param old_pass The current passphrase.
+ * @param new_pass What to replace it with.
+ * @return E_OK, E_ACCES when the old passphrase is wrong, or E_INVAL when the
+ *         new one is unusable - in which case the old slot is left intact.
+ */
+int fs_keyslot_rewrap(const char *old_pass, const char *new_pass) {
+    uint8_t dek[KEYSLOT_KEY_LEN];
+    keyslot_t fresh;
+    int res;
+
+    if (!fs_mounted) return E_NODEV;
+
+    /*
+     * IMMUTABLE means the disk is read-only, and this writes sector 0.
+     *
+     * The guard is here rather than in sys_setkey() because this is where the
+     * other eight live, and because a rule enforced at the syscall layer is a
+     * rule the next in-kernel caller does not get. ">=" rather than "==" for the
+     * reason v0.10.1 converted seven of those eight: IMMUTABLE is the last level
+     * today, and an "==" test is a door that opens by itself the day somebody
+     * appends a stricter one to the enum.
+     */
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) return E_ROFS;
+
+    if (!keyslot_is_present(&fs_super.keyslot)) return E_INVAL;
+
+    res = keyslot_unwrap(&fs_super.keyslot, old_pass, dek);
+    if (res != E_OK) return res;
+
+    /*
+     * Built somewhere else and copied in only once it is complete. Writing
+     * straight into fs_super.keyslot would leave the live slot half-rewritten if
+     * the new passphrase turned out to be unusable, and the disk would then hold
+     * a slot that neither passphrase opens.
+     */
+    res = keyslot_create(&fresh, new_pass, dek);
+
+    if (res == E_OK) {
+        ft_memcpy(&fs_super.keyslot, &fresh, sizeof(keyslot_t));
+        save_superblock();
+        bcache_flush();
+        klog(LOG_LEVEL_INFO, "VFS", "Disk passphrase changed; the data key is unchanged.");
+    }
+
+    {
+        volatile uint8_t *p = dek;
+        for (uint32_t i = 0; i < KEYSLOT_KEY_LEN; i++) p[i] = 0;
+        ft_memset(&fresh, 0, sizeof(fresh));
+    }
+    return res;
 }
 
 /* --- VFS API (READ / WRITE / DELETE) --- */

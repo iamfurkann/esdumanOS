@@ -26,9 +26,48 @@ extern security_level_t current_sec_level;
 void set_security_level(security_level_t level);
 
 /**
- * @brief Initializes the ELF encryption master key from build-time constant.
+ * @brief Loads the key the build encrypted the embedded programs with.
+ *
+ * This was init_elf_master_key(), and it filled kernel_master_key - which made
+ * one key do two unrelated jobs. tools/encrypt_tool encrypts every user program
+ * at build time with ESDUMAN_ELF_KEY_HEX, and the results are embedded in the
+ * kernel image as init_elf[], sh_elf[] and the rest; that key has to be in the
+ * kernel because the ciphertext is in the kernel. What it must not also be is
+ * the key the user's files are encrypted under, because a key that ships inside
+ * the binary protects nothing once somebody has the binary - the old comment
+ * here said exactly that, and then used it for the file system anyway.
+ *
+ * It now decrypts only bytes that arrived in the same image it did. See
+ * elf_asset_key below and fs_install_image_asset() in fs.h.
  */
-void init_elf_master_key(void);
+void init_image_asset_key(void);
+
+/**
+ * @brief The build-time key the embedded programs were encrypted with.
+ *
+ * Not a secret from anybody holding the kernel image, and not treated as one:
+ * it never touches a file the user created, and it is not destroyed on LOCKDOWN
+ * because there is nothing to destroy - the same bytes are sitting in the
+ * .rodata of the running kernel either way.
+ */
+extern uint8_t elf_asset_key[32];
+
+/**
+ * @brief Whether the embedded-asset key was parsed successfully.
+ * @return 1 when the programs in the image can be decrypted, 0 otherwise.
+ */
+int elf_asset_key_available(void);
+
+/**
+ * @brief Hands the file system's data key to the kernel.
+ *
+ * Called once per boot, after the passphrase has opened the key slot, and again
+ * by nothing - the data key does not change when the passphrase does, which is
+ * the entire reason the slot wraps a key rather than being one.
+ *
+ * @param key The 32-byte data key recovered from the slot.
+ */
+void install_master_key(const uint8_t key[32]);
 
 
 // --- Added by Refactor Script ---

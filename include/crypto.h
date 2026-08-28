@@ -61,6 +61,27 @@ void sha256_final(sha256_ctx_t *ctx, uint8_t *output_binary);
 
 void sha256_to_hex(const char *input, char *output_hex);
 
+/**
+ * @brief Compares two byte runs in time that does not depend on their contents.
+ *
+ * Returns 0 when they are equal, following memcmp's convention for that one
+ * answer and deliberately not following it for any other: the value is a
+ * difference accumulator, not an ordering, and there is no ordering that could
+ * be reported without leaking where the first difference was.
+ *
+ * It lived in passwd.c as a static, which was correct while comparing a derived
+ * password hash was the only place a secret was compared. v1.1.0 added a second
+ * - the tag on the disk key slot, which decides whether a passphrase was right -
+ * and two copies of a constant-time comparison is two chances to write one that
+ * is not constant-time.
+ *
+ * @param a First run.
+ * @param b Second run.
+ * @param len Bytes to compare; both runs must hold this many.
+ * @return 0 when every byte matches, non-zero otherwise.
+ */
+int crypto_ct_cmp_bytes(const uint8_t *a, const uint8_t *b, uint32_t len);
+
 /*
  * A RISC-V hardware-acceleration block sat here, guarded by
  * #if defined(ARCH_RISCV64) && defined(HAS_ZKN_EXTENSION). It declared

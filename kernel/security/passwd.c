@@ -13,13 +13,12 @@
 #include "pbkdf2.h"
 #include "entropy.h"
 
-static int constant_time_cmp_bytes(const uint8_t *a, const uint8_t *b, uint32_t len) {
-    volatile int diff = 0;
-    for (uint32_t i = 0; i < len; i++) {
-        diff |= (a[i] ^ b[i]);
-    }
-    return diff;
-}
+/*
+ * constant_time_cmp_bytes() was defined here and is now crypto_ct_cmp_bytes()
+ * in crypto/hmac.c. v1.1.0 added a second caller - the tag that decides whether
+ * a disk passphrase was right - and a constant-time comparison written twice is
+ * a constant-time comparison that can stop being one in half the places.
+ */
 
 static void uid_to_str(int uid, char *buf) {
     if (uid == 0) {
@@ -284,7 +283,7 @@ int verify_user_password(const char *username, const char *password) {
                 
                 pbkdf2_hmac_sha256((const uint8_t *)password, simple_strlen(password), salt_bytes, 16, iterations, computed_dk, 32);
                 
-                int match = constant_time_cmp_bytes(stored_dk, computed_dk, 32);
+                int match = crypto_ct_cmp_bytes(stored_dk, computed_dk, 32);
                 
                 volatile uint8_t *p = salt_bytes; for (int j = 0; j < 16; j++) p[j] = 0;
                 p = stored_dk; for (int j = 0; j < 32; j++) p[j] = 0;

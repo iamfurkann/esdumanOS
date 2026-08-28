@@ -13,7 +13,16 @@
 #include "entropy.h"
 #include "errno.h"
 #include "blockdev.h"
-#define ATA_TIMEOUT_MS 200
+/*
+ * The wait budget, in timer ticks.
+ *
+ * It was called ATA_TIMEOUT_MS and it was never milliseconds: every use compares
+ * it against a difference of timer_get_ticks(), and the PIT runs at TIMER_HZ,
+ * which is 100. The budget has always been two seconds. Renaming it rather than
+ * rescaling it keeps the behaviour every existing release was tested with and
+ * stops the next reader from budgeting in the wrong unit.
+ */
+#define ATA_TIMEOUT_TICKS 200
 
 volatile int ata_interrupt_fired = 0;
 static uint32_t ata_total_sectors = 0;
@@ -43,7 +52,7 @@ static int ata_wait_irq(void) {
     uint32_t start_time = timer_get_ticks();
     
     while (!ata_interrupt_fired) {
-        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_TICKS) {
             klog(LOG_LEVEL_ERROR, "ATA", "IRQ Timeout! Disk not responding.");
             return 0;
         }
@@ -63,7 +72,7 @@ static int ata_wait_bsy() {
     uint32_t start_time = timer_get_ticks();
     
     while (inb(ATA_PORT_STATUS) & ATA_SR_BSY) {
-        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_TICKS) {
             klog(LOG_LEVEL_ERROR, "ATA", "BSY Timeout! Disk did not exit busy state.");
             return 0;
         }
@@ -80,7 +89,7 @@ static int ata_wait_drq() {
     uint32_t start_time = timer_get_ticks();
     
     while (!(inb(ATA_PORT_STATUS) & ATA_SR_DRQ)) {
-        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_TICKS) {
             klog(LOG_LEVEL_ERROR, "ATA", "DRQ Timeout! (Not ready for data transfer)");
             return 0;
         }
@@ -127,6 +136,11 @@ static blockdev_t ata_blockdev = {
  * Also registers the disk as the root block device once its capacity is known,
  * which is what lets the file system stop naming this driver.
  *
+ * Every way out of here that is not a disk is a return of 0, including the two
+ * that mean nothing is listening: a controller with no drive on it, and no
+ * controller at all. Nothing registers, and init_fs() then refuses to mount
+ * rather than formatting what it cannot read.
+ *
  * @return Total sectors of the disk, or 0 if initialization fails.
  */
 uint32_t ata_identify(void) {
@@ -148,15 +162,43 @@ uint32_t ata_identify(void) {
     outb(ATA_PORT_COMMAND, ATA_CMD_IDENTIFY);
 
     uint8_t status = inb(ATA_PORT_STATUS);
-    
+
     // If status is 0, no disk is connected to this port.
     if (status == 0) return 0;
 
-    // [PATCH 2]: We must wait for the BSY (Busy) bit to clear immediately
-    // after the IDENTIFY command. QEMU can sometimes get stuck here.
-    while (inb(ATA_PORT_STATUS) & ATA_SR_BSY) {
-        // Stay in the loop, wait for busy state to end
+    /*
+     * And if it is all ones, there is no controller here at all.
+     *
+     * An x86 port nobody decodes reads back 0xFF. The check above catches the
+     * other shape of absence - a controller that answers with a status of zero
+     * because no drive is attached to it, which is what QEMU's i440fx does when
+     * the machine is started without a -drive - but it cannot catch this one,
+     * because 0xFF is not 0.
+     *
+     * That mattered more than a missing branch usually does. The wait below used
+     * to be written out by hand with no timeout, and BSY is bit 7, so it is set
+     * in 0xFF and stays set forever: on a machine with no IDE controller this
+     * function did not fail, it stopped, before init_fs() and before anything
+     * reached the screen. A modern board is exactly that machine - q35 has no
+     * legacy IDE at 0x1F0 - so the failure was reserved for the hardware this
+     * project is aiming at.
+     */
+    if (status == 0xFF) {
+        klog(LOG_LEVEL_INFO, "ATA",
+             "No IDE controller answered on the primary bus.");
+        return 0;
     }
+
+    /*
+     * [PATCH 2]: the BSY (Busy) bit has to clear before the result of IDENTIFY
+     * can be read.
+     *
+     * This calls ata_wait_bsy() rather than spinning inline. The helper is
+     * ninety lines above, it has always had the timeout and the log line, and
+     * every other wait in this driver goes through it - this one call site was
+     * written out by hand and got neither.
+     */
+    if (!ata_wait_bsy()) return 0;
 
     // If the disk is ATAPI (CD-ROM etc.), we cannot read capacity, reject it.
     if (inb(ATA_PORT_LBA_MID) != 0 || inb(ATA_PORT_LBA_HIGH) != 0) return 0;
@@ -171,7 +213,7 @@ uint32_t ata_identify(void) {
         }
         if (status & ATA_SR_DRQ) break; // Ready to read data
         
-        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_MS) {
+        if ((timer_get_ticks() - start_time) > ATA_TIMEOUT_TICKS) {
             klog(LOG_LEVEL_ERROR, "ATA", "DRQ Timeout during IDENTIFY.");
             return 0;
         }

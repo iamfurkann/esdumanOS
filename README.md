@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.2.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.3.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -65,7 +65,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 1.2.0-beta.1
+**Version:** 1.3.0-beta.1
 
 esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -447,6 +447,32 @@ the meaning of zero since v0.4, in the direction that turns every failure into a
 The layer is also the thing the next few releases need. A SATA controller or a USB stick
 plugs in where ATA does now, and neither of them needs the file system to know about it.
 
+v1.3.0 sizes the file system from the device it is on. The directory table and the
+allocation table were static arrays — 512 entries and 4096 clusters, whatever the disk —
+so a 16 GB stick and a 2 MB image were laid out identically and the first 16 MB was all
+either of them could use. Both are allocated at mount now, from what the superblock
+records, and the format picks that from the size of the partition: up to 8192 entries and
+a little under 1 GB of data.
+
+It is an improvement rather than a fix, and worth being exact about: a large disk mounted
+and worked before this, capped. What was actually wrong was that raising the cap alone
+would have bought nothing, because 512 entries at 64 KB each is 32 MB of content — the
+disk was already within twice what the file system could hold. Moving one without the
+other is why both moved together.
+
+**No format change.** The superblock has recorded `max_entries`, `dir_sectors`,
+`fat_start`, `data_start` and `total_clusters` since v0.10.0, and `fs_cluster_to_sector()`
+has read them rather than the constants. Making the constants ceilings instead of sizes
+was enough; a disk written by v1.1.0 or v1.2.0 mounts unchanged, with its own 512 entries.
+
+The risky part was not the allocation but the forty-three loops bounded by the old
+constant. Left alone they would have compiled perfectly and read past the end of a
+smaller table, so the constant was deleted rather than redefined — `MAX_FILES_IN_DIR` is
+`FS_MAX_ENTRIES_CAP` for the two places that mean a ceiling and `fs_max_entries` for the
+forty-one that mean a count, and the compiler found every one of them. The same mistake in
+reverse, a widening that compiled everywhere and was wrong in eight places, cost v0.9.0
+three releases.
+
 It remains a development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -461,7 +487,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 **What to expect:**
 - This is not production-ready software
 - You may encounter kernel panics, deadlocks, or unexpected behavior
-- Resource limits are intentionally constrained (16 processes, 16 MB disk, 128 MB RAM,
+- Resource limits are intentionally constrained (16 processes, 1 GB disk, 128 MB RAM,
   512 file system entries, 64-character file names)
 - No networking, no GUI, no dynamic linking
 
@@ -505,7 +531,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, a disk that cannot be read is refused rather than formatted, and the directory table is checked against its own invariants before it is believed. 512 entries of 96 bytes, each with an owner, a group, permission bits and creation and modification times |
+| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, a disk that cannot be read is refused rather than formatted, and the directory table is checked against its own invariants before it is believed. The directory table and the allocation table are sized from the device at mount, up to 8192 entries and ~1 GB; entries are 96 bytes each, with an owner, a group, permission bits and creation and modification times |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
 | **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()`. A read the device refuses is not cached, and a sector the device will not take stays dirty so a later flush tries it again |
 | **Block Device Layer** | One registered device under the cache, with the sector bounds check in one place rather than in each driver. ATA registers itself at boot; the file system never names it. A driver's errno reaches the file system unchanged, which is what lets the mount path tell a disk it cannot read from a disk with nothing on it |
@@ -816,7 +842,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.2.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.3.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -846,7 +872,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.2.0-beta.1.iso \
+    -cdrom esdumanOS-v1.3.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -1603,10 +1629,10 @@ The following are known constraints of the current implementation. These are doc
 |----------|-------|
 | Maximum processes | 16 (`MAX_TASKS`) |
 | File descriptors per process | 16 (`MAX_FD_PER_TASK`) |
-| Files in directory table | 512 (`MAX_FILES_IN_DIR`) |
+| Files in directory table | Sized from the disk at mount, up to 8192 (`FS_MAX_ENTRIES_CAP`). A disk written before v1.3.0 holds 512 |
 | Maximum filename length | 64 bytes (`MAX_FILENAME`) |
 | Maximum path length | 256 bytes (`MAX_PATH`) |
-| Maximum disk size (FAT) | 16 MB (4096 clusters of 8 sectors) |
+| Maximum disk size (FAT) | ~1 GB (262144 clusters of 8 sectors, `FS_MAX_CLUSTERS_CAP`). A larger device is used up to that and says so |
 | Allocation unit | 4 KB (`FS_CLUSTER_SECTORS`, 8 sectors) |
 | Physical memory supported | 128 MB |
 | Pipe buffer size | 4 KB (`PIPE_SIZE`) |
@@ -1812,8 +1838,8 @@ Near-term priorities for the project, roughly in order:
 |----------|------|
 | P1 | `mount` and `umount`, so the second partition the table makes room for can be used |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
-| P2 | A disk larger than 16 MB: the allocation table is a static `uint32_t[4096]`, and sizing it from the device is what the block layer was the prerequisite for |
-| P3 | PCI bus enumeration — neither AHCI nor USB can be written without it, and `io.h` has no 32-bit port access yet |
+| P2 | PCI bus enumeration — neither AHCI nor USB can be written without it, and `io.h` has no 32-bit port access yet |
+| P2 | Variable cluster sizes, for a device larger than the ~1 GB a 1 MB allocation table can describe at 4 KB clusters |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1843,7 +1869,7 @@ transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; 
 outlived the work by five releases. Deriving the disk key from a boot passphrase left this list in v1.1.0, which
 also closed the hole under it: the `/bin` images had been stored on disk exactly as the
 build encrypted them, so they were readable to anyone holding the kernel binary no matter
-what the user's passphrase was. A block device layer left this list in v1.2.0, which the storage work ahead needs and
+what the user's passphrase was. Sizing the file system from the device left this list in v1.3.0, which needed the block layer to ask the device anything at all. A block device layer left this list in v1.2.0, which the storage work ahead needs and
 which arrived with the reason to build it: the file system could not tell a disk it had
 failed to read from a disk with nothing on it, and formatted the second. And the sticky
 bit on `/tmp`, which v0.9.4 added

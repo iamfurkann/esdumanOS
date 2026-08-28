@@ -13,6 +13,9 @@
 #include "libft.h"
 #include "kheap.h"
 #include "ata.h"
+/* REG-05 asks the bus whether this machine has an IDE controller before it
+ * decides what ata_identify() should have answered. */
+#include "pci.h"
 #include "bcache.h"
 /**
  * @brief Regression tests to prevent the recurrence of historically patched kernel bugs.
@@ -110,12 +113,33 @@ void run_regression_tests(void) {
     // =========================================================================
     // BUG-05: ATA Identify Infinite Loop Lockup (Hardware Livelock)
     // =========================================================================
-    // Past Bug Description: `ata_identify()` used an unbound `while(1)` loop waiting for hardware 
+    // Past Bug Description: `ata_identify()` used an unbound `while(1)` loop waiting for hardware
     // status flags. If the real disk controller failed to raise DRQ/ERR flags, the CPU hung forever.
     // The patch introduced a timeout-based escape mechanism.
-uint32_t identified_sectors = ata_identify();
-    
-    // If the thread of execution reaches this line, the timeout patch worked successfully.
-    KTEST_ASSERT(identified_sectors >= 4096, 
-        "[STRICT] REG-05: ATA Identify protected with Timeout against hardware lockup");
+    //
+    // This assertion did not test that, and said so in its own comment while
+    // testing something else. "If the thread of execution reaches this line, the
+    // timeout patch worked" is exactly right - and the condition underneath it
+    // then asked how large the disk was, which is a fact about the machine the
+    // suite runs on and not about the bug.
+    //
+    // It passed for four years while the thing it names was still broken. The
+    // timeout it was written for guarded the DRQ wait; the wait for BSY sat
+    // directly beside it with no timeout at all, and on a bus with no controller
+    // - which reads 0xFF, which has BSY set - the call never returned. i440fx
+    // always has an IDE controller, so the loop under test was never entered and
+    // the assertion never had an opinion. v1.4.0 fixed the hole; running the
+    // suite on q35 is what finally asked the question.
+    //
+    // What it asks now is what the comment always claimed: the call returns, and
+    // the answer is coherent for the machine it was asked on. A bus with a
+    // controller reports a disk; a bus without one reports nothing, rather than
+    // hanging or inventing a capacity.
+    uint32_t identified_sectors = ata_identify();
+    int has_ide_controller = (pci_find_class(PCI_CLASS_MASS_STORAGE,
+                                             PCI_SUBCLASS_IDE) != 0);
+
+    KTEST_ASSERT(has_ide_controller ? (identified_sectors >= 4096)
+                                    : (identified_sectors == 0),
+        "[STRICT] REG-05: ATA Identify returns rather than hanging, with a controller and without one");
 }

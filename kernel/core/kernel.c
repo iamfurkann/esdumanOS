@@ -12,6 +12,7 @@
 /* And this is where the machine is asked what else it has, which is a question
  * only the boot path has any business asking. */
 #include "pci.h"
+#include "ahci.h"
 #include "keyboard.h"
 #include "crypto.h"
 #include "entropy.h"
@@ -865,19 +866,26 @@ static void apply_system_modes(void) {
  *
  * The interesting case is not the one this machine has. QEMU's i440fx carries a
  * PIIX3 IDE controller and always has, so here the line confirms what the driver
- * is about to find anyway. On the hardware this project is aiming at there is no
- * IDE controller and there is an AHCI one, and the difference between "the disk
- * probe found nothing" and "the disk probe found nothing because the disk is
- * behind a controller this kernel cannot drive" is the whole of what somebody
- * standing in front of that machine needs to know.
+ * is about to find anyway.
  *
- * It says it and stops. No driver is selected, nothing is disabled.
+ * Until v1.5.0 the other branch said the machine had a storage controller this
+ * kernel could not drive, which was the honest thing to say and is now only true
+ * of a controller that is neither IDE nor SATA. Both of those have a driver.
+ *
+ * It says it and stops. No driver is selected here, nothing is disabled.
  */
 static void report_storage_controllers(void) {
     const pci_device_t *ide = pci_find_class(PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_IDE);
 
     if (ide) {
         klog(LOG_LEVEL_INFO, "PCI", "An IDE controller is present; the disk probe can use it.");
+        return;
+    }
+
+    const pci_device_t *sata = pci_find_class(PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_SATA);
+
+    if (sata) {
+        klog(LOG_LEVEL_INFO, "PCI", "A SATA controller is present; AHCI will be tried.");
         return;
     }
 
@@ -937,8 +945,21 @@ static int init_filesystem_and_vfs(void) {
      *
      * A disk that does not answer registers nothing, and init_fs() refuses to
      * mount rather than formatting - see the blank-disk path there.
+     *
+     * IDE first, and AHCI only when IDE found nothing. The order is what makes
+     * this change additive rather than a gamble: on the machine every test in
+     * this project runs on, ata_identify() answers and the SATA driver is never
+     * reached, so nothing that worked before can be broken by a driver written
+     * this release. On a board with no IDE controller the probe now returns
+     * quickly and honestly - v1.4.0 made it do that - and AHCI gets its turn.
+     *
+     * Preferring AHCI where both exist would be the v1.2.0 mistake again: two
+     * defensible decisions with an unwatched link between them, where a wrong
+     * answer from the newer subsystem silently removes the disk.
      */
-    ata_identify();
+    if (ata_identify() == 0) {
+        ahci_init();
+    }
 
     init_fs();
 

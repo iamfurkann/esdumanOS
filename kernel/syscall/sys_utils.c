@@ -82,7 +82,7 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
                 } 
                 else if (token[0] == '.' && token[1] == '.' && token[2] == '\0') {
                     if (current_id != 0) {
-                        for (int k = 0; k < MAX_FILES_IN_DIR; k++) {
+                        for (int k = 0; k < fs_max_entries; k++) {
                             if (dir_table[k].entry_id == current_id && dir_table[k].file_type == 1 && dir_table[k].is_used == 1) {
                                 current_id = dir_table[k].parent_id;
                                 break;
@@ -135,7 +135,7 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
  * @return Slot index, or -1.
  */
 static int slot_of_entry(int entry_id) {
-    for (int i = 0; i < MAX_FILES_IN_DIR; i++) {
+    for (int i = 0; i < fs_max_entries; i++) {
         if (dir_table[i].is_used && dir_table[i].entry_id == entry_id) return i;
     }
     return -1;
@@ -208,7 +208,7 @@ int check_vfs_access(int entry_id, int needs_write) {
     int hops = 0;
 
     while (curr != 0) {
-        if (++hops > MAX_FILES_IN_DIR) {
+        if (++hops > fs_max_entries) {
             klog_int(LOG_LEVEL_ERROR, "VFS", "Cycle in the directory tree; denying access to entry", entry_id);
             return 0;
         }

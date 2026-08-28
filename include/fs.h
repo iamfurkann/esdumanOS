@@ -42,8 +42,21 @@
  * Not per directory, despite the name: dir_table is one flat table and an entry's
  * place in the tree is its parent_id. Raised from 256 to 512 in v0.9.0, which
  * only became possible when the ids stopped being bytes.
+ *
+ * This was MAX_FILES_IN_DIR until v1.3.0, and the rename is the safety mechanism
+ * rather than tidying. The table is allocated at mount now, sized from the disk,
+ * so the number that bounds a loop over it is fs_max_entries and not this. Around
+ * forty loops used the old name as their bound; had the name survived, every one
+ * of them would have kept compiling while reading past the end of an allocation
+ * smaller than the cap. Deleting the name is what made the compiler point at all
+ * forty. The same mistake in reverse - a widening that compiled everywhere and
+ * was wrong in eight places - cost v0.9.0 three releases.
+ *
+ * 8192 entries is 768 KB of table, plus the same count of inode locks. It is a
+ * ceiling on what a format may choose, and appears in exactly two places:
+ * format_disk() picking a geometry and load_superblock() refusing one.
  */
-#define MAX_FILES_IN_DIR 512
+#define FS_MAX_ENTRIES_CAP 8192
 
 /**
  * @brief A directory entry's identifier.
@@ -102,7 +115,21 @@ typedef uint16_t fs_id_t;
  * costs 8 KB of disk and removes the ambiguity entirely.
  */
 #define FS_CLUSTER_SECTORS    8
-#define FS_MAX_CLUSTERS       4096
+
+/*
+ * The most clusters a format may describe, which at FS_CLUSTER_SECTORS is a
+ * little under 1 GB of data. Was FS_MAX_CLUSTERS and a fixed 4096 - a 16 MB
+ * ceiling - until v1.3.0 sized the allocation table from the device.
+ *
+ * 262144 entries is 1 MB of kernel memory for the table, and that budget is what
+ * picks the number rather than the disk: a 16 GB stick uses its first gigabyte
+ * and says so. Raising the ceiling further means variable cluster sizes, which
+ * fs_cluster_to_sector() already supports and load_superblock() does not yet
+ * accept.
+ *
+ * Runtime counterpart: fs_total_clusters, which has existed all along.
+ */
+#define FS_MAX_CLUSTERS_CAP   262144
 #define FS_FIRST_DATA_CLUSTER 2
 
 /**
@@ -395,7 +422,7 @@ extern uint32_t fs_part_start;
 extern uint32_t fs_max_sectors;
 
 /**
- * @brief Clusters this file system may address, capped at FS_MAX_CLUSTERS.
+ * @brief Clusters this file system may address, capped at FS_MAX_CLUSTERS_CAP.
  */
 extern uint32_t fs_total_clusters;
 
@@ -803,12 +830,40 @@ static inline int fs_sticky_allows_removal(uint16_t dir_mode, uint32_t dir_owner
 
 // --- Added by Refactor Script ---
 extern int fs_get_entry_idx(const char *name, fs_id_t parent_id);
-extern disk_file_entry_t dir_table[];
+/*
+ * Both tables are allocated at mount and sized from the disk as of v1.3.0. They
+ * were static arrays of FS_MAX_ENTRIES_CAP and FS_MAX_CLUSTERS_CAP, which is why
+ * the disk was capped at 16 MB and the file system at 512 entries whatever it
+ * was mounted on.
+ *
+ * Pointers rather than arrays, and every dir_table[i] in the tree compiles
+ * unchanged - eighty-nine of them in vfs.c alone. What had to change is the
+ * bound of every loop over them, which is fs_max_entries and fs_total_clusters.
+ */
+extern disk_file_entry_t *dir_table;
+
+/**
+ * @brief Entries the mounted file system actually holds.
+ *
+ * Read from the superblock at mount, which is where the format recorded what it
+ * chose. Never FS_MAX_ENTRIES_CAP: that is the ceiling a format may not exceed,
+ * and a disk formatted by an older release holds 512.
+ *
+ * Signed, because an entry index is an int everywhere in this tree -
+ * fs_get_entry_idx() returns one and uses -1 for "no such entry", and every
+ * inode_idx is an int. A uint32_t here would have put a signed/unsigned
+ * comparison in twenty-seven loops and ten bounds checks, and the warning would
+ * have been right: the mismatch is real, and the answer is to type the count the
+ * way the indices are typed rather than to cast at every use. The value is at
+ * most FS_MAX_ENTRIES_CAP.
+ */
+extern int fs_max_entries;
+
 /* The allocation table, one uint32_t per cluster. Declared here as of v0.10.0
  * because the tests need to assert that clusters 0 and 1 are reserved - which is
  * what makes a start_cluster of 0 mean "no data" rather than "the first
  * cluster", and is therefore worth checking rather than assuming. */
-extern uint32_t file_allocation_table[];
+extern uint32_t *file_allocation_table;
 extern void init_fs(void);
 
 #endif // FS_H

@@ -8,8 +8,13 @@ Thank you for your interest in contributing to esdumanOS! This document provides
 2. Set up the build environment using the dependency list in the [README](README.md#building).
 3. Run the full test suite before submitting changes:
    ```bash
-   make test && make fuzz && make && make test_kernel && make test_smap
+   make test && make fuzz && make && make test_kernel && make test_kernel_q35 && make test_smap
    ```
+   `test_kernel_q35` runs the same suite on a machine with no IDE controller, where the
+   disk is behind a SATA controller. It must report the same assertion total as
+   `test_kernel`; a different total means an assertion has learned which machine it is
+   running on.
+
    If your change touches entropy, crypto, or the `/dev` random devices, also run the
    configuration that exposes RDRAND — it reaches a branch the other targets cannot:
    ```bash
@@ -89,9 +94,10 @@ Prose rather than bullets, wrapped at about 76 columns.
 ## Pull Request Process
 
 1. Ensure all tests pass. The list is the one under [Getting Started](#getting-started)
-   — `make test`, `make fuzz`, `make`, `make test_kernel`, `make test_smap` — and CI
-   runs every one of them plus `make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"`.
-   None of them is allowed to fail.
+   — `make test`, `make fuzz`, `make`, `make test_kernel`, `make test_kernel_q35`,
+   `make test_smap` — and CI runs every one of them plus
+   `make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"`. None of them is allowed to
+   fail.
 
    This said "`make test && make test_kernel && make test_smap`" and "CI runs the same
    targets", which was three of the six. A contributor who trusted it would pass

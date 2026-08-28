@@ -8,7 +8,7 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    1
-#define OS_VERSION_MINOR    4
+#define OS_VERSION_MINOR    5
 #define OS_VERSION_PATCH    0
 
 /**
@@ -29,6 +29,14 @@
  * happened: the clock round trip is still not deterministic and there is still
  * no mount(). Dropping the suffix is a separate decision and nobody has taken
  * it, so the version moves and the qualifier does not.
+ *
+ * And it is planned to keep not happening. The roadmap now runs to 2.0.0, which
+ * is the release that boots on a real machine from a USB stick - and the
+ * decision taken with it, in 1.5.0, is that even that release ships as a beta.
+ * Running on hardware is a claim about reach, not about the system being
+ * finished, and this project has spent four releases learning that a passing
+ * assertion is not the same as a working one. The suffix comes off when
+ * somebody decides it should, and that is still nobody yet.
  */
 #define OS_VERSION_PRE      "-beta.1"
 

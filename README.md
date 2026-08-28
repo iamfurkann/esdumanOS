@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.4.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.5.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -484,7 +484,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 19 user-space programs and 34 shell builtins
-- 38 kernel self-test modules and CI pipeline
+- 39 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -544,7 +544,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Driver | Description |
 |--------|-------------|
 | **ATA/IDE** | PIO-mode disk I/O with IRQ-based waiting, 28-bit LBA, single-sector read/write, cache flush. Every wait is bounded, including the one after `IDENTIFY` that was not until v1.4.0 |
-| **PCI** | Bus enumeration only. Configuration space through ports 0xCF8/0xCFC, the buses behind bridges walked from a worklist, up to 32 functions recorded with their class, IDs and base address registers. It drives nothing: the BARs are read and reported, never mapped |
+| **PCI** | Configuration space through ports 0xCF8/0xCFC, read and written; the buses behind bridges walked from a worklist; up to 32 functions recorded with their class, IDs and base address registers. Memory decoding and bus mastering are enabled for a device a driver claims |
+| **AHCI (SATA)** | The disk on a machine with no IDE controller. One controller, one port, one command slot, one sector per command, polled rather than interrupt-driven. Registers as a block device exactly as the IDE driver does, so nothing in the file system knows which of the two it is on |
 | **PS/2 Keyboard** | IRQ1 handler, US and Turkish layouts, Shift/CapsLock/AltGr, 256-byte ring buffer |
 | **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management |
 | **RTC** | CMOS real-time clock, BCD/binary auto-detection, 12/24-hour conversion |
@@ -573,7 +574,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 38 kernel-mode modules: abi, keyslot, blockdev, pci, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 39 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -845,7 +846,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.4.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.5.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -875,7 +876,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.4.0-beta.1.iso \
+    -cdrom esdumanOS-v1.5.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -897,21 +898,32 @@ sure what the current build produces.
 
 Everything above runs on QEMU's default i440fx, which carries a PIIX3 IDE
 controller whether or not a disk is attached to it. The machine this project is
-aiming at does not have one at all, and until v1.4.0 that was not a missing
-feature but a hang: the wait for the busy bit after `IDENTIFY` had no timeout, and
-an undecoded port answers with all ones, which has that bit set. To boot the class
-of machine where that mattered:
+aiming at does not have one at all. Until v1.4.0 that was not a missing feature
+but a hang — the wait for the busy bit after `IDENTIFY` had no timeout, and an
+undecoded port answers with all ones, which has that bit set — and until v1.5.0
+it was a system that could say what was holding its disk and not read it.
 
 ```
-qemu-system-i386 -M q35 -cdrom esdumanOS-v1.4.0-beta.1.iso -boot d \
-    -serial file:kernel_log_q35.txt -display curses
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.5.0-beta.1.iso -boot d \
+    -serial file:kernel_log_q35.txt \
+    -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
-What this demonstrates is a diagnosable stop, not a working system. There is no
-disk, so nothing mounts and there is no passphrase prompt; what the log should
-show is the PCI inventory, a line saying no IDE controller answered on the primary
-bus, and the file system refusing to mount rather than formatting something it
-cannot read. A kernel built before v1.4.0 shows none of it and simply stops.
+The drive line is the same one the i440fx invocation uses. `if=ide` asks for the
+machine's IDE interface, and on q35 that interface is the ICH9 AHCI controller —
+so the same request reaches a different controller, and the kernel takes the disk
+through the SATA driver instead.
+
+This is now a working system: a passphrase prompt, a login, a shell, and files
+that are still there after `reboot`. The log should show the PCI inventory, a
+line saying no IDE controller answered on the primary bus, and the AHCI driver
+reporting the port and capacity it found. The CD-ROM sits on the same controller
+as the disk, so a boot that reaches the shell is also evidence that the driver
+told the two apart by their device signature.
+
+Without a disk it still stops, and stops legibly: the controller is found, no
+port has a disk on it, and the file system refuses to mount rather than
+formatting something it cannot read.
 
 ### Keyboard Shortcuts (Inside the OS)
 
@@ -1164,8 +1176,15 @@ make test
 # Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 37 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 39 kernel-mode modules, then a Ring 3 payload.
+# The machine is i440fx, so the disk is reached through the IDE driver.
 make test_kernel
+
+# The same suite with one flag changed, on a machine with no IDE controller,
+# where the disk is behind a SATA controller instead. Everything that touches
+# storage exercises the AHCI driver without an assertion being written for it.
+# It must report the same assertion total as the run above.
+make test_kernel_q35
 
 # Run one module instead of all of them, for iteration
 make test_kernel MODULE=fork
@@ -1195,6 +1214,7 @@ filtered run proves one module, not the tree.
 | Module | Coverage |
 |--------|----------|
 | `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 64 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
+| `test_ahci.c` | Device memory and the SATA driver, asserted so that the same assertions reach the same verdict on a machine that has an AHCI controller and one that does not: the four structures the controller reads out of memory are the sizes it indexes them by and fit one page with every alignment satisfied, a device mapping preserves its offset within the page and carries the cache-disable bit (read back out of the page table, because nothing else can see it), `pci_enable_device()` sets the two bits it is asked for and leaves the rest of the command register alone, and exactly one of the two storage drivers owns the disk — the one the bus says this machine has |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
 | `test_keyslot.c` | The passphrase key slot, against the slot alone — no disk, no prompt: round trip, a wrong passphrase refused with the caller's buffer left untouched, every field of the slot edited in turn to confirm the tag covers the salt and IV as well as the ciphertext, iteration counts above and below what the build accepts, and the same data key wrapped under a second passphrase to prove a passphrase change preserves it |
@@ -1283,7 +1303,8 @@ esdumanOS/
 |
 |-- drivers/
 |   |-- ata.c                        ATA/IDE PIO disk driver
-|   |-- pci.c                        PCI bus enumeration (no device drivers)
+|   |-- pci.c                        PCI bus enumeration and configuration access
+|   |-- ahci.c                       SATA disk driver (polled, one port)
 |   |-- keyboard.c                   PS/2 keyboard (US + Turkish)
 |   |-- tty.c                        VGA text mode, 3 virtual terminals
 |   +-- rtc.c                        Real-time clock
@@ -1335,7 +1356,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      38 kernel-mode test modules + framework
+|   |-- kernel/                      39 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1668,6 +1689,7 @@ The following are known constraints of the current implementation. These are doc
 | Per-process kernel stack | 8 KB (`KERNEL_STACK_SIZE`) |
 | Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
 | PCI functions recorded | 32 (`PCI_MAX_DEVICES`). A machine with more gets the first 32 and a log line saying the list stops there |
+| Device register window | 16 MB at `DEVICE_WINDOW_BASE`, allocated by a bump pointer with no free. A driver's registers are mapped once at boot and held for the life of the system; the AHCI driver uses 12 KB of it |
 | Kernel log ring | 512 records, ~88 KB (`KLOG_RECORDS`) |
 | Longest `alarm()` interval | ~249 days (half a 32-bit tick counter at `TIMER_HZ`) |
 | Latest representable timestamp | 2106 (`uint32_t` seconds since the Unix epoch) |
@@ -1786,11 +1808,22 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   return, rather than mapping on first touch. A program that reserves a large range
   and uses a little of it pays for all of it.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
-- **The PCI bus is enumerated and nothing on it is driven.** v1.4.0 added the walk,
-  not a driver: the base address registers are read and reported, and none of them
-  is mapped. A machine whose disk is behind an AHCI controller is now a machine
-  that says so at boot and still cannot read the disk. The enumeration is also a
-  snapshot taken once, on the boot path — nothing rescans, and there is no hotplug.
+- **The PCI enumeration is a snapshot taken once, on the boot path.** Nothing
+  rescans and there is no hotplug. Of everything it finds, one class is driven:
+  a SATA controller, as of v1.5.0.
+- **The SATA driver is the smallest one that reads and writes a disk.** It polls
+  rather than taking interrupts — the controller's interrupt travels the PCI
+  interrupt line to an IOAPIC, and there is no IOAPIC here, no ACPI to describe
+  the routing and an interrupt dispatcher that is a hand-written chain of
+  comparisons. It uses the first SATA controller, its first port with a disk, one
+  of the 32 command slots, and moves one sector per command. Multi-sector
+  transfers are the hardware's to give and the block interface's to ask for:
+  `blockdev_t` reads and writes a sector at a time, and changing that is a
+  decision about every driver rather than about this one.
+- **Device mappings are never reclaimed.** Registers and DMA buffers are mapped
+  into a 16 MB window by a bump pointer with no free, because a driver in this
+  kernel is loaded at boot and never unloaded. A free list would be a structure
+  with no caller.
 - **No networking.** No TCP/IP stack, Ethernet driver, or socket API.
 - **No dynamic linking.** All user-space programs are statically linked.
 - **The log is written at checkpoints, not continuously.** `sync`, `halt` and
@@ -1866,15 +1899,39 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 
 ## Roadmap
 
-Near-term priorities for the project, roughly in order:
+As of v1.5.0 this is a route rather than a list of wishes, because the
+destination is now close enough to name. **2.0.0 is the release that boots on a
+real machine, from a USB stick.** Everything between here and there exists to
+remove one of the three things that stop it.
 
-| Priority | Item |
-|----------|------|
-| P1 | `mount` and `umount`, so the second partition the table makes room for can be used |
-| P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
-| P2 | Variable cluster sizes, for a device larger than the ~1 GB a 1 MB allocation table can describe at 4 KB clusters |
-| P3 | Expanded /dev device drivers |
-| P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
+The three are independent and all of them are real. The machine boots UEFI and
+this kernel is loaded by GRUB through Multiboot under BIOS. Its screen is a
+framebuffer and `drivers/tty.c` writes characters to `0xB8000`. Its keyboard is
+on USB and `drivers/keyboard.c` reads port `0x60`. Each is true of every machine
+this project has been tested on and false of the machine it is aimed at.
+
+| Release | What it removes |
+|---------|-----------------|
+| v1.6.0 | **The terminal stops knowing where the screen is.** A console backend behind the cell buffer, a framebuffer backend beside the VGA one, and Multiboot2 so the bootloader can hand over a framebuffer. Testable under BIOS today, side by side with the text output it replaces |
+| v1.7.0 | **UEFI boot.** GRUB in UEFI mode, the memory map from Multiboot2, and the BIOS assumptions retired. Everything after this is developed on the platform it is aimed at rather than ported to it |
+| v1.8.0 | **A keyboard on a machine with no PS/2 controller.** Multi-page contiguous physical allocation, XHCI, and USB HID. The event ring polled from the timer tick rather than through an IOAPIC that does not exist here |
+| v1.9.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
+| v2.0.0 | The machine. Named, as only major versions are |
+
+**2.0.0 ships as a beta too**, and that was decided along with the rest of this
+table rather than deferred again. Running on hardware is a claim about reach, and
+this project has spent several releases learning that reach and correctness are
+different things — v1.4.0 found a hang that had been in every release ever made,
+and v1.5.0 found a regression test that had been asserting the wrong thing for
+four years. The suffix comes off when somebody decides it should.
+
+Not on the route, and waiting behind it: `su` with the semantics it claims — it
+takes a username and ignores it, which is a lie rather than a hole, since the
+password it asks for is still root's. Also per-mutex wait queues in place of the
+global `wakeup_tasks()` sweep, variable cluster sizes for a device larger than
+the ~1 GB a 1 MB allocation table describes at 4 KB clusters, expanded `/dev`
+nodes, and the RISC-V port whose Makefile branch exists while `arch/riscv/` does
+not.
 
 Deliberately **not** planned: making the kernel preemptible. See the note under
 [Architectural](#architectural) — the guarantee that kernel code runs to
@@ -1912,6 +1969,14 @@ freeze stops numbers from changing meaning and says nothing about adding new one
 `mount` and `umount` take 70 and 71 whenever they are written. That sentence said "68 and
 69" until v1.4.0, having been written before `SETKEY` took 68 and left standing for three
 releases four lines below the paragraph that says `SETKEY` took 68.
+
+A SATA driver left this list in v1.5.0, which is the release the three before it
+had been building towards without saying so: v1.2.0 put a block device layer under
+the file system and wrote in its own header that the registry would grow when a
+second device arrived, v1.3.0 made the file system take its geometry from whatever
+device it was on, and v1.4.0 gave the kernel a way to find a controller. On a
+modern board the kernel could name the controller holding its disk and not drive
+it. Now it drives it, and nothing under `fs/` knows which of the two it is on.
 
 PCI bus enumeration left this list in v1.4.0, and it left carrying more than the row
 promised. The row called it the thing neither AHCI nor USB can be written without, which

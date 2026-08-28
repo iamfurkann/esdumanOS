@@ -5,6 +5,118 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0-beta.1] - 2026-08-29
+
+The disk on a machine built this century. v1.4.0 taught the kernel to ask the bus what
+was attached and, on a modern board, the answer was a storage controller it could name
+and could not drive. This is the driver that answers it — and it is the release the
+three before it had been building towards without either of them saying so.
+
+### Added
+
+- **An AHCI driver** (`drivers/ahci.c`, `include/ahci.h`). It registers as a `blockdev_t`
+  exactly as the IDE driver does, so nothing under `fs/` learns that a second kind of
+  disk exists. That is v1.2.0's block layer being used for the thing its own header said
+  it was for; v1.3.0's device-sized geometry then works on whatever the new driver
+  reports.
+
+  Deliberately the smallest driver that reads and writes a disk: one controller, one
+  port, one command slot, one sector per command, and polled rather than
+  interrupt-driven. The interrupt would travel the PCI interrupt line to an IOAPIC, and
+  this kernel has no IOAPIC, no ACPI to describe the routing, and an interrupt dispatcher
+  that is a hand-written chain of comparisons.
+
+- **A device memory window** (`vmm_map_device()`, `PAGE_KERNEL_MMIO`). Controller
+  registers and the buffers a controller reads on its own are mapped uncached into 16 MB
+  of previously unclaimed kernel address space. `map_page()` needed no change to honour
+  it: it already passed flags through as `(flags & 0xFFF)`, and both cache bits are
+  inside that mask.
+
+  There is no contiguous multi-frame allocator, and the arithmetic is why. A command list
+  is 1 KB, a received FIS area 256 bytes, a command table with one entry 144, and a
+  sector 512 — 2560 bytes with every alignment satisfied inside one 4096-byte frame, and
+  `pmm_alloc_frame()` already returns one of those. The planning for this release said
+  the allocator would be needed; the arithmetic said otherwise, and writing it anyway
+  would have been a structure with no caller.
+
+- **PCI configuration writes** and `pci_enable_device()`. Memory decoding and bus
+  mastering are set rather than assigned, so the bits the firmware configured and this
+  kernel never looked at survive.
+
+- **`make test_kernel_q35`** and a sixth CI step: the whole suite again on a machine with
+  no IDE controller. One flag changes. Everything that touches storage — `test_vfs`,
+  `test_bcache`, `test_blockdev` and the file system under all of them — exercises the
+  new driver without an assertion being written for it, and both runs report the same
+  total.
+
+- **`tests/kernel/test_ahci.c`**, the 39th module. Machine-independent by construction:
+  the structure sizes the controller indexes memory by, the mapping's offset and its
+  cache-disable bit read back out of the page table, `pci_enable_device()` leaving the
+  rest of the command register alone, and the fact that exactly one of the two storage
+  drivers owns the disk — the one the bus says this machine has.
+
+### Fixed
+
+- **A regression test had been asserting the wrong thing for four years, and passing.**
+  `REG-05` is named "ATA Identify protected with Timeout against hardware lockup" and its
+  own comment says the proof is reaching the line at all. The condition underneath then
+  asked how large the disk was, which is a fact about the test machine.
+
+  It passed throughout the period when the lockup it names was real. The timeout it was
+  written for guarded the `DRQ` wait; the wait for `BSY` sat directly beside it with no
+  timeout, and v1.4.0 fixed that. i440fx always has an IDE controller, so the loop under
+  test was never entered and the assertion never had an opinion about it. Running the
+  suite on q35 asked the question for the first time and the assertion fell over.
+
+  It now asserts what the comment always claimed: the call returns, and the answer is
+  coherent for the machine — a disk where there is a controller, nothing where there is
+  not.
+
+- **`pmm_alloc_frame()`'s documented failure value was wrong** from the first release
+  until now. The header promised 0 and the code returns `0xFFFFFFFF`, and zero is an
+  address the allocator deliberately never hands out — so a caller that believed the
+  header would have read every failure as a valid low frame. All twenty-one callers test
+  against `0xFFFFFFFF` and none was ever misled; the trap was in the header alone, which
+  is exactly where `ata.h`'s return contract sat for four years before v1.2.0 read it.
+
+- **A comment in the CI workflow** said "the 23 kernel-mode modules". There are 39.
+
+### Changed
+
+- **The boot path tries IDE first and AHCI only if IDE found nothing.** The order is what
+  makes this additive rather than a gamble: on the machine every test in this project
+  runs on, `ata_identify()` answers and the new driver is never reached. Preferring AHCI
+  where both exist would be the v1.2.0 mistake again — two defensible decisions with an
+  unwatched link between them, where a wrong answer from the newer subsystem silently
+  removes the disk.
+
+- **The roadmap is a route now.** 2.0.0 is the release that boots on a real machine from
+  a USB stick, and the four releases before it each remove one of the three things
+  stopping that: the boot contract, the screen and the keyboard. Decided with it: **2.0.0
+  ships as a beta as well.** Running on hardware is a claim about reach rather than about
+  the system being finished, and this release found a four-year-old test asserting the
+  wrong thing while the bug it named was real.
+
+### Known issues
+
+- **One controller, its first port, one command slot, one sector per command.** If a
+  machine has two SATA controllers and the first has no disk on it, the driver gives up
+  rather than looking at the second. Multi-sector transfers are the hardware's to give
+  and `blockdev_t`'s to ask for; it reads and writes a sector at a time, and changing
+  that is a decision about every driver.
+
+- **Device mappings are never reclaimed.** The window is a bump pointer with no free,
+  because a driver here is loaded at boot and never unloaded.
+
+- **No HBA reset.** The controller is taken as firmware left it with AHCI mode asserted,
+  which is what the specification requires before any other register is read. A full
+  reset is the more thorough start and there is no machine available to this project on
+  which the difference could be observed.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status
+  v1.2.0 gave them. A device larger than about 1 GB is still used only up to that.
+
 ## [1.4.0-beta.1] - 2026-08-28
 
 The kernel can ask the machine what it has. Every piece of hardware it uses, it has so

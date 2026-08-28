@@ -55,26 +55,52 @@
  */
 #define ATA_CMD_IDENTIFY 0xEC
 
+/*
+ * This header described the wrong contract from v0.4 until v1.2.0.
+ *
+ * Both functions below were documented as returning "0 on success, or a negative
+ * error code on failure". They returned 1 for success and 0 for failure, and
+ * never a negative anything - so the header and the code disagreed about the
+ * meaning of zero, in the direction where every failure reads as success. It
+ * survived because no caller read the value at all: the block cache called both
+ * and discarded the result, so a failed read reached the file system as 512 zero
+ * bytes indistinguishable from a sector that really was zero.
+ *
+ * The contract below is now the kernel's ordinary one - E_OK, or a negative
+ * errno - and the code was changed to match it rather than the other way round,
+ * because "success is zero" is what every other function in this tree means.
+ */
+
 /**
  * @brief Reads a single 512-byte sector from the ATA drive using LBA28 addressing.
- * 
+ *
+ * The buffer is zeroed on every failure path. That is deliberate - handing back
+ * uninitialised stack contents would be worse - and it is exactly why the return
+ * value has to be read: zeros are not evidence of anything.
+ *
  * @param lba Logical Block Address of the sector to read.
  * @param buffer Pointer to the memory buffer where the sector data will be stored.
- * @return 0 on success, or a negative error code on failure.
+ * @return E_OK, E_NODEV when no disk was identified, E_INVAL when the LBA is past
+ *         the end of it, or E_IO when the drive reported an error or stopped
+ *         answering.
  */
 int ata_read_sector(uint32_t lba, uint8_t *buffer);
 
 /**
  * @brief Writes a single 512-byte sector to the ATA drive using LBA28 addressing.
- * 
+ *
  * @param lba Logical Block Address of the sector to write.
  * @param buffer Pointer to the memory buffer containing the data to write.
- * @return 0 on success, or a negative error code on failure.
+ * @return E_OK, or E_NODEV / E_INVAL / E_IO as for ata_read_sector().
  */
 int ata_write_sector(uint32_t lba, uint8_t *buffer);
 
 
-// --- Added by Refactor Script ---
+/**
+ * @brief Identifies the disk and registers it as the root block device.
+ *
+ * @return Total sectors, or 0 when no usable disk answered.
+ */
 extern uint32_t ata_identify(void);
 
 #endif

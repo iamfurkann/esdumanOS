@@ -58,10 +58,12 @@ static int dispatch_retired(uint32_t number) {
 }
 
 /**
- * @brief The v1.0.0 system call numbers.
+ * @brief The frozen system call numbers.
  *
- * Sixty-two production calls, one assertion each, so a failure names the number
- * that moved instead of reporting that something in the table did.
+ * Sixty-three production calls, one assertion each, so a failure names the
+ * number that moved instead of reporting that something in the table did. It was
+ * sixty-two at the freeze; SETKEY is the one added since, and adding numbers is
+ * what the freeze permits.
  */
 static void run_syscall_number_assertions(void) {
     /* Process and scheduling. */
@@ -86,6 +88,13 @@ static void run_syscall_number_assertions(void) {
     /* Time. */
     KTEST_ASSERT(SYSCALL_TIME == 55,         "[STRICT] [ABI] TIME is 55");
     KTEST_ASSERT(SYSCALL_SETTIME == 66,      "[STRICT] [ABI] SETTIME is 66");
+
+    /*
+     * The first number handed out after the freeze, and the assertion that the
+     * rule was followed: 68 continues from YIELD at 67 rather than filling the
+     * gap at 11, 28, 30, 31 or 32.
+     */
+    KTEST_ASSERT(SYSCALL_SETKEY == 68,       "[STRICT] [ABI] SETKEY is 68, the first number assigned after the freeze");
 
     /* Descriptors and I/O. */
     KTEST_ASSERT(SYSCALL_READ == 3,          "[STRICT] [ABI] READ is 3");
@@ -158,7 +167,7 @@ static void run_syscall_number_assertions(void) {
      * value 2 under the name SYSCALL_INSN_LEN until v1.0.0, in the SYSCALL_*
      * namespace, indistinguishable by prefix from SYSCALL_IPC_SEND - which is
      * also 2. Anything counting the numbers in that header by their prefix
-     * counted this one and got 65 calls where there are 62.
+     * counted this one and got one call too many.
      */
     KTEST_ASSERT(SYSCALL_TRAP_INSN_LEN == 2,
                  "[STRICT] [ABI] the int 0x80 trap is still two bytes long");
@@ -187,11 +196,13 @@ static void run_retired_number_assertions(void) {
                  "[STRICT] [ABI] 99 stays retired - YIELD left it for 67 at the freeze");
 
     /*
-     * 68 is where the next call goes, and it must be free until one is written.
-     * This is the assertion that catches a number being taken quietly.
+     * 69 is where the next call goes, and it must be free until one is written.
+     * This is the assertion that catches a number being taken quietly. It said
+     * 68 until v1.1.0 assigned that one, which is what this line is for: the
+     * frontier moves by somebody editing it deliberately, not by drifting.
      */
-    KTEST_ASSERT(dispatch_retired(68) == E_NOSYS,
-                 "[STRICT] [ABI] 68 is unassigned, and is where the next call continues from");
+    KTEST_ASSERT(dispatch_retired(69) == E_NOSYS,
+                 "[STRICT] [ABI] 69 is unassigned, and is where the next call continues from");
 }
 
 /**

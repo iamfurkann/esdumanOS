@@ -312,7 +312,15 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
 
     // --- SECURITY AND PASSWORD SCREEN ---
     init_security(mboot_info);
-    init_elf_master_key();
+    /*
+     * This was init_elf_master_key(), and it filled the file system's key. It
+     * fills the embedded-program key now, which is the only thing that key was
+     * ever entitled to open: the programs encrypted into this image at build
+     * time. The file system's key comes from the disk's own slot, opened with a
+     * passphrase, which cannot happen here because there is no disk mounted yet
+     * - see unlock_disk_key(), called from init_filesystem_and_vfs().
+     */
+    init_image_asset_key();
 
     if (mboot_info->flags & 0x00000004) {
         char *cmd = (char *)mboot_info->cmdline;
@@ -383,6 +391,31 @@ static int init_memory_subsystem(void) {
     return 0;
 }
 /**
+ * @brief Attempts allowed at the disk passphrase prompt before the machine stops.
+ *
+ * The same three the account prompts allow, and it buys the same thing: a
+ * mistyped passphrase is not a lost disk, and an unattended machine is not an
+ * oracle somebody can sit in front of. There is no lockout beyond this because
+ * there is nowhere to record one that an attacker holding the disk could not
+ * simply erase.
+ */
+#define DISK_PASSPHRASE_ATTEMPTS 3
+
+/**
+ * @brief The passphrase a test build uses, since it has nobody to ask.
+ *
+ * make test_kernel zeroes the disk before every run, so every run is a first
+ * boot and would sit at a prompt with no keyboard behind it - the suite would
+ * spend QEMU_TEST_TIMEOUT and report "KERNEL HUNG", which is exactly the failure
+ * this project has already been fooled by once.
+ *
+ * It goes through the same PBKDF2, wrap and unwrap that a typed passphrase does;
+ * only the source of the characters differs. The iteration count is already
+ * reduced in test builds by PBKDF2_DEV_ITERATIONS.
+ */
+#define TEST_MODE_PASSPHRASE "test"
+
+/**
  * @brief Early boot keyboard character reader for password input.
  * Reads one character, echoes '*' for password hiding.
  */
@@ -413,6 +446,169 @@ static void early_read_password(char *buf, int max_len) {
  *
  * @param etc_id The entry ID of the /etc directory
  */
+/**
+ * @brief Stops the machine with a reason, when boot cannot honestly continue.
+ *
+ * Not kernel_panic(): nothing has gone wrong with the kernel. The disk could not
+ * be opened, which is a thing the user did or a thing that happened to their
+ * disk, and dressing it up as a fault would send them looking in the wrong
+ * place.
+ */
+static void halt_with_reason(const char *line1, const char *line2) {
+    terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    printk("\n  %s\n", line1);
+    if (line2) printk("  %s\n", line2);
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    while (1) { asm volatile("cli; hlt"); }
+}
+
+/**
+ * @brief Sets the disk passphrase on a file system that has just been created.
+ *
+ * Asked twice, because a passphrase that protects a disk and was mistyped
+ * protects it from its owner. Three attempts at getting the two to agree, then
+ * the machine stops - continuing would mean either an unencrypted disk or one
+ * whose key nobody knows, and neither is a thing to do quietly.
+ */
+static void prompt_new_disk_passphrase(void) {
+    char pass1[KEYSLOT_MAX_PASSPHRASE];
+    char pass2[KEYSLOT_MAX_PASSPHRASE];
+
+    terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_BLUE);
+    printk("\n");
+    printk("  =====================================================\n");
+    printk("    esdumanOS Disk Encryption Setup                    \n");
+    printk("    This disk is new. Choose a passphrase for it.      \n");
+    printk("  =====================================================\n");
+    terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    printk("\n  The passphrase unlocks the file system at every boot.\n");
+    printk("  There is no recovery key: if it is lost, the disk is lost.\n\n");
+
+    for (int attempt = 0; attempt < DISK_PASSPHRASE_ATTEMPTS; attempt++) {
+        int match = 1;
+        int res;
+
+        printk("  Set disk passphrase: ");
+        early_read_password(pass1, KEYSLOT_MAX_PASSPHRASE);
+        printk("  Confirm disk passphrase: ");
+        early_read_password(pass2, KEYSLOT_MAX_PASSPHRASE);
+
+        for (int i = 0; i < KEYSLOT_MAX_PASSPHRASE; i++) {
+            if (pass1[i] != pass2[i]) { match = 0; break; }
+            if (pass1[i] == '\0') break;
+        }
+
+        if (!match) {
+            terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            printk("  Passphrases do not match. Try again.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            continue;
+        }
+
+        res = fs_keyslot_install(pass1);
+
+        if (res == E_OK) {
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            printk("  [OK] Disk encryption key created.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+
+        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        if (res == E_INVAL) {
+            printk("  A passphrase is required, and must be shorter than 64 characters.\n");
+        } else {
+            printk("  Could not create a key: the entropy pool is unavailable.\n");
+        }
+        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    }
+
+    halt_with_reason("No disk passphrase was set after three attempts.",
+                     "Nothing has been written to the disk. Reboot to try again.");
+}
+
+/**
+ * @brief Asks for the passphrase that opens an existing disk.
+ *
+ * A failure here says the passphrase was rejected *or* the slot is damaged, and
+ * does not pretend to tell them apart. It cannot: both arrive as a tag that does
+ * not match. What it can say is that the superblock's other fields were readable,
+ * which is why the wording puts the passphrase first.
+ */
+static void prompt_existing_disk_passphrase(void) {
+    char pass[KEYSLOT_MAX_PASSPHRASE];
+
+    printk("\n");
+    for (int attempt = 0; attempt < DISK_PASSPHRASE_ATTEMPTS; attempt++) {
+        int res;
+
+        printk("  Disk passphrase: ");
+        early_read_password(pass, KEYSLOT_MAX_PASSPHRASE);
+
+        res = fs_keyslot_unlock(pass);
+        if (res == E_OK) {
+            terminal_setcolor(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            printk("  [OK] Disk unlocked.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+
+        terminal_setcolor(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        if (res == E_INVAL) {
+            printk("  This disk's key slot is not one this kernel can use.\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            halt_with_reason("The key slot names a work factor outside this build's range.",
+                             "The disk was written by a different build of esdumanOS.");
+        }
+        printk("  Passphrase rejected.\n");
+        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    }
+
+    halt_with_reason("Passphrase rejected three times, or the key slot is damaged.",
+                     "The disk has not been modified.");
+}
+
+/**
+ * @brief Puts the file system's data key in the kernel's hands, or stops.
+ *
+ * Runs between mounting the disk and the first thing that writes to it. The
+ * directory table and the allocation table are plaintext, so the mount itself
+ * needs no key - but /etc/passwd and /etc/shadow are written through
+ * fs_create_file(), which encrypts, so the key has to exist before the first
+ * boot sets up accounts.
+ */
+static void unlock_disk_key(void) {
+    if (!fs_mounted) return;
+
+    if (is_test_mode) {
+        int res = fs_was_formatted ? fs_keyslot_install(TEST_MODE_PASSPHRASE)
+                                   : fs_keyslot_unlock(TEST_MODE_PASSPHRASE);
+        if (res != E_OK) {
+            klog_int(LOG_LEVEL_ERROR, "SEC", "Test-mode disk key setup failed", res);
+        }
+        return;
+    }
+
+    if (fs_was_formatted) {
+        prompt_new_disk_passphrase();
+        return;
+    }
+
+    if (fs_keyslot_present()) {
+        prompt_existing_disk_passphrase();
+        return;
+    }
+
+    /*
+     * Mounted, not formatted by this boot, and carrying no slot. Installing one
+     * here would generate a fresh data key and every file already on the disk
+     * would decrypt to noise - so this refuses rather than offering a prompt
+     * whose successful outcome is silent destruction.
+     */
+    halt_with_reason("This disk has no key slot and was not created by this boot.",
+                     "Refusing to install one: it would replace the key its files use.");
+}
+
 static void first_boot_setup(int etc_id) {
     terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_BLUE);
     printk("\n");
@@ -632,9 +828,10 @@ static void apply_system_modes(void) {
 
     /*
      * Everything in /bin is a program, and until now not one of them said so.
-     * They are written with fs_create_file_raw(), which stamps
-     * FS_MODE_DEFAULT_FILE - 0644, no execute bit anywhere - and nothing ever
-     * looked, because exec decided by which directory a file sat in.
+     * They are written with fs_install_image_asset(), which lands on
+     * fs_create_file() and stamps FS_MODE_DEFAULT_FILE - 0644, no execute bit
+     * anywhere - and nothing ever looked, because exec decided by which
+     * directory a file sat in.
      *
      * That is why this runs before anything consults the bit rather than in the
      * same change: a kernel that started asking for execute permission against
@@ -671,6 +868,14 @@ static int init_filesystem_and_vfs(void) {
     boot_ok("Kernel Heap & Signal Handlers Registered");
 
     init_fs();
+
+    /*
+     * Between the mount and the first write. Everything below this line that
+     * touches /etc goes through fs_create_file(), which encrypts under the
+     * security level's default - so the key has to be in hand before the first
+     * boot writes a single account.
+     */
+    unlock_disk_key();
 
     if (get_vfs_id("bin", 0) == -1) {
         klog(LOG_LEVEL_INFO, "VFS", "Setting up the root directory hierarchy.");
@@ -758,29 +963,29 @@ static int init_filesystem_and_vfs(void) {
             printk("[VFS ERROR] System is in IMMUTABLE mode! 'init.elf' cannot be written to disk.\n");
             terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         } else {
-            fs_create_file_raw("init.elf", init_elf, init_elf_len, 0);
+            fs_install_image_asset("init.elf", init_elf, init_elf_len, 0);
             
             int bin_id = get_vfs_id("bin", 0);
             if (bin_id != -1) {
-                fs_create_file_raw("sh", sh_elf, sh_elf_len, bin_id);
-                fs_create_file_raw("touch", touch_elf, touch_elf_len, bin_id);
-                fs_create_file_raw("rm", rm_elf, rm_elf_len, bin_id);
-                fs_create_file_raw("mv", mv_elf, mv_elf_len, bin_id);
-                fs_create_file_raw("cp", cp_elf, cp_elf_len, bin_id);
-                fs_create_file_raw("free", free_elf, free_elf_len, bin_id);
-                fs_create_file_raw("whoami", whoami_elf, whoami_elf_len, bin_id);
-                fs_create_file_raw("kill", kill_elf, kill_elf_len, bin_id);
-                fs_create_file_raw("grep", grep_elf, grep_elf_len, bin_id);
-                fs_create_file_raw("head", head_elf, head_elf_len, bin_id);
-                fs_create_file_raw("wc", wc_elf, wc_elf_len, bin_id);
-                fs_create_file_raw("date", date_elf, date_elf_len, bin_id);
-                fs_create_file_raw("stat", stat_elf, stat_elf_len, bin_id);
-                fs_create_file_raw("edit", edit_elf, edit_elf_len, bin_id);
-                fs_create_file_raw("chmod", chmod_elf, chmod_elf_len, bin_id);
-                fs_create_file_raw("chown", chown_elf, chown_elf_len, bin_id);
-                fs_create_file_raw("hello", hello_elf, hello_elf_len, bin_id);
-                fs_create_file_raw("clear", clear_elf, clear_elf_len, bin_id);
-                fs_create_file_raw("echo", echo_elf, echo_elf_len, bin_id);
+                fs_install_image_asset("sh", sh_elf, sh_elf_len, bin_id);
+                fs_install_image_asset("touch", touch_elf, touch_elf_len, bin_id);
+                fs_install_image_asset("rm", rm_elf, rm_elf_len, bin_id);
+                fs_install_image_asset("mv", mv_elf, mv_elf_len, bin_id);
+                fs_install_image_asset("cp", cp_elf, cp_elf_len, bin_id);
+                fs_install_image_asset("free", free_elf, free_elf_len, bin_id);
+                fs_install_image_asset("whoami", whoami_elf, whoami_elf_len, bin_id);
+                fs_install_image_asset("kill", kill_elf, kill_elf_len, bin_id);
+                fs_install_image_asset("grep", grep_elf, grep_elf_len, bin_id);
+                fs_install_image_asset("head", head_elf, head_elf_len, bin_id);
+                fs_install_image_asset("wc", wc_elf, wc_elf_len, bin_id);
+                fs_install_image_asset("date", date_elf, date_elf_len, bin_id);
+                fs_install_image_asset("stat", stat_elf, stat_elf_len, bin_id);
+                fs_install_image_asset("edit", edit_elf, edit_elf_len, bin_id);
+                fs_install_image_asset("chmod", chmod_elf, chmod_elf_len, bin_id);
+                fs_install_image_asset("chown", chown_elf, chown_elf_len, bin_id);
+                fs_install_image_asset("hello", hello_elf, hello_elf_len, bin_id);
+                fs_install_image_asset("clear", clear_elf, clear_elf_len, bin_id);
+                fs_install_image_asset("echo", echo_elf, echo_elf_len, bin_id);
             }
 
             /*
@@ -862,8 +1067,9 @@ static int init_filesystem_and_vfs(void) {
      *
      * It used to run further up, before the block above. That was fine while it
      * only corrected entries that had survived from a previous boot - but the
-     * /bin tools and init.elf are written *here*, with fs_create_file_raw(),
-     * which stamps the 0644 default and no execute bit. On a fresh disk they
+     * /bin tools and init.elf are written *here*, with
+     * fs_install_image_asset(), which stamps the 0644 default and no execute
+     * bit. On a fresh disk they
      * therefore arrived after the pass had already gone by and kept 0644 for
      * that whole boot, which the tests caught the moment anything started
      * reading the execute bit.

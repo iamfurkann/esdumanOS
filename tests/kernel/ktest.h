@@ -146,6 +146,8 @@ void ktest_record_failure(const char *message, const char *file, int line);
 // Test Modules
 /** @brief The frozen v1.0.0 ABI: call numbers, errnos, flags, security levels. */
 void run_abi_tests(void);
+/** @brief The passphrase key slot that wraps the disk's data key. */
+void run_keyslot_tests(void);
 void run_string_tests(void);
 void run_memory_tests(void);
 void run_pipe_tests(void);

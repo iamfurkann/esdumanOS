@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.0.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.1.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -23,7 +23,8 @@
 >
 > **What 1.0 means here:** the system call interface is frozen. No number already
 > assigned changes its value or its meaning, the retired numbers are never reused, and
-> new calls continue from 68 — enforced by `tests/kernel/test_abi.c`, which asserts every
+> new calls continue from the highest assigned number — `SETKEY` took 68 in v1.1.0 and
+> the next one takes 69. Enforced by `tests/kernel/test_abi.c`, which asserts every
 > number, errno, flag and security level by literal value. It is a promise about the
 > interface, not a claim about the system underneath it: the
 > [Known Limitations](#known-limitations) are the same list they were, one test module is
@@ -64,7 +65,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 1.0.0-beta.1
+**Version:** 1.1.0-beta.1
 
 esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -384,7 +385,8 @@ writing. Four numbers had been carrying open questions: 11 and 28 held calls tha
 removed, 30 through 32 were reserved in some early release for a crypto API nobody ever
 designed, and 99 held `YIELD` — far outside the run every other call sits in, for no
 reason anybody recorded. All of them are settled the same way: a hole is never filled,
-and new calls continue from 68. `YIELD` moved to 67, which is an ABI break and was the
+and new calls continue from the highest assigned number. `YIELD` moved to 67, which is an
+ABI break and was the
 last moment one was allowed; the byte that made it possible to move was in the idle
 task's hand-assembled Ring 3 loop, which carried the number as a literal `0x63` where no
 compiler could see it disagree with the header.
@@ -405,6 +407,26 @@ promising the numbers would not move would have protected none of them.
 the flags, the signal numbers and the security levels, and refuses the retired numbers
 through the dispatcher.
 
+v1.1.0 makes the disk actually confidential. Until now the file system key was a
+constant compiled into the kernel, and the boot log said so in as many words: tamper
+resistance, not confidentiality at rest. A machine you could carry was a machine whose
+disk anyone holding the binary could read. The key now comes from a passphrase entered at
+boot, through two levels — PBKDF2 turns the passphrase into a key-encryption key, which
+unwraps a random data key held in the superblock. The second level is what makes changing
+a passphrase cost 116 bytes instead of a pass over every file.
+
+Two things came out of building it. The programs in `/bin` are baked into the kernel
+image encrypted, and they were being written to disk exactly as the build had encrypted
+them — so a passphrase would have protected the user's files while every system binary
+stayed readable to anyone with the kernel. They are decrypted once and re-encrypted under
+the disk key now. And the disk format moves to v3 with no fallback for a v2 one: a
+"missing key slot means use the built-in key" path would be a downgrade hole written into
+the format, so a v2 disk is refused by name the way v0.9.x disks have been since v0.10.0.
+
+`SETKEY` is 68 — the first number assigned since the freeze, and the freeze working
+rather than an exception to it: new calls continue from the highest assigned number, so
+the next one takes 69.
+
 It remains a development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -413,8 +435,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 19 user-space programs and 33 shell builtins
-- 35 kernel self-test modules and CI pipeline
+- 19 user-space programs and 34 shell builtins
+- 36 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -433,7 +455,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 62 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 63 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -501,7 +523,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 35 kernel-mode modules: abi, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 36 kernel-mode modules: abi, keyslot, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -598,7 +620,7 @@ kernel_main()
   +---> init_gdt()               9-entry GDT, Ring 0 + Ring 3 segments, #DF TSS
   +---> init_idt()               256 IDT entries, PIC remapping
   +---> init_security()          Seeds the entropy pool (RTC + TSC)
-  +---> init_elf_master_key()    Loads the build-time ELF decryption key
+  +---> init_image_asset_key()   Loads the build-time key for the embedded /bin images
   +---> init_pmm()               Bitmap allocator from multiboot memory map
   +---> init_paging()            Recursive page directory, identity map 16 MB
   +---> init_kernel_heap()       First-fit heap allocator
@@ -607,6 +629,9 @@ kernel_main()
   +---> ata_identify()           ATA disk detection
   +---> fs_init()                Partition table, superblock, FAT and directory
   |                              table; formats a blank disk, refuses a foreign one
+  +---> unlock_disk_key()        Asks for the disk passphrase and unwraps the data
+  |                              key from the superblock's key slot; sets one on a
+  |                              disk it has just formatted. Before /etc is written
   +---> init_fpu()               FPU/SSE detection and initialization
   +---> init_multitasking()      Idle task, task array
   +---> Create FHS hierarchy     /bin, /dev, /etc, /home, /root, /tmp, /var
@@ -759,11 +784,18 @@ make run
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.0.0-beta.1.iso -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.1.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
 Which means:
+- **`-boot d`** — boot from the CD-ROM, and it is not optional once the disk has been
+  formatted. The kernel writes an MBR carrying a valid `0xAA55` signature, because the
+  file system uses that signature to recognise its own partition table at mount; the
+  446-byte boot area is zero and nothing there was ever meant to run. The BIOS cannot
+  tell those two facts apart, so without this it calls the disk bootable, jumps into
+  446 bytes of zeros, and stops at `Booting from Hard Disk...`. The first boot of a
+  blank disk works because a blank disk has no signature yet.
 - **`-display curses`** — the OS runs inside your terminal, not a separate window.
   Quit with `Esc` then `2` to reach the QEMU monitor, or `Ctrl-A X` under `-nographic`.
 - **Serial output goes to `kernel_log.txt`**, not to the terminal. That file is
@@ -782,10 +814,15 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.0.0-beta.1.iso \
+    -cdrom esdumanOS-v1.1.0-beta.1.iso \
+    -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
 ```
+
+`-boot d` is required for every boot after the first: a formatted disk carries an MBR
+signature with no boot code behind it, and the BIOS will try it and stop. See the note
+above.
 
 Add `-device isa-debug-exit,iobase=0xf4,iosize=0x04` only if you want the kernel
 to be able to terminate QEMU with an exit code, as the self-test targets do.
@@ -1046,7 +1083,7 @@ make test
 # Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 35 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 36 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -1077,6 +1114,7 @@ filtered run proves one module, not the tree.
 | Module | Coverage |
 |--------|----------|
 | `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 62 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS` and that 68 is still free |
+| `test_keyslot.c` | The passphrase key slot, against the slot alone — no disk, no prompt: round trip, a wrong passphrase refused with the caller's buffer left untouched, every field of the slot edited in turn to confirm the tag covers the salt and IV as well as the ciphertext, iteration counts above and below what the build accepts, and the same data key wrapped under a second passphrase to prove a passphrase change preserves it |
 | `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes and the master boot record exactly one sector, that the superblock's geometry leaves room for the regions it describes and stays relative to the partition, that clusters 0 and 1 are reserved so a start cluster of 0 can mean "no data", that a file spanning two clusters reads back byte-for-byte, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), the mount-time table validator against four kinds of corruption, and that the system's own paths carry the permissions they must after a boot |
 | `test_memory.c` | Heap allocation, deallocation, read/write verification |
 | `test_pipe.c` | Pipe creation, ring buffer, EOF detection, syscall integration |
@@ -1141,7 +1179,7 @@ esdumanOS/
 |   |   |-- pipe.c                   Anonymous and named pipes
 |   |   +-- signal.c                 Timer-based kernel timers
 |   |-- syscall/
-|   |   |-- syscall.c                Dispatcher, 62 system calls
+|   |   |-- syscall.c                Dispatcher, 63 system calls
 |   |   +-- sys_*.c                  Handlers by area: fs, ipc, process, sec, utils
 |   +-- security/
 |       |-- security.c               Security levels, master key lifetime
@@ -1212,7 +1250,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      35 kernel-mode test modules + framework
+|   |-- kernel/                      36 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1231,12 +1269,13 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 62 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 63 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 **These numbers are frozen as of v1.0.0.** None of them will change value or meaning. The
 numbers 11, 28, 30, 31, 32 and 99 are retired and will never be reused — they held calls
 that were removed, a reservation for a crypto API that was never designed, and `YIELD`
-before it moved to 67 — and new calls continue from 68. Everything from 200 up is
+before it moved to 67 — and new calls continue from the highest assigned number, which is
+why `SETKEY` took 68 in v1.1.0 and the next call takes 69. Everything from 200 up is
 reserved for calls that exist only in test builds. `tests/kernel/test_abi.c` asserts all
 of it by literal value, because a number written in a header, in freestanding programs,
 in a static analyser's patterns and in this table is a number no compiler is comparing.
@@ -1426,8 +1465,11 @@ itself and still has to restore the default in each stage it forks.
 | 35 | `SETUID` | Change effective user ID (requires password) |
 | 41 | `AUTH` | Authenticate user against shadow database |
 | 43 | `GETUID` | Get user ID of current process |
+| 68 | `SETKEY` | Change the disk passphrase; `ebx` is the old one, `ecx` the new one. Root only. Re-wraps the data key under a fresh salt rather than re-encrypting the disk, so a wrong old passphrase returns `E_ACCES` and changes nothing |
 
-*Note: Syscall numbers 30-32 are reserved for future crypto API.*
+*Note: 30-32 are retired, not reserved. They were set aside for a crypto API that was
+never designed, and v1.0.0 retired them with the other holes — this line said "reserved
+for future crypto API" for one release after that stopped being true.*
 
 ### System and Debug
 
@@ -1487,10 +1529,28 @@ Level 3: IMMUTABLE          Disk writes are completely disabled.
 ### Disk Encryption
 
 - AES-256-CBC, with the IV stored as the first 16 plaintext bytes of each file
-- The ELF/filesystem master key is a **build-time constant** compiled into the
-  kernel from `ESDUMAN_ELF_KEY_HEX`. This gives tamper resistance, *not*
-  at-rest confidentiality: anyone holding the kernel binary holds the key, and
-  the kernel says so in its own boot log
+- **The file system key comes from a passphrase entered at boot**, as of v1.1.0.
+  Two levels: PBKDF2-HMAC-SHA256 turns the passphrase into a key-encryption key,
+  and that unwraps a random data key stored in the superblock's key slot. The
+  data key is what encrypts files, which is why changing the passphrase rewrites
+  116 bytes instead of every file on the disk
+- The key slot holds a 32-byte salt, the iteration count, the IV, the wrapped
+  key and an HMAC-SHA256 tag over all of them. A wrong passphrase produces a
+  wrong key-encryption key, the tag does not verify, and the disk is refused —
+  three attempts, then the machine stops. The tag covers the salt and IV as well
+  as the ciphertext, so an attacker holding the disk cannot substitute a salt of
+  their own and open it with a passphrase they chose
+- **There is no fallback to a built-in key**, and that is deliberate: a disk
+  whose key slot was zeroed would then decrypt under a key anybody can extract
+  from the kernel binary, which is a downgrade hole written into the format.
+  A v2 disk is refused by name instead, the way v0.10.0 refused v0.9.x disks
+- A **separate build-time constant** still decrypts the `/bin` images embedded in
+  the kernel, and it only ever claimed tamper resistance. Those images are
+  decrypted with it once and then written to the disk **re-encrypted under the
+  passphrase-derived key** — before v1.1.0 they were stored exactly as the build
+  had encrypted them, so every program in `/bin` sat on disk under a key anyone
+  with the binary could read
+- Changing the passphrase is `setkey` in the shell, root only
 - Per-file IVs are derived rather than drawn directly from the entropy pool:
   `HMAC-SHA256(file key, "esdumanOS-iv-v1" ‖ counter ‖ pool bytes)`. The
   monotonic counter makes the input distinct on every call, so two files cannot
@@ -1575,13 +1635,16 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   name it already knows. `check_vfs_access()` is not told which of the two its caller is
   about to do, so it asks for both — stricter than Unix, never looser, and no mode this
   system sets for itself distinguishes them.
-- **A disk written before v0.10.0 cannot be read, and is refused rather than converted.**
-  The format has changed twice and there is no converter for either step. v0.10.0 put a
-  partition table in sector 0, where v0.9.x kept the superblock, so an old image is
-  recognised by its own magic number sitting where the partition table now goes — named
-  as a v0.9.x disk, refused, and not written to. Anything older than v0.9.0 is refused
-  for the same reason with less to say about it. Every release ships a fresh `disk.img`,
-  and `make run` starts from a blank one.
+- **A disk written before v1.1.0 cannot be read, and is refused rather than converted.**
+  The format has changed three times and there is no converter for any step. v0.10.0 put
+  a partition table in sector 0, where v0.9.x kept the superblock, so a v0.9.x image is
+  recognised by its own magic number sitting where the partition table now goes — named,
+  refused, and not written to. v1.1.0 added the key slot and moved the format to v3, and
+  a v2 disk is refused by its recorded version for a reason worth stating: reading one
+  would mean falling back to the compiled-in key, which is a downgrade path an attacker
+  could force by zeroing 116 bytes. Anything older than v0.9.0 is refused with less to
+  say about it. Every release ships a fresh `disk.img`, and `make run` starts from a
+  blank one.
 - **There is no group database.** A task's `gid` starts equal to its `uid` and follows
   it, so the group on a file is always its owner's. The field exists because the format
   needs one and because a value taken from the creating task is a better answer than a
@@ -1673,9 +1736,20 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 
 ### Security
 
-- **The disk encryption key is compiled into the kernel image.** It provides
-  tamper resistance, not confidentiality at rest. Anyone with the binary has the
-  key. A real design would derive it from a passphrase at boot.
+- **The passphrase is the whole of the disk's security, and there is no recovery.**
+  As of v1.1.0 the file system key is unwrapped from a key slot by a passphrase
+  entered at boot, so the disk is genuinely confidential at rest — and nothing
+  anywhere holds a copy. A forgotten passphrase is a disk nobody can read, by
+  design. There is one key slot, not the eight LUKS gives you, so there is also
+  no second passphrase to fall back on.
+- **The passphrase protects the disk at rest and nothing else.** Once the machine
+  has booted, the key is in RAM and any root process reaches every file through
+  the mounted file system. `LOCKDOWN` zeroes the key, which is what that level is
+  for.
+- **The key for the embedded `/bin` images is still compiled in.** It decrypts the
+  programs baked into the kernel image, which are then written to disk
+  re-encrypted under the passphrase key. It claims tamper resistance only, and
+  anyone with the binary has it — but it no longer opens anything on the disk.
 - **Entropy is weak without RDRAND.** The pool is fed by interrupt timing, and
   the only source it credits meaningfully is the keyboard — the PIT is periodic
   and earns nothing, and disk completions are capped at 64 bits for the whole
@@ -1705,7 +1779,6 @@ Near-term priorities for the project, roughly in order:
 |----------|------|
 | P1 | `mount` and `umount`, so the second partition the table makes room for can be used |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
-| P2 | Derive the disk key from a boot passphrase instead of a build-time constant |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1732,7 +1805,10 @@ past 2 MB - which needed clusters rather than the partition table it arrived wit
 entropy seed carried across boots, and `/var/log` — which had been sitting here as a P1
 since v0.6.1 did every part of it. The log wraps, it holds records rather than a
 transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; the row
-outlived the work by five releases. And the sticky bit on `/tmp`, which v0.9.4 added
+outlived the work by five releases. Deriving the disk key from a boot passphrase left this list in v1.1.0, which
+also closed the hole under it: the `/bin` images had been stored on disk exactly as the
+build encrypted them, so they were readable to anyone holding the kernel binary no matter
+what the user's passphrase was. And the sticky bit on `/tmp`, which v0.9.4 added
 alongside the other half of the permission enforcement: the file's own mode. v1.0.0 froze
 the syscall ABI, which had been waiting on the disk format rather than on `mount` — a
 freeze stops numbers from changing meaning and says nothing about adding new ones, so

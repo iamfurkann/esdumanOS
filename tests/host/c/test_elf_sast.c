@@ -251,6 +251,7 @@ int main() {
     run_static_test("apps/bin/sh.c", "SYSCALL_OPEN", "sh.c -> Uses SYSCALL_OPEN (40)", &fail_count);
     run_static_test("apps/bin/sh.c", "SYSCALL_READ", "sh.c -> Uses SYSCALL_READ (3)", &fail_count);
     run_static_test("apps/bin/sh.c", "SYSCALL_WRITE", "sh.c -> Uses SYSCALL_WRITE (4)", &fail_count);
+    run_static_test("apps/bin/sh.c", "syscall(68,", "sh.c -> Uses SYSCALL_SETKEY (68) for the setkey builtin", &fail_count);
 
     /*
      * init.c and stat.c were not checked here at all until the pre-freeze audit,

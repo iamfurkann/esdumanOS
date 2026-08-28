@@ -42,7 +42,9 @@ make
 ```
 
 The key is compiled into the kernel image, so treat it as a build parameter rather than
-a secret.
+a secret. It decrypts the embedded programs and nothing else: since 1.1.0 the file
+system is encrypted under a key unwrapped from a passphrase at boot, and the embedded
+images are re-encrypted under that key as they are written to disk.
 
 ## Code Style
 
@@ -69,7 +71,20 @@ tests: add pipe EOF detection test
 build: update CI to use checkout v4
 ```
 
-Valid prefixes: `mm:`, `fs:`, `proc:`, `drivers:`, `crypto:`, `tests:`, `build:`, `docs:`, `security:`, `arch:`, `lib:`, `apps:`
+The prefix names whatever the change is about — a subsystem, a driver, a single
+program. `mm:`, `fs:`, `proc:`, `drivers:`, `crypto:`, `tests:`, `build:`, `docs:`,
+`security:`, `arch:`, `lib:` and `apps:` are the usual ones, and the history also
+carries `kernel:`, `vfs:`, `syscall:`, `abi:`, `sh:`, `edit:`, `klog:`, `tty:`, `rtc:`,
+`entropy:` and the names of individual tools. Pick the narrowest thing that is true.
+
+This line used to call those twelve the *valid* prefixes, which described a rule the
+project has never followed: of the last forty commits, three matched the list. A closed
+list nothing enforces and nobody follows is worse than no list, because it makes a
+reader think they have broken a rule when they have not.
+
+The body matters more than the prefix. Subject line, blank line, then flowing prose
+saying what was found, why it went unnoticed, and what was deliberately left alone.
+Prose rather than bullets, wrapped at about 76 columns.
 
 ## Pull Request Process
 

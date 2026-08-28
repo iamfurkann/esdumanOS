@@ -79,37 +79,63 @@ int hex_to_bytes(const char *hex, uint8_t *out, uint32_t out_len) {
     return 0;
 }
 
+uint8_t elf_asset_key[32];
+static int asset_key_available = 0;
+
+int elf_asset_key_available(void) {
+    return asset_key_available;
+}
+
 /**
- * @brief Initializes the ELF encryption master key from the build-time constant.
+ * @brief Function init_image_asset_key
  *
- * Converts the ELF_ENCRYPTION_KEY hex string (compiled into the kernel via
- * -DELF_ENCRYPTION_KEY=...) directly into the 32-byte kernel_master_key.
+ * This was init_elf_master_key(), and the only thing that changed is which
+ * variable it fills. It used to fill kernel_master_key, which meant the file
+ * system was encrypted under a key compiled into the kernel - and the comment
+ * that sat here said what that was worth: "tamper resistance... but NOT at-rest
+ * confidentiality. Anyone who can read the kernel binary can extract this key."
  *
- * NOTE: This key is embedded in the kernel binary. This provides tamper
- * resistance (making it harder to extract/modify encrypted assets), but
- * NOT at-rest confidentiality. Anyone who can read the kernel binary can
- * extract this key.
+ * That is a fair description of what it can still do and a fatal one for what it
+ * was being used for. The programs in /bin are encrypted by tools/encrypt_tool
+ * at build time and embedded as arrays, so this key has to exist and has to be
+ * in the image; the user's files must not share it. They do not any more - see
+ * install_master_key() below.
  */
-void init_elf_master_key(void) {
+void init_image_asset_key(void) {
 #ifdef ELF_ENCRYPTION_KEY
     const char *hex_key = ELF_ENCRYPTION_KEY;
-    if (hex_to_bytes(hex_key, kernel_master_key, 32) != 0) {
+    if (hex_to_bytes(hex_key, elf_asset_key, 32) != 0) {
         klog(LOG_LEVEL_ERROR, "SEC", "Failed to parse ELF_ENCRYPTION_KEY! Invalid hex.");
-        // Zero the key on failure
-        volatile uint8_t *p = kernel_master_key;
+        volatile uint8_t *p = elf_asset_key;
         for (int i = 0; i < 32; i++) p[i] = 0;
-        master_key_available = 0;
+        asset_key_available = 0;
         return;
     }
-    master_key_available = 1;
-    klog(LOG_LEVEL_INFO, "SEC", "ELF encryption key loaded from build-time constant.");
-    klog(LOG_LEVEL_WARN, "SEC", "NOTE: Key is embedded in kernel binary. Tamper resistance only, NOT at-rest confidentiality.");
+    asset_key_available = 1;
+    klog(LOG_LEVEL_INFO, "SEC", "Embedded-program key loaded from the build-time constant.");
 #else
-    klog(LOG_LEVEL_ERROR, "SEC", "No ELF_ENCRYPTION_KEY defined! Encrypted binaries will fail to load.");
-    volatile uint8_t *p = kernel_master_key;
+    klog(LOG_LEVEL_ERROR, "SEC", "No ELF_ENCRYPTION_KEY defined! Embedded programs cannot be installed.");
+    volatile uint8_t *p = elf_asset_key;
     for (int i = 0; i < 32; i++) p[i] = 0;
-    master_key_available = 0;
+    asset_key_available = 0;
 #endif
+}
+
+/**
+ * @brief Function install_master_key
+ *
+ * The file system's key, and as of v1.1.0 the only thing it comes from is a
+ * passphrase the user typed, by way of the slot in the superblock. Nothing in
+ * the kernel image can produce it, which is the difference between a disk that
+ * is encrypted and a disk that is encrypted against somebody who has the disk.
+ */
+void install_master_key(const uint8_t key[32]) {
+    if (key == 0) return;
+
+    for (int i = 0; i < 32; i++) {
+        kernel_master_key[i] = key[i];
+    }
+    master_key_available = 1;
 }
 /**
  * @brief init_security

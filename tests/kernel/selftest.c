@@ -51,6 +51,7 @@ static const ktest_module_t kernel_modules[] = {
      * what the programs under test were compiled against.
      */
     { "abi",         run_abi_tests },
+    { "keyslot",     run_keyslot_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },
     { "pipe",        run_pipe_tests },
@@ -373,18 +374,18 @@ static void run_user_mode_tests(void) {
     /* Drop any copy left by an earlier boot on a persistent disk image. */
     fs_delete("ktest_user", bin_id);
 
-    int wres = fs_create_file_raw("ktest_user", ktest_user_elf, ktest_user_elf_len, bin_id);
+    int wres = fs_install_image_asset("ktest_user", ktest_user_elf, ktest_user_elf_len, bin_id);
     KTEST_ASSERT(wres == E_OK, "[RING3] user-mode payload written to /bin/ktest_user");
     if (wres != E_OK) return;
 
     /* The deliberate-crash companion, for the teardown assertions. */
     fs_delete("ktest_crash", bin_id);
-    KTEST_ASSERT(fs_create_file_raw("ktest_crash", ktest_crash_elf, ktest_crash_elf_len, bin_id) == E_OK,
+    KTEST_ASSERT(fs_install_image_asset("ktest_crash", ktest_crash_elf, ktest_crash_elf_len, bin_id) == E_OK,
                  "[RING3] crash payload written to /bin/ktest_crash");
 
     /* The deliberate-self-kill companion, for the signal default action. */
     fs_delete("ktest_signal", bin_id);
-    KTEST_ASSERT(fs_create_file_raw("ktest_signal", ktest_signal_elf, ktest_signal_elf_len, bin_id) == E_OK,
+    KTEST_ASSERT(fs_install_image_asset("ktest_signal", ktest_signal_elf, ktest_signal_elf_len, bin_id) == E_OK,
                  "[RING3] self-kill payload written to /bin/ktest_signal");
 
     asm volatile("sti");

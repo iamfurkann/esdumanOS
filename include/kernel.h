@@ -8,7 +8,7 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    1
-#define OS_VERSION_MINOR    0
+#define OS_VERSION_MINOR    1
 #define OS_VERSION_PATCH    0
 
 /**
@@ -18,12 +18,17 @@
  * deferred, release after release, to 1.0 - and 1.0 is what freezes the syscall
  * ABI, so this is that release and this is the answer.
  *
- * "-beta.1" rather than nothing. What 1.0 settles is the interface: the numbers,
+ * "-beta.1" rather than nothing. What 1.0 settled is the interface: the numbers,
  * the errnos and the structures a program compiles against will not move. It
  * does not settle the system underneath them - there is a test that fails two
  * runs in five, there is no mount(), and the known limitations in README are the
- * same list they were. A bare 1.0.0 would be claiming the second thing by
+ * same list they were. A bare 1.0.0 would have claimed the second thing by
  * finishing the first.
+ *
+ * Carried forward unchanged into 1.1.0. None of what it was waiting on has
+ * happened: the clock round trip is still not deterministic and there is still
+ * no mount(). Dropping the suffix is a separate decision and nobody has taken
+ * it, so the version moves and the qualifier does not.
  */
 #define OS_VERSION_PRE      "-beta.1"
 

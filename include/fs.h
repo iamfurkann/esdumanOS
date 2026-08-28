@@ -2,6 +2,9 @@
 #define FS_H
 
 #include "types.h"
+/* The superblock carries the passphrase key slot, so its layout is part of this
+ * header's layout. */
+#include "keyslot.h"
 
 /**
  * @brief FAT markers indicating end of file chain or free clusters.
@@ -199,7 +202,23 @@ typedef struct {
  */
 #define FS_SUPER_SECTOR   0
 #define FS_SUPER_MAGIC    0x46647365u   /* "esdF", little-endian */
-#define FS_FORMAT_VERSION 2
+
+/**
+ * @brief The on-disk format this kernel writes and is willing to mount.
+ *
+ * 3 as of v1.1.0, which added the passphrase key slot to the superblock. A v2
+ * disk is refused by name, the way a v0.9.x disk has been since v0.10.0, and for
+ * a sharper reason than geometry: a v2 disk's file contents are encrypted under
+ * the key that used to be compiled into the kernel, and mounting one would mean
+ * this kernel still had to carry that key. Refusing them is what lets the
+ * constant be deleted rather than kept for compatibility - which is the whole
+ * point of the release.
+ *
+ * There is no converter, and the reasoning is the same as it was for the v0.9.x
+ * refusal: a conversion that has to decrypt and re-encrypt every file cannot be
+ * made atomic, and one that fails halfway leaves a disk in neither format.
+ */
+#define FS_FORMAT_VERSION 3
 
 /**
  * @brief The master boot record: sector 0 of the disk, not of the partition.
@@ -254,7 +273,32 @@ typedef struct {
     uint32_t data_start;      /**< Sector cluster 0 would begin at. */
     uint32_t total_clusters;  /**< Clusters the allocation table describes. */
     uint32_t flags;           /**< Reserved; zero. */
+    /**
+     * The passphrase-protected wrapping of this disk's data key.
+     *
+     * Added in v1.1.0, in the space save_superblock() has always zeroed for the
+     * purpose - its comment said a field added later "reads as zero on a disk
+     * written now, and zero can be given a meaning." This is that field, and the
+     * meaning of zero is "no slot", which keyslot_is_present() reads off the
+     * iteration count.
+     *
+     * The slot is not itself a secret: it is a salt, an IV, a wrapped key and a
+     * tag, and all four are safe to hand to an attacker. What it is not safe to
+     * do is mount a disk whose slot has been swapped for one the attacker made,
+     * which is why the tag covers the parameters and not just the ciphertext.
+     */
+    keyslot_t keyslot;
 } __attribute__((packed)) disk_superblock_t;
+
+/**
+ * @brief Bytes a superblock occupies on disk. Asserted by the test suite.
+ *
+ * 44 until v1.1.0 and 160 after it, and written out rather than left to sizeof
+ * for the same reason disk_file_entry_t's 96 is: a field added or reordered
+ * without thinking about the disk moves every byte behind it, and the disk has
+ * no way to notice. The sector is 512, so there is room for this to grow again.
+ */
+#define FS_SUPER_DISK_SIZE 160
 
 /**
  * @brief The geometry the mounted file system is actually being read with.
@@ -263,6 +307,69 @@ typedef struct {
  * address in it is relative to the start of the partition.
  */
 extern disk_superblock_t fs_super;
+
+/**
+ * @brief Whether this boot formatted the disk.
+ *
+ * Read by the boot path to tell a disk that has never had a key slot from one
+ * that has lost the slot it had. The first gets a passphrase; the second is
+ * refused, because installing a slot generates a new data key and every file
+ * already on the disk is encrypted under the old one.
+ */
+extern int fs_was_formatted;
+
+/**
+ * @brief Whether the mounted disk carries a passphrase key slot.
+ * @return 1 when a slot is present, 0 when there is none or nothing is mounted.
+ */
+int fs_keyslot_present(void);
+
+/**
+ * @brief Generates this disk's data key and locks it behind a passphrase.
+ * @param passphrase The passphrase to protect it with.
+ * @return E_OK, or a negative errno with the disk untouched.
+ */
+int fs_keyslot_install(const char *passphrase);
+
+/**
+ * @brief Opens the slot and hands the data key to the kernel.
+ * @param passphrase The passphrase to try.
+ * @return E_OK, or E_ACCES when it is wrong.
+ */
+int fs_keyslot_unlock(const char *passphrase);
+
+/**
+ * @brief Re-wraps the data key under a new passphrase.
+ *
+ * The data key does not change, so nothing on the disk needs re-encrypting.
+ *
+ * @param old_pass The current passphrase.
+ * @param new_pass Its replacement.
+ * @return E_OK, E_ACCES when the old passphrase is wrong, or E_INVAL when the
+ *         new one is unusable.
+ */
+int fs_keyslot_rewrap(const char *old_pass, const char *new_pass);
+
+/**
+ * @brief Installs a program embedded in the kernel image onto the disk.
+ *
+ * The embedded programs are encrypted at build time with ESDUMAN_ELF_KEY_HEX, a
+ * key that necessarily ships inside the same image. This decrypts one with that
+ * key and writes it back out under the disk's own key, so that what ends up on
+ * the disk is protected by the user's passphrase like everything else.
+ *
+ * Replaces the fs_create_file_raw() calls that used to store the build-encrypted
+ * blob verbatim - which left every /bin program on every disk readable with a
+ * key published in the ISO.
+ *
+ * @param name      Name to create.
+ * @param blob      The embedded image.
+ * @param blob_len  Its length in bytes.
+ * @param parent_id Directory to create it in.
+ * @return E_OK, or a negative errno.
+ */
+int fs_install_image_asset(const char *name, const uint8_t *blob, uint32_t blob_len,
+                           fs_id_t parent_id);
 
 /**
  * @brief Whether a file system was successfully mounted.

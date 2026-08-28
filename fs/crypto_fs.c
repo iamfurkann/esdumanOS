@@ -14,6 +14,7 @@
 #include "kheap.h"
 #include "hmac.h"
 #include "bcache.h"
+#include "klog.h"
 
 
 /**
@@ -210,6 +211,117 @@ int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_siz
 }
 
 /**
+ * @brief Decrypts one stored blob in place and verifies it.
+ *
+ * The stored form is the same wherever it comes from: sixteen bytes of IV, then
+ * AES-256-CBC over "SAFE" || original length || HMAC-SHA256 || the data. A file
+ * read off the disk and a program that tools/encrypt_tool baked into the kernel
+ * image are byte-for-byte the same shape, which is not a coincidence - the tool
+ * was written to match fs_create_encrypted().
+ *
+ * So this is one function rather than two. It was the middle of
+ * fs_read_encrypted() until v1.1.0 needed the identical steps for the embedded
+ * programs, and a second copy of a format parser is a second place for the
+ * format to be understood slightly differently.
+ *
+ * @param buf       The blob, decrypted in place.
+ * @param len       Bytes in the blob.
+ * @param key       The key it was encrypted under.
+ * @param plain_out Receives a pointer into @p buf at the plaintext.
+ * @return The plaintext length, or a negative errno.
+ */
+static int crypto_fs_open_blob(uint8_t *buf, uint32_t len, const uint8_t key[32],
+                               uint8_t **plain_out) {
+    struct AES_ctx ctx;
+    uint32_t cipher_len;
+    uint32_t *hdr;
+    uint32_t orig_len;
+    uint8_t *stored_hash;
+    uint8_t *plaintext;
+    uint8_t calc_hash[32];
+
+    if (len <= 56) return E_INVAL;
+
+    cipher_len = len - 16;
+
+    AES_init_ctx_iv(&ctx, key, buf);
+    AES_CBC_decrypt_buffer(&ctx, buf + 16, cipher_len);
+
+    hdr = (uint32_t *)(buf + 16);
+    orig_len = hdr[1];
+    stored_hash = (uint8_t *)&hdr[2];
+
+    if (hdr[0] != 0x53414645) return E_ACCES;
+    if (orig_len > cipher_len - 40) return E_INVAL;
+
+    plaintext = buf + 56;
+    hmac_sha256(key, 32, plaintext, orig_len, calc_hash);
+
+    /*
+     * Constant-time, like every other comparison of a secret in this tree. It
+     * was a plain loop with an early-exit flag until v1.1.0 gathered the one
+     * implementation into crypto_ct_cmp_bytes(); the timing signal here is
+     * weaker than the one on a password, because reaching it needs control of
+     * the ciphertext, but "weaker" is not a reason to write the careless form.
+     */
+    if (crypto_ct_cmp_bytes(calc_hash, stored_hash, 32) != 0) return E_IO;
+
+    *plain_out = plaintext;
+    return (int)orig_len;
+}
+
+/**
+ * @brief Function fs_install_image_asset
+ *
+ * Writes one of the programs embedded in the kernel image onto the disk, moving
+ * it from the build-time key to this disk's own.
+ *
+ * The call sites used to be fs_create_file_raw(), which stored the blob exactly
+ * as the build had encrypted it - so every /bin program on every disk was
+ * readable with a key that ships inside the ISO. That was invisible while the
+ * file system used the same key for everything, and it is the whole point of
+ * this release that it no longer does: a disk whose programs open with a
+ * published key is a disk with a published key on it.
+ *
+ * @param name      Name to create.
+ * @param blob      The embedded, build-encrypted image.
+ * @param blob_len  Its length.
+ * @param parent_id Directory to create it in.
+ * @return E_OK, or a negative errno.
+ */
+int fs_install_image_asset(const char *name, const uint8_t *blob, uint32_t blob_len,
+                           fs_id_t parent_id) {
+    uint8_t *work;
+    uint8_t *plain = 0;
+    int plain_len;
+    int res;
+
+    if (!elf_asset_key_available()) return E_NOSYS;
+
+    work = (uint8_t *)kmalloc(blob_len);
+    if (!work) return E_NOMEM;
+
+    for (uint32_t i = 0; i < blob_len; i++) work[i] = blob[i];
+
+    plain_len = crypto_fs_open_blob(work, blob_len, elf_asset_key, &plain);
+    if (plain_len < 0) {
+        klog(LOG_LEVEL_ERROR, "VFS", "An embedded program failed to decrypt; not installing it.");
+        kfree(work);
+        return plain_len;
+    }
+
+    /*
+     * fs_create_file(), not fs_create_file_raw(): the point is to re-encrypt it
+     * under the key that came out of the disk's own slot. At CRYPTO_ENFORCED,
+     * which is the default, that is what fs_create_file() does.
+     */
+    res = fs_create_file(name, plain, (uint32_t)plain_len, parent_id);
+
+    kfree(work);
+    return res;
+}
+
+/**
  * @brief Read an encrypted file from the file system.
  * @param file The file entry pointer.
  * @param buffer Buffer to store the decrypted data.
@@ -218,7 +330,7 @@ int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_siz
  * @return Number of bytes read.
  */
 int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const uint8_t key[32]) {
-    if (file->file_size <= 56) return 0; 
+    if (file->file_size <= 56) return 0;
 
     uint8_t *temp_buf = (uint8_t *)kmalloc(file->file_size);
     if (!temp_buf) return 0;
@@ -227,54 +339,32 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
     file->current_offset = 0;
 
     int read_bytes = fs_read_raw(file, temp_buf, file->file_size);
-    if (read_bytes <= 56) { 
-        file->current_offset = requested_offset; 
-        kfree(temp_buf); 
-        return 0; 
-    }
-
-    uint32_t cipher_len = read_bytes - 16;
-
-    struct AES_ctx ctx;
-    AES_init_ctx_iv(&ctx, key, temp_buf);
-    AES_CBC_decrypt_buffer(&ctx, temp_buf + 16, cipher_len);
-
-    uint32_t *hdr = (uint32_t *)(temp_buf + 16);
-    uint32_t magic = hdr[0];
-    uint32_t orig_len = hdr[1];
-    uint8_t *stored_hash = (uint8_t *)&hdr[2];
-
-    if (magic != 0x53414645) {
-        printk("[CRYPTO ERROR] Magic Number mismatch! Incorrect password or corrupted data.\n");
+    if (read_bytes <= 56) {
+        file->current_offset = requested_offset;
         kfree(temp_buf);
         return 0;
     }
 
-    uint32_t max_possible_len = cipher_len - 40;
-    if (orig_len > max_possible_len) {
-        printk("[CRYPTO CRITICAL ERROR] File size specified in header is larger than data!\n");
+    uint8_t *plaintext = 0;
+    int opened = crypto_fs_open_blob(temp_buf, (uint32_t)read_bytes, key, &plaintext);
+
+    if (opened < 0) {
+        if (opened == E_ACCES) {
+            printk("[CRYPTO ERROR] Magic Number mismatch! Incorrect password or corrupted data.\n");
+        } else if (opened == E_INVAL) {
+            printk("[CRYPTO CRITICAL ERROR] File size specified in header is larger than data!\n");
+        } else {
+            terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
+            printk("\n[CRYPTO CRITICAL ERROR] INTEGRITY VIOLATION!\n");
+            printk("File has been tampered with or SHA-256 Hash mismatch!\n");
+            terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        }
+        file->current_offset = requested_offset;
         kfree(temp_buf);
         return 0;
     }
 
-    uint8_t *plaintext = temp_buf + 56;
-    uint8_t calc_hash[32];
-    hmac_sha256(key, 32, plaintext, orig_len, calc_hash);
-
-    int hash_ok = 1;
-    for (int i = 0; i < 32; i++) {
-        if (calc_hash[i] != stored_hash[i]) hash_ok = 0;
-    }
-
-    if (!hash_ok) {
-        terminal_setcolor(VGA_COLOR_WHITE, VGA_COLOR_RED);
-        printk("\n[CRYPTO CRITICAL ERROR] INTEGRITY VIOLATION!\n");
-        printk("File has been tampered with or SHA-256 Hash mismatch!\n");
-        terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        kfree(temp_buf);
-        return 0;
-    }
-
+    uint32_t orig_len = (uint32_t)opened;
     uint32_t bytes_to_copy = size;
     if (requested_offset >= orig_len) {
         bytes_to_copy = 0; 

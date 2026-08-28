@@ -14,8 +14,10 @@
  *
  * Three rules follow from that, and they are the whole of the contract:
  *
- *   1. New calls continue from 68. Not from the lowest free number - from the
- *      highest assigned one.
+ *   1. New calls continue from the highest assigned number, not from the lowest
+ *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0, which
+ *      is the rule working rather than an exception to it, and the next call
+ *      takes 69.
  *
  *   2. The holes are never filled. 11 (CAT_FILE) and 28 (LS_DIR) held calls that
  *      were removed; 30, 31 and 32 were reserved for a crypto API that was never
@@ -453,6 +455,24 @@
  * file was written.
  */
 #define SYSCALL_SETTIME         66
+
+/**
+ * @brief Change the disk passphrase; ebx is the old one, ecx the new one.
+ *
+ * The first number handed out after the freeze, and it is 68 rather than any of
+ * the free-looking gaps below it - which is the whole of what rule 1 means. 67
+ * went to YIELD when v1.0.0 moved it, so this continues from there.
+ *
+ * Both arguments are user strings. Root only: a passphrase a second user can
+ * change is a disk that user owns.
+ *
+ * It re-wraps the data key rather than re-encrypting the disk. The old
+ * passphrase opens the key slot, a fresh salt derives a new key-encryption key,
+ * and the same data key goes back under it - so the files on the disk are not
+ * touched and cannot be lost by getting this wrong. A wrong old passphrase
+ * returns E_ACCES and changes nothing.
+ */
+#define SYSCALL_SETKEY          68
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

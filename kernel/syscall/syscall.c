@@ -107,6 +107,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_SETUID:       sys_setuid_call(regs); break;
         case SYSCALL_SET_LAYOUT:   sys_set_layout(regs); break;
         case SYSCALL_SET_SEC_LEVEL:sys_set_sec_level(regs); break;
+        case SYSCALL_SETKEY:       sys_setkey(regs); break;
         case SYSCALL_LOCKDOWN:     sys_lockdown(regs); break;
         case SYSCALL_PANIC:        sys_panic(regs); break;
         case SYSCALL_REBOOT:       sys_reboot(regs); break;

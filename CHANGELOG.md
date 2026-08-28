@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0-beta.1] - 2026-08-28
+
+A disk that cannot be read is no longer mistaken for a disk with nothing on it. It was,
+and the mount path formatted it.
+
+### Fixed
+
+- **A failed read was indistinguishable from a sector full of zeros, and the mount path
+  formatted the disk on the strength of it.** Every failure path in the ATA driver zeroes
+  the caller's buffer — a drive that failed `IDENTIFY`, an LBA past the end of the disk, a
+  BSY wait that timed out, an IRQ that never arrived, a hardware error bit — and returns a
+  status. The block cache discarded that status at all three call sites and stored the
+  zeros as valid data. `disk_region_is_blank()` read through the cache, saw zeros, said
+  "blank", and `init_fs()` formatted. On real hardware that is data loss from a loose
+  cable. QEMU's disk does not fail, which is why this survived to be found by reading
+  rather than by breaking.
+
+  The whole mount path checks now: `load_partition()`, the superblock, the directory
+  table, the allocation table, and the blank check itself, which has three answers instead
+  of two. A disk that cannot be read is refused, and refused before anything is written to
+  it — the test counts writes at the device to say so.
+
+- **`include/ata.h` documented the opposite of what the code did.** It promised "0 on
+  success, or a negative error code on failure" while `ata_read_sector()` and
+  `ata_write_sector()` returned 1 for success and 0 for failure, and never a negative
+  anything. The header and the code had disagreed about the meaning of zero since v0.4, in
+  the direction that turns every failure into a success, and nothing caught it because no
+  caller read the value at all. Both now return `E_OK` or a negative errno, which is what
+  the rest of the kernel means.
+
+- **A failed eviction lost the sector twice.** `bcache_get_lru_slot()` wrote the victim
+  out, marked it clean whatever happened, and handed the slot to a different sector — so
+  the data never reached the disk and the dirty flag that would have made a later flush
+  retry it was gone. A failed eviction now refuses the slot. `bcache_flush()` had the same
+  shape: a sector the device rejected was marked clean and skipped by every flush after.
+
+- **`write_mbr()` could fail and the format continued.** The superblock is found through
+  the partition table, so a table that never reached the disk makes everything written
+  afterwards unreachable. The format is abandoned instead.
+
+### Added
+
+- **A block device layer.** One registered device under the block cache, with the sector
+  bounds check in one place rather than in each driver — it lived inside the ATA driver,
+  which is exactly the check a second driver forgets. ATA registers itself at boot and
+  `ata_identify()` moved out of `init_fs()` into the boot path, so no file under `fs/`
+  names a disk driver any more.
+
+  It is also what made the fix testable. QEMU's disk does not fail, so until there was a
+  seam to put a failing device into, "a failed read is not an empty disk" was an assertion
+  with no way to be written.
+
+- **`tests/kernel/test_blockdev.c`**, against a device made up for the occasion: routing,
+  the bounds check refusing without the driver being called, a driver's errno arriving
+  unchanged rather than flattened, a read-only device answering `E_ROFS` instead of calling
+  a null handler, and `E_NODEV` when nothing is registered. `test_bcache.c` gains the
+  failure half — a failed read is not cached, so the next one asks the device again — and
+  `test_vfs.c` gains the assertion this release is named for.
+
+### Changed
+
+- **`bcache_read_sector()`, `bcache_write_sector()`, `bcache_flush()`, `fs_read_sector()`
+  and `fs_write_sector()` return a status.** They returned void, so the file system had no
+  way to learn that the disk had failed even if it had wanted to.
+
+- Version is `1.2.0-beta.1`, and the release has no name — the convention narrowed to
+  majors on 2026-08-28.
+
+### Known issues
+
+- **The runtime read and write paths still do not check.** `fs_read()` and the encrypted
+  file paths take a failed read as the data it would have been. That is a wrong answer,
+  and it is not the same class as the mount path, which formats: nothing there does
+  something irreversible on the strength of zeros. Converting them is a larger change than
+  this release wanted to carry alongside the layer.
+
+- **`test_time`'s clock round trip is still not deterministic**, and still untouched.
+
+- **There is still no `mount`/`umount`**, and the disk is still capped at 16 MB by a static
+  allocation table. Sizing it from the device is what the block layer was the prerequisite
+  for.
+
 ## [1.1.0-beta.1] - 2026-08-28
 
 The disk is confidential at rest now. Every release before this one encrypted the file

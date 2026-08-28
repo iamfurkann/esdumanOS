@@ -5,7 +5,8 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "bcache.h"
-#include "ata.h"
+#include "blockdev.h"
+#include "errno.h"
 #include "libft.h"
 #include "stdio.h"
 #include "klog.h"
@@ -37,7 +38,7 @@ static uint32_t dirty_count = 0;
 static uint32_t oldest_dirty_tick = 0;
 
 /* Defined below; bcache_write_sector() reaches the high-water path before it. */
-static void bcache_flush_reporting(int log_level);
+static int bcache_flush_reporting(int log_level);
 
 /**
  * @brief Marks a slot dirty and starts the deadline if the cache was clean.
@@ -109,7 +110,22 @@ static int bcache_get_lru_slot(void) {
     }
 
     if (cache[oldest_idx].is_valid && cache[oldest_idx].is_dirty) {
-        ata_write_sector(cache[oldest_idx].sector, cache[oldest_idx].data);
+        /*
+         * An eviction that fails does not free the slot.
+         *
+         * This used to write and then mark clean unconditionally, so a failed
+         * write lost the sector twice over: the data never reached the disk, and
+         * the slot was handed to a different sector with the dirty flag cleared,
+         * so nothing would ever try again. Refusing the slot keeps the data in
+         * the cache where a later flush can still write it, and the caller finds
+         * out rather than being handed somebody else's storage.
+         */
+        if (blockdev_write(cache[oldest_idx].sector, cache[oldest_idx].data) != E_OK) {
+            klog_int(LOG_LEVEL_ERROR, "BCACHE",
+                     "Eviction write failed; slot kept dirty. Sector",
+                     (int)cache[oldest_idx].sector);
+            return -1;
+        }
         mark_clean(oldest_idx);
     }
 
@@ -118,22 +134,45 @@ static int bcache_get_lru_slot(void) {
 
 /**
  * @brief Read a sector from the block cache or disk.
+ *
+ * Returns a status as of v1.2.0, and the reason is the whole of this release. It
+ * used to return void, call ata_read_sector() and discard the result. The driver
+ * zeroes its buffer on failure, so a disk that could not be read produced 512
+ * zero bytes, and those went into the cache marked valid. Nothing above could
+ * tell them from a sector that really was zero - and one of the callers is the
+ * check that decides whether a disk is blank and should be formatted.
+ *
+ * A failed read now leaves nothing behind: the slot is not marked valid, so the
+ * next attempt goes back to the device rather than being served a cached lie.
+ *
  * @param sector The sector number to read.
  * @param buffer The buffer to store the sector data.
+ * @return E_OK, or a negative errno from the device.
  */
-void bcache_read_sector(uint32_t sector, uint8_t *buffer) {
+int bcache_read_sector(uint32_t sector, uint8_t *buffer) {
     bcache_ticks++;
     for (int i = 0; i < BCACHE_SIZE; i++) {
         if (cache[i].is_valid && cache[i].sector == sector) {
             ft_memcpy(buffer, cache[i].data, 512);
             cache[i].last_access = bcache_ticks;
-            return;
+            return E_OK;
         }
     }
 
     int slot = bcache_get_lru_slot();
-    ata_read_sector(sector, cache[slot].data);
-    
+    if (slot < 0) return E_IO;
+
+    int res = blockdev_read(sector, cache[slot].data);
+    if (res != E_OK) {
+        /*
+         * Not cached, and the caller's buffer is zeroed rather than left holding
+         * whatever it had. The status is what says which of those it is.
+         */
+        cache[slot].is_valid = 0;
+        ft_memset(buffer, 0, 512);
+        return res;
+    }
+
     cache[slot].sector = sector;
     cache[slot].is_valid = 1;
     cache[slot].last_access = bcache_ticks;
@@ -147,14 +186,22 @@ void bcache_read_sector(uint32_t sector, uint8_t *buffer) {
     mark_clean(slot);
 
     ft_memcpy(buffer, cache[slot].data, 512);
+    return E_OK;
 }
 
 /**
  * @brief Write a sector to the block cache.
+ *
+ * The write itself is deferred - this is a write-back cache - so E_OK here means
+ * the sector was taken, not that it reached the disk. What it can report is a
+ * cache that could not take it: every slot occupied by dirty data the device
+ * refused to accept. bcache_flush() is where a write failure is reported.
+ *
  * @param sector The sector number to write.
  * @param buffer The buffer containing the sector data.
+ * @return E_OK, or E_IO when no slot could be freed.
  */
-void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
+int bcache_write_sector(uint32_t sector, uint8_t *buffer) {
     bcache_ticks++;
 
     int slot = -1;
@@ -167,6 +214,7 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
 
     if (slot == -1) {
         slot = bcache_get_lru_slot();
+        if (slot < 0) return E_IO;
     }
 
     cache[slot].sector = sector;
@@ -178,15 +226,20 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
     /*
      * Write behind once too much is outstanding. Safe to do the I/O right here:
      * bcache_write_sector() is only ever reached from normal kernel context -
-     * the VFS paths - never from an interrupt handler, and ata_write_sector()
-     * waits on the ATA IRQ with hlt, which needs interrupts enabled.
+     * the VFS paths - never from an interrupt handler, and the device underneath
+     * may block. The ATA driver does: it waits on its IRQ with hlt, which needs
+     * interrupts enabled. That constraint belongs to whatever is registered, and
+     * this cache has no way to check it, so the rule is that a block device's
+     * handlers are called from ordinary kernel context and nowhere else.
      *
-     * No recursion: bcache_flush() calls ata_write_sector() directly and never
-     * comes back through here.
+     * No recursion: bcache_flush() goes straight to the device and never comes
+     * back through here.
      */
     if (dirty_count >= BCACHE_DIRTY_HIGH_WATER) {
         bcache_flush_reporting(LOG_LEVEL_DEBUG);   /* policy, not a request */
     }
+
+    return E_OK;
 }
 
 /**
@@ -201,18 +254,35 @@ void bcache_write_sector(uint32_t sector, uint8_t *buffer) {
  *
  * @param log_level Level to report the flushed count at; DEBUG is suppressed.
  */
-static void bcache_flush_reporting(int log_level) {
+static int bcache_flush_reporting(int log_level) {
     int flushed = 0;
+    int failed = 0;
+
     for (int i = 0; i < BCACHE_SIZE; i++) {
         if (cache[i].is_valid && cache[i].is_dirty) {
-            ata_write_sector(cache[i].sector, cache[i].data);
+            /*
+             * A sector the device refused stays dirty. Marking it clean anyway -
+             * which this did until v1.2.0 - is how a flush reports success over
+             * data that never left RAM, and it also guarantees nothing will try
+             * again: the next flush skips it because it looks written.
+             */
+            if (blockdev_write(cache[i].sector, cache[i].data) != E_OK) {
+                failed++;
+                continue;
+            }
             mark_clean(i);
             flushed++;
         }
     }
+
     if (flushed > 0) {
         klog_int(log_level, "BCACHE", "Dirty caches synchronized to disk (Flush)", flushed);
     }
+    if (failed > 0) {
+        klog_int(LOG_LEVEL_ERROR, "BCACHE", "Sectors the disk would not take", failed);
+        return E_IO;
+    }
+    return E_OK;
 }
 
 /**
@@ -220,8 +290,8 @@ static void bcache_flush_reporting(int log_level) {
  *
  * The explicit path: sync(), reboot and halt. Reports what it wrote.
  */
-void bcache_flush(void) {
-    bcache_flush_reporting(LOG_LEVEL_INFO);
+int bcache_flush(void) {
+    return bcache_flush_reporting(LOG_LEVEL_INFO);
 }
 
 /**
@@ -229,9 +299,11 @@ void bcache_flush(void) {
  *
  * Called from sys_yield(), which the idle task drives in a tight Ring 3 loop, so
  * on any system that ever goes idle the deadline is checked continuously. That
- * placement is forced rather than chosen: ata_wait_irq() waits for the ATA
- * interrupt with hlt, so the flush cannot run from the timer handler - with
- * interrupts masked that hlt would never return.
+ * placement is forced rather than chosen: the ATA driver waits for its interrupt
+ * with hlt, so the flush cannot run from the timer handler - with interrupts
+ * masked that hlt would never return. Any device that can block has the same
+ * requirement, which is why it is stated as a rule about block devices rather
+ * than a fact about ATA.
  *
  * LIMIT: a system that never idles and never yields will not reach this. The
  * volume bound in bcache_write_sector() still applies there, and a task busy

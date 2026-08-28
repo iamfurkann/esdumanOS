@@ -7,6 +7,9 @@
 #include "ktest.h"
 #include "types.h"
 #include "bcache.h"
+#include "blockdev.h"
+#include "errno.h"
+#include "libft.h"
 #include "rtc.h"
 
 /*
@@ -18,6 +21,111 @@
  * have to land somewhere the filesystem will not miss.
  */
 #define BC_TEST_BASE 4000
+
+/*
+ * A device that fails everything, for the half of the cache's behaviour that the
+ * real disk cannot exercise: QEMU's IDE controller does not fail, so until the
+ * block layer existed there was no way to write these assertions at all.
+ *
+ * sector_count is deliberately larger than the real disk, so that the sectors
+ * below reach the device and are refused by it rather than being refused by the
+ * layer's own bounds check - which would test something else.
+ */
+static int bc_fail_reads = 0;
+static int bc_fail_writes = 0;
+
+static int failing_read(void *ctx, uint32_t lba, uint8_t *buf) {
+    (void)ctx; (void)lba; (void)buf;
+    bc_fail_reads++;
+    return E_IO;
+}
+
+static int failing_write(void *ctx, uint32_t lba, const uint8_t *buf) {
+    (void)ctx; (void)lba; (void)buf;
+    bc_fail_writes++;
+    return E_IO;
+}
+
+static blockdev_t failing_dev = {
+    .name         = "failing0",
+    .sector_size  = 512,
+    .sector_count = 65536,
+    .read         = failing_read,
+    .write        = failing_write,
+    .ctx          = 0
+};
+
+/**
+ * @brief Tests what the cache does when the device underneath it says no.
+ *
+ * The defect this release exists for lived exactly here: the cache called the
+ * driver, discarded the result, and stored the zero-filled buffer as valid data.
+ * A failed read then looked like a sector full of zeros to everything above -
+ * including the check that decides whether a disk is blank and should be
+ * formatted.
+ *
+ * The cache is flushed before the fake device is installed, and that is not
+ * hygiene: an eviction with dirty slots outstanding would write real file system
+ * sectors to the fake device and mark them clean, so the real disk would never
+ * get them. The test would pass and the damage would appear somewhere else.
+ */
+static void run_device_failure_assertions(void) {
+    blockdev_t *saved = blockdev_root();
+    uint8_t buf[512];
+
+    KTEST_ASSERT(bcache_flush() == E_OK,
+                 "[BCACHE] the cache is clean before the failing device goes in");
+
+    blockdev_set_root(&failing_dev);
+    bc_fail_reads = 0;
+    bc_fail_writes = 0;
+
+    ft_memset(buf, 0x5A, sizeof(buf));
+    KTEST_ASSERT(bcache_read_sector(BC_TEST_BASE + 90, buf) == E_IO,
+                 "[STRICT] [BCACHE] a read the device refuses is reported, not swallowed");
+
+    {
+        int zeroed = 1;
+        for (int i = 0; i < 512; i++) {
+            if (buf[i] != 0) { zeroed = 0; break; }
+        }
+        KTEST_ASSERT(zeroed,
+                     "[BCACHE] and the caller's buffer is zeroed rather than left as it was");
+    }
+
+    /*
+     * The assertion that matters. If the failed read had been cached, this second
+     * one would be served from memory and the device would see one read, not two.
+     */
+    bcache_read_sector(BC_TEST_BASE + 90, buf);
+    KTEST_ASSERT(bc_fail_reads == 2,
+                 "[STRICT] [BCACHE] a failed read is not cached, so the next one asks the device again");
+
+    /*
+     * A write is taken by the cache - it is write-back - and the failure surfaces
+     * at the flush, where the sector must stay dirty so that a later flush tries
+     * it again.
+     */
+    ft_memset(buf, 0x31, sizeof(buf));
+    KTEST_ASSERT(bcache_write_sector(BC_TEST_BASE + 91, buf) == E_OK,
+                 "[BCACHE] a write is accepted into the cache without touching the device");
+
+    uint32_t dirty_before = bcache_dirty_count();
+    KTEST_ASSERT(bcache_flush() == E_IO,
+                 "[STRICT] [BCACHE] a flush the device refuses reports failure");
+    KTEST_ASSERT(bcache_dirty_count() == dirty_before,
+                 "[STRICT] [BCACHE] and the sector stays dirty, so a later flush tries it again");
+
+    /*
+     * Put the real disk back, then get rid of the sector that cannot be written -
+     * it is dirty against a device that no longer exists, and leaving it would
+     * make the next flush anywhere in the suite write it to the real disk.
+     */
+    blockdev_set_root(saved);
+    KTEST_ASSERT(bcache_flush() == E_OK,
+                 "[BCACHE] and the real device takes it once it is back");
+}
+
 /**
  * @brief Tests the Block Cache (bcache) write, read, and flush mechanisms.
  *
@@ -123,4 +231,6 @@ void run_bcache_tests(void) {
                  "[STRICT] [BCACHE] the dirty set never grew past the high water mark");
     KTEST_ASSERT(peak_dirty > 1,
                  "[BCACHE] write-behind is a bound, not a flush on every single write");
+
+    run_device_failure_assertions();
 }

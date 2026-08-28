@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.1.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.2.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -65,7 +65,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 1.1.0-beta.1
+**Version:** 1.2.0-beta.1
 
 esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -427,6 +427,26 @@ the format, so a v2 disk is refused by name the way v0.9.x disks have been since
 rather than an exception to it: new calls continue from the highest assigned number, so
 the next one takes 69.
 
+v1.2.0 stops a failed disk read from looking like an empty disk. Until now the ATA driver
+zeroed its buffer on every failure path and reported the outcome through a return value
+nothing read — the block cache discarded it and stored the zeros as though they were
+data. The check that decides whether a disk is blank read through that cache, so a drive
+that failed `IDENTIFY`, a loose cable, an LBA past the end of the disk or an interrupt
+that never arrived all arrived at the same place: a run of zeros, read as "this disk is
+empty", and formatted. On real hardware that is data loss from a transient error. In QEMU
+it never happens, which is why it survived to be found by reading rather than by breaking.
+
+The fix needed a seam. `bcache` called `ata_read_sector()` directly, so there was no way
+to put a failing device underneath it and no way to write the assertion at all. The file
+system now talks to a registered block device instead, ATA registers itself as one, and
+the driver's contract was corrected on the way past: `include/ata.h` had documented "0 on
+success, or a negative error code on failure" while the code returned 1 for success and 0
+for failure, and never a negative anything. The header and the code had disagreed about
+the meaning of zero since v0.4, in the direction that turns every failure into a success.
+
+The layer is also the thing the next few releases need. A SATA controller or a USB stick
+plugs in where ATA does now, and neither of them needs the file system to know about it.
+
 It remains a development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -436,7 +456,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 19 user-space programs and 34 shell builtins
-- 36 kernel self-test modules and CI pipeline
+- 37 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -485,9 +505,10 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Component | Description |
 |-----------|-------------|
-| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, and the directory table is checked against its own invariants before it is believed. 512 entries of 96 bytes, each with an owner, a group, permission bits and creation and modification times |
+| **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, a disk that cannot be read is refused rather than formatted, and the directory table is checked against its own invariants before it is believed. 512 entries of 96 bytes, each with an owner, a group, permission bits and creation and modification times |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
-| **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()` |
+| **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()`. A read the device refuses is not cached, and a sector the device will not take stays dirty so a later flush tries it again |
+| **Block Device Layer** | One registered device under the cache, with the sector bounds check in one place rather than in each driver. ATA registers itself at boot; the file system never names it. A driver's errno reaches the file system unchanged, which is what lets the mount path tell a disk it cannot read from a disk with nothing on it |
 | **DevFS** | `/dev/null`, `/dev/random`, `/dev/urandom` and `/dev/kmsg` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically, and `/dev/kmsg` streams log records with a per-process cursor |
 
 ### Drivers
@@ -523,7 +544,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 36 kernel-mode modules: abi, keyslot, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 37 kernel-mode modules: abi, keyslot, blockdev, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -626,9 +647,11 @@ kernel_main()
   +---> init_kernel_heap()       First-fit heap allocator
   +---> init_timer(TIMER_HZ)     PIT at 100 Hz
   +---> init_signals()           Kernel timer slot table
-  +---> ata_identify()           ATA disk detection
+  +---> ata_identify()           Brings the disk up and registers it as the root
+  |                              block device. The only place ATA is named
   +---> fs_init()                Partition table, superblock, FAT and directory
   |                              table; formats a blank disk, refuses a foreign one
+  |                              and refuses one it cannot read
   +---> unlock_disk_key()        Asks for the disk passphrase and unwraps the data
   |                              key from the superblock's key slot; sets one on a
   |                              disk it has just formatted. Before /etc is written
@@ -781,10 +804,19 @@ The build process:
 make run
 ```
 
+**`make run` zeroes `disk.img` first**, so every invocation is a first boot on a blank
+disk. That is deliberate — a development target that starts from a known state — but it
+has a consequence worth knowing before you go looking for a bug that is not there: you
+will always be asked to *set* a disk passphrase, never to enter an existing one, and
+nothing you write survives to the next `make run`. To see the unlock path, or to check
+that a file is still there, reboot from inside the OS with `reboot` rather than leaving
+QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of your own
+— see [Manual QEMU Invocation](#manual-qemu-invocation).
+
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.1.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.2.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
 
@@ -814,7 +846,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.1.0-beta.1.iso \
+    -cdrom esdumanOS-v1.2.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -1083,7 +1115,7 @@ make test
 # Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 36 kernel-mode modules, then a Ring 3 payload
+# Boot kernel in self-test mode: 37 kernel-mode modules, then a Ring 3 payload
 make test_kernel
 
 # Run one module instead of all of them, for iteration
@@ -1114,6 +1146,7 @@ filtered run proves one module, not the tree.
 | Module | Coverage |
 |--------|----------|
 | `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 62 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS` and that 68 is still free |
+| `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
 | `test_keyslot.c` | The passphrase key slot, against the slot alone — no disk, no prompt: round trip, a wrong passphrase refused with the caller's buffer left untouched, every field of the slot edited in turn to confirm the tag covers the salt and IV as well as the ciphertext, iteration counts above and below what the build accepts, and the same data key wrapped under a second passphrase to prove a passphrase change preserves it |
 | `test_vfs.c` | File create/delete, directory nesting (15 levels), path resolution, the on-disk format (that an entry is exactly 96 bytes and the master boot record exactly one sector, that the superblock's geometry leaves room for the regions it describes and stays relative to the partition, that clusters 0 and 1 are reserved so a start cluster of 0 can mean "no data", that a file spanning two clusters reads back byte-for-byte, that an entry id past 255 survives the trip to a sector and back, and that a name one byte too long is refused rather than shortened), the mount-time table validator against four kinds of corruption, and that the system's own paths carry the permissions they must after a boot |
 | `test_memory.c` | Heap allocation, deallocation, read/write verification |
@@ -1250,7 +1283,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      36 kernel-mode test modules + framework
+|   |-- kernel/                      37 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1779,6 +1812,8 @@ Near-term priorities for the project, roughly in order:
 |----------|------|
 | P1 | `mount` and `umount`, so the second partition the table makes room for can be used |
 | P2 | Per-mutex wait queues, replacing the global `wakeup_tasks()` sweep |
+| P2 | A disk larger than 16 MB: the allocation table is a static `uint32_t[4096]`, and sizing it from the device is what the block layer was the prerequisite for |
+| P3 | PCI bus enumeration — neither AHCI nor USB can be written without it, and `io.h` has no 32-bit port access yet |
 | P3 | Expanded /dev device drivers |
 | P3 | RISC-V port (the Makefile branch exists; `arch/riscv/` does not) |
 
@@ -1808,7 +1843,10 @@ transcript of the screen, and it is written out at `sync`, `halt` and `reboot`; 
 outlived the work by five releases. Deriving the disk key from a boot passphrase left this list in v1.1.0, which
 also closed the hole under it: the `/bin` images had been stored on disk exactly as the
 build encrypted them, so they were readable to anyone holding the kernel binary no matter
-what the user's passphrase was. And the sticky bit on `/tmp`, which v0.9.4 added
+what the user's passphrase was. A block device layer left this list in v1.2.0, which the storage work ahead needs and
+which arrived with the reason to build it: the file system could not tell a disk it had
+failed to read from a disk with nothing on it, and formatted the second. And the sticky
+bit on `/tmp`, which v0.9.4 added
 alongside the other half of the permission enforcement: the file's own mode. v1.0.0 froze
 the syscall ABI, which had been waiting on the disk format rather than on `mount` — a
 freeze stops numbers from changing meaning and says nothing about adding new ones, so

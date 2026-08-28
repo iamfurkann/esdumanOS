@@ -66,6 +66,7 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/edit_elf_data.c \
 			src/resources/chmod_elf_data.c \
 			src/resources/chown_elf_data.c \
+			drivers/blockdev.c \
 			fs/bcache.c \
             fs/vfs.c \
             fs/crypto_fs.c \
@@ -88,6 +89,7 @@ CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_abi.c \
+            tests/kernel/test_blockdev.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
             tests/kernel/test_memory.c \

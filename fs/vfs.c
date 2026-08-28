@@ -5,7 +5,7 @@
  * This file is part of the esdumanOS test suite.
  */
 #include "fs.h"
-#include "ata.h"
+#include "blockdev.h"
 #include "libft.h"
 #include "stdio.h"
 #include "errno.h"
@@ -62,13 +62,13 @@ int fs_get_entry_idx(const char *name, fs_id_t parent_id);
  * belongs to the disk rather than to any file system, and is read and written
  * through the cache directly, with a comment saying so at each of the two sites.
  */
-void fs_read_sector(uint32_t rel_sector, uint8_t *buffer) {
-    bcache_read_sector(fs_part_start + rel_sector, buffer);
+int fs_read_sector(uint32_t rel_sector, uint8_t *buffer) {
+    return bcache_read_sector(fs_part_start + rel_sector, buffer);
 }
 
 /** @brief Writes a sector named relative to the partition. See fs_read_sector(). */
-void fs_write_sector(uint32_t rel_sector, uint8_t *buffer) {
-    bcache_write_sector(fs_part_start + rel_sector, buffer);
+int fs_write_sector(uint32_t rel_sector, uint8_t *buffer) {
+    return bcache_write_sector(fs_part_start + rel_sector, buffer);
 }
 
 /**
@@ -290,15 +290,32 @@ static void save_superblock(void) {
  * relative twin that used to sit beside this had no callers left once the mount
  * path was rewritten around the MBR, so it went with them.
  *
+ * Three answers, not two, as of v1.2.0. It used to have two, and the missing one
+ * was the dangerous one: a sector it could not read came back zeroed from the
+ * block cache, counted as blank, and the caller formatted the disk. Every failure
+ * path in the ATA driver zeroes its buffer, so "could not read" and "really is
+ * zero" were the same answer - on a disk that had not been identified, on an LBA
+ * past the end of it, on an IRQ timeout, and on a drive reporting a hardware
+ * error. QEMU's disk never fails, which is why this survived to be found by
+ * reading rather than by breaking.
+ *
  * @param start First sector, from the start of the disk.
  * @param count How many.
- * @return 1 when the whole run is zero.
+ * @return 1 when the whole run is zero, 0 when any byte is not, and a negative
+ *         errno when the disk could not be read - which is not blankness and
+ *         must never be treated as it.
  */
 static int disk_region_is_blank(uint32_t start, uint32_t count) {
     uint8_t sec_buf[512];
 
     for (uint32_t s = 0; s < count; s++) {
-        bcache_read_sector(start + s, sec_buf);
+        int res = bcache_read_sector(start + s, sec_buf);
+        if (res != E_OK) {
+            klog_int(LOG_LEVEL_ERROR, "VFS",
+                     "Could not read this sector while deciding whether the disk is blank",
+                     (int)(start + s));
+            return res;
+        }
         for (int i = 0; i < 512; i++) {
             if (sec_buf[i] != 0) return 0;
         }
@@ -317,7 +334,7 @@ static int disk_region_is_blank(uint32_t start, uint32_t count) {
  * Sector 0 is the disk's, not the file system's, so this is one of the two
  * places that call the block cache without going through fs_write_sector().
  */
-static void write_mbr(uint32_t disk_sectors) {
+static int write_mbr(uint32_t disk_sectors) {
     uint8_t sec_buf[512];
     mbr_t mbr;
 
@@ -330,7 +347,7 @@ static void write_mbr(uint32_t disk_sectors) {
 
     ft_memset(sec_buf, 0, 512);
     ft_memcpy(sec_buf, &mbr, sizeof(mbr));
-    bcache_write_sector(0, sec_buf);
+    return bcache_write_sector(0, sec_buf);
 }
 
 /**
@@ -405,7 +422,10 @@ static int load_superblock(void) {
     uint8_t sec_buf[512];
     uint8_t *dst = (uint8_t *)&fs_super;
 
-    fs_read_sector(FS_SUPER_SECTOR, sec_buf);
+    if (fs_read_sector(FS_SUPER_SECTOR, sec_buf) != E_OK) {
+        klog(LOG_LEVEL_ERROR, "VFS", "The superblock sector could not be read.");
+        return 0;
+    }
     for (uint32_t i = 0; i < sizeof(disk_superblock_t); i++) dst[i] = sec_buf[i];
 
     if (fs_super.magic != FS_SUPER_MAGIC) return 0;
@@ -455,7 +475,13 @@ static int load_partition(uint32_t disk_sectors) {
     uint8_t sec_buf[512];
     mbr_t mbr;
 
-    bcache_read_sector(0, sec_buf);
+    /*
+     * A sector 0 that could not be read is not a sector 0 without a partition
+     * table. Both used to arrive here as a zeroed buffer and leave as "return 0",
+     * which sends the caller down the path that decides whether to format.
+     */
+    if (bcache_read_sector(0, sec_buf) != E_OK) return -1;
+
     ft_memcpy(&mbr, sec_buf, sizeof(mbr));
 
     if (mbr.signature != MBR_SIGNATURE) return 0;
@@ -588,7 +614,18 @@ void init_fs(void) {
     }
     bcache_init();
 
-    uint32_t disk_sectors = ata_identify();
+    /*
+     * How big the disk is, asked of the block layer rather than of a driver.
+     * ata_identify() used to be called from right here, which is how the file
+     * system came to name an IDE controller; the boot path brings the device up
+     * now and registers it, and this asks whatever was registered.
+     *
+     * No device registered means no disk answered, and zero sectors takes the
+     * "too small to hold a file system" path below rather than any path that
+     * writes.
+     */
+    blockdev_t *disk = blockdev_root();
+    uint32_t disk_sectors = disk ? disk->sector_count : 0;
 
     fs_mounted = 0;
     fs_part_start = 0;
@@ -608,7 +645,17 @@ void init_fs(void) {
         return;
     }
 
-    if (load_partition(disk_sectors)) {
+    int part = load_partition(disk_sectors);
+
+    if (part < 0) {
+        klog(LOG_LEVEL_ERROR, "VFS", "Sector 0 could not be read; refusing to mount or format.");
+        printk("\n[VFS] The first sector of this disk could not be read. That is not the\n");
+        printk("      same as a disk with nothing on it, and this kernel will not format\n");
+        printk("      one on the strength of a failed read. Nothing has been written.\n\n");
+        return;
+    }
+
+    if (part) {
         /* Partitioned. The cluster count is what the partition can hold, capped
          * at what the allocation table can describe. */
         uint32_t usable = (fs_max_sectors > FS_DATA_START_SECTOR)
@@ -626,7 +673,20 @@ void init_fs(void) {
         uint8_t sec_buf[512];
         uint32_t magic;
 
-        bcache_read_sector(0, sec_buf);
+        /*
+         * load_partition() has already read this sector successfully, so this is
+         * a cache hit and cannot realistically fail. It is checked anyway: an
+         * unchecked read on the path that ends in format_disk() is the exact
+         * shape of the defect this release exists to remove, and a guard that
+         * costs a comparison is not worth reasoning about twice.
+         */
+        if (bcache_read_sector(0, sec_buf) != E_OK) {
+            klog(LOG_LEVEL_ERROR, "VFS", "Sector 0 could not be read; refusing to mount or format.");
+            printk("\n[VFS] The first sector of this disk could not be read. That is not\n");
+            printk("      the same as an empty disk, and this kernel will not format it\n");
+            printk("      on the strength of a failed read. Nothing has been written.\n\n");
+            return;
+        }
         ft_memcpy(&magic, sec_buf, sizeof(magic));
 
         if (magic == FS_SUPER_MAGIC) {
@@ -640,7 +700,18 @@ void init_fs(void) {
             return;
         }
 
-        if (!disk_region_is_blank(0, FS_PART_START_LBA + FS_LEGACY_DIR_SECTORS)) {
+        int blank = disk_region_is_blank(0, FS_PART_START_LBA + FS_LEGACY_DIR_SECTORS);
+
+        if (blank < 0) {
+            klog(LOG_LEVEL_ERROR, "VFS", "Disk could not be read; refusing to mount or format.");
+            printk("\n[VFS] This disk could not be read. It is not being treated as empty,\n");
+            printk("      because a disk that cannot be read is not a disk that is blank -\n");
+            printk("      and formatting one on that assumption is how data is lost to a\n");
+            printk("      loose cable. Nothing has been written to it.\n\n");
+            return;
+        }
+
+        if (blank == 0) {
             klog(LOG_LEVEL_ERROR, "VFS", "Unrecognised disk; refusing to mount it or write to it.");
             printk("\n[VFS] This disk was not written by this version of esdumanOS, and\n");
             printk("      carries no partition table this kernel recognises. Nothing has\n");
@@ -661,7 +732,18 @@ void init_fs(void) {
             return;
         }
 
-        write_mbr(disk_sectors);
+        /*
+         * A partition table that did not reach the disk makes everything
+         * format_disk() writes afterwards unreachable: the geometry lives in the
+         * superblock, and the superblock is found through the table. Stopping
+         * here leaves a disk with nothing on it, which is what it already was.
+         */
+        if (write_mbr(disk_sectors) != E_OK) {
+            klog(LOG_LEVEL_ERROR, "VFS", "The partition table could not be written; format abandoned.");
+            printk("\n[VFS] The partition table could not be written to this disk, so it\n");
+            printk("      has not been formatted. Nothing usable was left behind.\n\n");
+            return;
+        }
         format_disk();
     }
 
@@ -671,7 +753,20 @@ void init_fs(void) {
 
     for (uint32_t i = 0; i < sectors_needed; i++) {
         uint8_t sec_buf[512];
-        fs_read_sector(fs_super.dir_start + i, sec_buf);
+
+        /*
+         * A directory table with a hole in it is worse than no mount at all: the
+         * missing sectors would read as zeros, which is a run of unused entries,
+         * and the files they described would be invisible and their clusters
+         * free for something else to allocate over.
+         */
+        if (fs_read_sector(fs_super.dir_start + i, sec_buf) != E_OK) {
+            klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table unreadable at sector", (int)i);
+            printk("\n[VFS] The directory table could not be read from this disk.\n");
+            printk("      Refusing to mount rather than treat the part that failed\n");
+            printk("      as a run of empty entries.\n\n");
+            return;
+        }
 
         uint32_t copy_size = 512;
         if ((i * 512) + 512 > total_bytes) {
@@ -687,7 +782,17 @@ void init_fs(void) {
     uint32_t fat_sectors_needed = (fat_total_bytes + 511) / 512;
 
     for (uint32_t i = 0; i < fat_sectors_needed; i++) {
-        fs_read_sector(fs_super.fat_start + i, fat_ptr + (i * 512));
+        /*
+         * And an allocation table with a hole reads as free clusters, which is an
+         * invitation to allocate over data that is still referenced.
+         */
+        if (fs_read_sector(fs_super.fat_start + i, fat_ptr + (i * 512)) != E_OK) {
+            klog_int(LOG_LEVEL_ERROR, "VFS", "Allocation table unreadable at sector", (int)i);
+            printk("\n[VFS] The allocation table could not be read from this disk.\n");
+            printk("      Refusing to mount rather than treat the part that failed\n");
+            printk("      as free space.\n\n");
+            return;
+        }
     }
 
     /* Clusters 0 and 1 are reserved whatever the disk says about them. */

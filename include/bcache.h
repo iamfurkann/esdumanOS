@@ -46,27 +46,53 @@ typedef struct {
  */
 void bcache_init(void);
 
+/*
+ * These three returned void until v1.2.0, so the file system had no way to learn
+ * that the disk had failed - and the driver zero-fills its buffer on failure, so
+ * a failed read arrived as a sector full of zeros that nothing could question.
+ * One of the callers is the check that decides whether a disk is blank and
+ * should therefore be formatted.
+ */
+
 /**
  * @brief Reads a sector from the block cache or loads it from the underlying device.
- * 
+ *
+ * A failed read is not cached: the slot stays invalid so the next attempt reaches
+ * the device again, and the caller's buffer is zeroed. Zeros are not evidence of
+ * anything; the return value is.
+ *
  * @param sector The logical sector number to read.
  * @param buffer The buffer where the sector data will be copied.
+ * @return E_OK, or a negative errno from the device.
  */
-void bcache_read_sector(uint32_t sector, uint8_t *buffer);
+int bcache_read_sector(uint32_t sector, uint8_t *buffer);
 
 /**
  * @brief Writes data to a cached sector, marking it as dirty.
  * If the sector is not in cache, it will be loaded or allocated first.
- * 
+ *
+ * E_OK means the cache took the sector, not that the disk did - this is a
+ * write-back cache and the device is written later. bcache_flush() is where a
+ * device write failure surfaces. The one failure this can report is a cache with
+ * no slot to give: every slot holding dirty data the device would not accept.
+ *
  * @param sector The logical sector number to write.
  * @param buffer The buffer containing the data to write.
+ * @return E_OK, or E_IO when no slot could be freed.
  */
-void bcache_write_sector(uint32_t sector, uint8_t *buffer);
+int bcache_write_sector(uint32_t sector, uint8_t *buffer);
 
 /**
  * @brief Flushes all dirty sectors in the block cache to the underlying physical storage.
+ *
+ * A sector the device refuses stays dirty and stays counted, so a later flush
+ * tries it again. Marking it clean would report success over data that never
+ * left RAM and guarantee nothing ever retried it.
+ *
+ * @return E_OK when everything dirty reached the device, E_IO when any sector
+ *         did not.
  */
-void bcache_flush(void);
+int bcache_flush(void);
 
 /**
  * @brief Whether dirty data has been waiting past BCACHE_FLUSH_INTERVAL_TICKS.

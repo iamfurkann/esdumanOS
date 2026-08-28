@@ -8,7 +8,7 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    1
-#define OS_VERSION_MINOR    1
+#define OS_VERSION_MINOR    2
 #define OS_VERSION_PATCH    0
 
 /**
@@ -25,7 +25,7 @@
  * same list they were. A bare 1.0.0 would have claimed the second thing by
  * finishing the first.
  *
- * Carried forward unchanged into 1.1.0. None of what it was waiting on has
+ * Carried forward unchanged since 1.1.0. None of what it was waiting on has
  * happened: the clock round trip is still not deterministic and there is still
  * no mount(). Dropping the suffix is a separate decision and nobody has taken
  * it, so the version moves and the qualifier does not.

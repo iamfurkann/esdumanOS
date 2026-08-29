@@ -318,6 +318,37 @@ const console_backend_t *console_active(void) {
     return active;
 }
 
+void console_save(console_state_t *out) {
+    if (out == 0) return;
+
+    out->backend = active;
+    out->base    = fb.base;
+    out->pitch   = fb.pitch;
+    out->width   = fb.width;
+    out->height  = fb.height;
+    out->bpp     = 32;      /* the only one console_use_framebuffer() accepts */
+}
+
+int console_restore(const console_state_t *in) {
+    if (in == 0 || in->backend == 0) return E_INVAL;
+
+    if (in->backend == &vga_backend) {
+        console_use_vga();
+        return E_OK;
+    }
+
+    /*
+     * Back through the front door rather than by restoring the fields.
+     *
+     * What ran in between drew over the screen and over the shadow, and those
+     * two have to agree or the next repaint skips exactly the cells that need
+     * redrawing - a cell whose shadow says "already correct" is not drawn, and
+     * on a screen somebody else has scribbled on that is the wrong answer.
+     * console_use_framebuffer() clears both and puts them back in step.
+     */
+    return console_use_framebuffer(in->base, in->pitch, in->width, in->height, in->bpp);
+}
+
 void console_put_cell(size_t x, size_t y, uint16_t entry) {
     if (active == 0) return;
     if (x >= CONSOLE_COLS || y >= CONSOLE_ROWS) return;

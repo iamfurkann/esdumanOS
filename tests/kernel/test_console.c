@@ -207,7 +207,7 @@ static void run_cursor_assertions(void) {
 /**
  * @brief What the backend refuses, and putting the screen back.
  */
-static void run_refusal_assertions(void) {
+static void run_refusal_assertions(const console_state_t *saved) {
     const console_backend_t *before = console_active();
 
     KTEST_ASSERT(console_use_framebuffer(fake_fb, FAKE_PITCH, FAKE_W, FAKE_H, 24) == E_INVAL &&
@@ -219,24 +219,41 @@ static void run_refusal_assertions(void) {
                  "[STRICT] [CONSOLE] and so is a buffer that is not there");
 
     /*
-     * Back to text mode, which is what both test machines boot in, followed by a
-     * repaint so the screen shows the suite again rather than whatever was on it
-     * when this module started.
+     * Back to whatever was there, followed by a repaint so the screen shows the
+     * suite again rather than the four-by-two corner this module has been
+     * drawing into.
+     *
+     * This used to call console_use_vga() and assert the name was "vga", with a
+     * comment saying that is what both test machines boot in. That was true of
+     * both machines at the time and is not a fact about the console: a run under
+     * a bootloader that hands over a framebuffer starts on the other backend, and
+     * forcing text mode there would take the screen away from every module after
+     * this one while asserting, wrongly, that it had put things back.
+     *
+     * What is restored is what was found - the same discipline test_blockdev.c
+     * has with the root block device, and for the same reason.
      */
-    console_use_vga();
+    console_restore(saved);
     update_screen();
 
-    KTEST_ASSERT(console_active() != 0 &&
-                 ft_strcmp(console_active()->name, "vga") == 0,
-                 "[STRICT] [CONSOLE] and the console is left where the rest of the suite found it");
+    KTEST_ASSERT(console_active() == saved->backend,
+                 "[STRICT] [CONSOLE] and the console is left on the backend the suite arrived with");
 }
 
 void run_console_tests(void) {
+    console_state_t saved;
+
     printk("\n--- Console Backend Tests ---\n");
+
+    /*
+     * Taken before anything is drawn, because everything below installs a
+     * framebuffer of its own and that overwrites where the real one is.
+     */
+    console_save(&saved);
 
     run_selection_assertions();
     run_drawing_assertions();
     run_shadow_assertions();
     run_cursor_assertions();
-    run_refusal_assertions();
+    run_refusal_assertions(&saved);
 }

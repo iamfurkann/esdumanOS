@@ -13,6 +13,9 @@
  * only the boot path has any business asking. */
 #include "pci.h"
 #include "ahci.h"
+/* And this is where it is decided what the terminal draws into, which depends
+ * entirely on how the machine was booted. */
+#include "console.h"
 #include "keyboard.h"
 #include "crypto.h"
 #include "entropy.h"
@@ -360,6 +363,67 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
     return 0;
 }
 
+/**
+ * @brief Moves the console onto the framebuffer the bootloader set up, if it did.
+ *
+ * Everything here is a refusal except the last two lines, and each refusal is a
+ * machine this kernel can still boot on rather than a case that cannot happen.
+ * A bootloader that ignored the video request reports no framebuffer; one that
+ * could not set a graphics mode reports a text mode; one on a 64-bit machine may
+ * report an address above four gigabytes. In every one of those the console
+ * stays where it is, which is text mode, and the machine comes up.
+ *
+ * The failure that is worth being loud about is the one in the middle: a
+ * framebuffer that was reported and could not be mapped. The screen is in a
+ * graphics mode by then, so text-mode writes go nowhere visible and the machine
+ * boots to what looks like a blank display. The log line is the only evidence,
+ * which is why there is one.
+ */
+static void install_framebuffer_console(void) {
+    const multiboot_info_t *mb = &global_mboot_info;
+
+    if (!(mb->flags & MULTIBOOT_FLAG_FRAMEBUFFER)) {
+        klog(LOG_LEVEL_INFO, "CONSOLE", "No framebuffer from the bootloader; staying in text mode.");
+        return;
+    }
+
+    if (mb->framebuffer_type != MULTIBOOT_FRAMEBUFFER_TYPE_RGB) {
+        klog(LOG_LEVEL_INFO, "CONSOLE", "Bootloader left the machine in text mode.");
+        return;
+    }
+
+    if (mb->framebuffer_addr_high != 0) {
+        klog(LOG_LEVEL_WARN, "CONSOLE", "Framebuffer is above 4 GB; this kernel cannot reach it.");
+        return;
+    }
+
+    uint32_t bytes = mb->framebuffer_pitch * mb->framebuffer_height;
+
+    void *base = vmm_map_device(mb->framebuffer_addr_low, bytes);
+    if (base == 0) {
+        klog(LOG_LEVEL_ERROR, "CONSOLE",
+             "Framebuffer could not be mapped; the screen will stay blank.");
+        return;
+    }
+
+    if (console_use_framebuffer(base, mb->framebuffer_pitch, mb->framebuffer_width,
+                                mb->framebuffer_height, mb->framebuffer_bpp) != E_OK) {
+        klog(LOG_LEVEL_ERROR, "CONSOLE",
+             "Framebuffer is in a pixel format this kernel cannot draw.");
+        return;
+    }
+
+    klog_int(LOG_LEVEL_INFO, "CONSOLE", "Framebuffer console active. Width",
+             (int)mb->framebuffer_width);
+
+    /*
+     * And now everything printed before the mapping appears at once. The
+     * terminal has been keeping its cell buffers the whole time; this is the
+     * first moment there is somewhere to draw them.
+     */
+    update_screen();
+}
+
 static int init_memory_subsystem(void) {
     init_pmm(&global_mboot_info);
     if (pmm_get_total_memory() == 0) {
@@ -386,6 +450,20 @@ static int init_memory_subsystem(void) {
 
     serial_print("[MAIN-DBG] Checked CR0. Now printing OK...\n");
     boot_ok("Virtual Memory (Paging) Activated");
+
+    /*
+     * The earliest point a framebuffer can be reached, which is why it happens
+     * here rather than anywhere more obvious.
+     *
+     * A framebuffer is device memory at an address the physical allocator does
+     * not manage, so it has to be mapped, and mapping needs the page directory
+     * that was installed four lines ago. Everything printed before this went to
+     * text-mode video memory, and on a machine the bootloader put into a
+     * graphics mode nobody saw it - but nothing was lost either, because
+     * update_screen() replays the terminal's cell buffers and those have been
+     * filling since the first line.
+     */
+    install_framebuffer_console();
     
     serial_print("[MAIN-DBG] Printk finished. Now init_kheap...\n");
     

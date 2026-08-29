@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.5.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.6.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -484,7 +484,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 19 user-space programs and 34 shell builtins
-- 39 kernel self-test modules and CI pipeline
+- 40 kernel self-test modules and CI pipeline
 
 **What to expect:**
 - This is not production-ready software
@@ -547,7 +547,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **PCI** | Configuration space through ports 0xCF8/0xCFC, read and written; the buses behind bridges walked from a worklist; up to 32 functions recorded with their class, IDs and base address registers. Memory decoding and bus mastering are enabled for a device a driver claims |
 | **AHCI (SATA)** | The disk on a machine with no IDE controller. One controller, one port, one command slot, one sector per command, polled rather than interrupt-driven. Registers as a block device exactly as the IDE driver does, so nothing in the file system knows which of the two it is on |
 | **PS/2 Keyboard** | IRQ1 handler, US and Turkish layouts, Shift/CapsLock/AltGr, 256-byte ring buffer |
-| **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management |
+| **Console** | Two backends behind one seam. VGA text mode writes cells to `0xB8000` and drives the hardware cursor; the framebuffer backend draws each cell as an 8x16 glyph into the linear pixel buffer the bootloader hands over, with a software cursor and a shadow so an unchanged cell is not blitted again. The terminal above them knows about neither |
+| **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management. 80x25 whichever backend is drawing it |
 | **RTC** | CMOS real-time clock, BCD/binary auto-detection, 12/24-hour conversion |
 
 ### Cryptography
@@ -574,7 +575,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 39 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 40 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, console, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -834,6 +835,20 @@ The build process:
 make run
 ```
 
+**The console is made of pixels as of v1.6.0, and a terminal cannot show it.** The
+kernel asks the bootloader for a framebuffer and draws glyphs into it, so `make run`
+serves the display over VNC on `:1` — connect to `vnc://<host>:5901` from a machine with
+a screen, tunnelling the port over ssh if it is not directly reachable. macOS has a
+client built in, under Finder's *Connect to Server*.
+
+Two alternatives, both real. Copy `esdumanOS-v1.6.0-beta.1.iso` and a disk image to a
+machine with a display and run them there — the build has to happen on the development
+machine but looking at the result does not. Or run `make run_text` and choose the second
+entry in the GRUB menu, which sets `gfxpayload=text`: the kernel finds no framebuffer,
+stays on its VGA backend, and appears in the terminal exactly as it did before this
+release. Most development is not about the screen, and that path is also the only thing
+outside the test suite that ever exercises the text-mode fallback.
+
 **`make run` zeroes `disk.img` first**, so every invocation is a first boot on a blank
 disk. That is deliberate — a development target that starts from a known state — but it
 has a consequence worth knowing before you go looking for a bug that is not there: you
@@ -846,8 +861,8 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.5.0-beta.1.iso -boot d -serial file:kernel_log.txt \
-    -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+qemu-system-i386 -cdrom esdumanOS-v1.6.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+    -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display vnc=:1 -k en-us
 ```
 
 Which means:
@@ -858,8 +873,13 @@ Which means:
   tell those two facts apart, so without this it calls the disk bootable, jumps into
   446 bytes of zeros, and stops at `Booting from Hard Disk...`. The first boot of a
   blank disk works because a blank disk has no signature yet.
-- **`-display curses`** — the OS runs inside your terminal, not a separate window.
-  Quit with `Esc` then `2` to reach the QEMU monitor, or `Ctrl-A X` under `-nographic`.
+- **`-display vnc=:1`** — the screen is served on port 5901 rather than drawn in a
+  window, because the machine this is developed on is headless and because a terminal
+  cannot render a framebuffer at all. `make run_text` uses `-display curses` instead,
+  which only shows anything if the GRUB menu's text-mode entry was chosen.
+- **`-k en-us`** — VNC carries key symbols rather than scancodes, so without a keymap
+  QEMU has to guess at the layout. That guess is how a disk passphrase typed at the
+  unlock prompt arrives as a different string than the one that was set.
 - **Serial output goes to `kernel_log.txt`**, not to the terminal. That file is
   where `klog` output lands; tail it in another shell while the OS runs.
 - Bootable CD-ROM from the generated ISO, plus a raw disk image on the
@@ -876,7 +896,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.5.0-beta.1.iso \
+    -cdrom esdumanOS-v1.6.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -904,7 +924,7 @@ undecoded port answers with all ones, which has that bit set — and until v1.5.
 it was a system that could say what was holding its disk and not read it.
 
 ```
-qemu-system-i386 -M q35 -cdrom esdumanOS-v1.5.0-beta.1.iso -boot d \
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.6.0-beta.1.iso -boot d \
     -serial file:kernel_log_q35.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
@@ -1214,6 +1234,7 @@ filtered run proves one module, not the tree.
 | Module | Coverage |
 |--------|----------|
 | `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 64 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
+| `test_console.c` | Both console backends, against an array in RAM rather than a screen: that the framebuffer info sits where the Multiboot specification puts it, that a glyph is drawn pixel for pixel from the font, that foreground and background come out of the attribute byte, that a byte outside the font is drawn as a fallback box, that a cell the buffer does not have is not drawn at all, that a cell redrawn with what it already holds is skipped and one whose contents changed is not, that the cursor is painted over its cell and taken away again, and that a pixel format the backend cannot draw is refused without changing which backend is current |
 | `test_ahci.c` | Device memory and the SATA driver, asserted so that the same assertions reach the same verdict on a machine that has an AHCI controller and one that does not: the four structures the controller reads out of memory are the sizes it indexes them by and fit one page with every alignment satisfied, a device mapping preserves its offset within the page and carries the cache-disable bit (read back out of the page table, because nothing else can see it), `pci_enable_device()` sets the two bits it is asked for and leaves the rest of the command register alone, and exactly one of the two storage drivers owns the disk — the one the bus says this machine has |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
@@ -1305,6 +1326,8 @@ esdumanOS/
 |   |-- ata.c                        ATA/IDE PIO disk driver
 |   |-- pci.c                        PCI bus enumeration and configuration access
 |   |-- ahci.c                       SATA disk driver (polled, one port)
+|   |-- console.c                    Console backends: VGA text and framebuffer
+|   |-- console_font.c               8x16 glyphs, ASCII 32-126
 |   |-- keyboard.c                   PS/2 keyboard (US + Turkish)
 |   |-- tty.c                        VGA text mode, 3 virtual terminals
 |   +-- rtc.c                        Real-time clock
@@ -1356,7 +1379,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      39 kernel-mode test modules + framework
+|   |-- kernel/                      40 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1835,7 +1858,32 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   device interface has no per-descriptor state to hang one on, so two descriptors
   in the same program share a read position. Linux keeps one per open.
 - **No ACPI.** Shutdown and reboot use legacy keyboard controller reset.
-- **VGA text mode only.** No framebuffer or graphical output.
+- **The console is 80x25 whatever the screen is.** What the framebuffer backend
+  decides is how large those cells are drawn: the largest whole-number scale that
+  still leaves all of them on the display, centred, with black around it. At
+  1024x768 that is one and the console is 640x400; at the 1920x1080 a laptop
+  panel is likely to report, it is two. Whole numbers only, because a bitmap
+  glyph scaled by anything else has to decide what to do with half a pixel and
+  every answer looks worse than the small version. Growing the terminal itself
+  means changing the size of three scrollback buffers in `drivers/tty.c`, which
+  is a decision about the terminal rather than about the screen.
+- **The font covers ASCII 32 to 126 and nothing else.** Ninety-five glyphs, and
+  anything outside them is drawn as a hollow box. Nothing else can be typed: the
+  Turkish keyboard layout maps every key to plain ASCII, so `ğ` arrives as `g`.
+- **32 bits per pixel only.** A framebuffer in any other format is refused and
+  the console stays in text mode, which on a machine already in a graphics mode
+  means a blank screen and a line in the log saying why.
+- **The framebuffer is mapped uncached, not write-combining.** Setting up the
+  page attribute table is separate work and nothing has measured a reason for it;
+  the shadow buffer already keeps a repaint down to the cells that changed.
+- **Output before the framebuffer is mapped goes only to the serial port.** The
+  mapping needs paging, so everything printed before that is written to text-mode
+  video memory that a machine in a graphics mode does not display. Nothing is
+  lost: the terminal's cell buffers are filled the whole time and the first
+  repaint after the mapping shows all of it at once.
+- **A terminal cannot display a framebuffer.** QEMU's curses front end renders a
+  text-mode screen as characters and answers a graphics mode by printing its
+  dimensions and nothing else. See [Running](#running) for what to use instead.
 - **One test is not deterministic, and the cause is not established.**
   `test_time`'s round trip — set the clock to a known time, read it back, compare
   — fails often enough to meet in ordinary use: roughly two full runs in five
@@ -1912,8 +1960,7 @@ this project has been tested on and false of the machine it is aimed at.
 
 | Release | What it removes |
 |---------|-----------------|
-| v1.6.0 | **The terminal stops knowing where the screen is.** A console backend behind the cell buffer, a framebuffer backend beside the VGA one, and Multiboot2 so the bootloader can hand over a framebuffer. Testable under BIOS today, side by side with the text output it replaces |
-| v1.7.0 | **UEFI boot.** GRUB in UEFI mode, the memory map from Multiboot2, and the BIOS assumptions retired. Everything after this is developed on the platform it is aimed at rather than ported to it |
+| v1.7.0 | **UEFI boot.** GRUB in UEFI mode, Multiboot2 and the memory map that comes with it, and the BIOS assumptions retired. Everything after this is developed on the platform it is aimed at rather than ported to it |
 | v1.8.0 | **A keyboard on a machine with no PS/2 controller.** Multi-page contiguous physical allocation, XHCI, and USB HID. The event ring polled from the timer tick rather than through an IOAPIC that does not exist here |
 | v1.9.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
 | v2.0.0 | The machine. Named, as only major versions are |
@@ -1969,6 +2016,16 @@ freeze stops numbers from changing meaning and says nothing about adding new one
 `mount` and `umount` take 70 and 71 whenever they are written. That sentence said "68 and
 69" until v1.4.0, having been written before `SETKEY` took 68 and left standing for three
 releases four lines below the paragraph that says `SETKEY` took 68.
+
+The screen left this list in v1.6.0, and it left cheaper than the row had
+promised. The terminal is eight hundred lines of scrollback, escape sequences and
+cursors, and exactly six of them stored a word at `0xB8000` or wrote a CRT
+controller register — so the work was a seam of two calls rather than a rewrite.
+The font is ninety-five glyphs written in this repository, because the bitmap
+fonts kernels usually embed are ROM dumps with no licence attached. Multiboot2
+went with the boot work where it belongs: Multiboot 1 has a video request of its
+own, four fields in the header, and it is what asks the bootloader for pixels
+here.
 
 A SATA driver left this list in v1.5.0, which is the release the three before it
 had been building towards without saying so: v1.2.0 put a block device layer under

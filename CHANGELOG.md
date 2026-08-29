@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0-beta.1] - 2026-08-29
+
+The terminal stops knowing where the screen is. It has written characters into text-mode
+video memory since the first release, which is a thing no machine built in the last
+fifteen years has — and the first of the three reasons esdumanOS cannot boot on the
+hardware it is aimed at.
+
+### Added
+
+- **A console backend behind the terminal** (`include/console.h`, `drivers/console.c`).
+  `drivers/tty.c` is eight hundred lines of scrollback, escape sequences, three virtual
+  terminals and cursor tracking, and exactly six of them stored a word at `0xB8000` or
+  programmed a CRT controller register. Those six were the whole of what tied it to a
+  machine with a text mode. The seam is two calls — put a cell here, move the cursor
+  there — and the entry format is the VGA word `tty.c` already stored, because inventing
+  a better one would have been a change to eight hundred lines instead of six.
+
+- **A framebuffer backend.** Each cell is drawn as an 8x16 glyph into the linear pixel
+  buffer the bootloader hands over, with the sixteen text-mode colours carried across as
+  pixels, a software cursor, and a shadow of what was last drawn. The glyphs are scaled
+  by the largest whole number that still leaves all eighty by twenty-five cells on the
+  display and the result is centred — 640x400 in the middle of a 1024x768 screen, twice
+  that on the 1920x1080 a real panel reports. The shadow is not an
+  optimisation for its own sake: `update_screen()` hands over all nineteen hundred cells
+  on every repaint, which is four kilobytes of stores in text mode and a quarter of a
+  megabyte of pixels here, and typing one character causes one.
+
+- **A font, written here** (`drivers/console_font.c`). Ninety-five glyphs, ASCII 32 to
+  126, in binary rather than hex so that a person can see the letter in the source —
+  which is the only review a font in a kernel can get. It is written rather than lifted
+  because the bitmap fonts hobby kernels embed are dumps of the IBM VGA ROM, widely
+  treated as uncopyrightable and with no licence saying so; this repository is MIT
+  throughout. Nothing outside that range can be typed anyway: the Turkish keyboard layout
+  maps every one of its keys to plain ASCII.
+
+- **Multiboot 1's video request** (`arch/x86/boot/boot.asm`). Four fields in the header
+  ask for 1024x768x32, and the bootloader reports where it put the buffer. Multiboot2 is
+  the documented path for UEFI and it went to v1.7.0 with the rest of the boot work;
+  Multiboot 1 has a video request of its own and it is what this release needed.
+
+- **`tests/kernel/test_console.c`**, the 40th module, and the framebuffer backend is
+  tested against an array in RAM. That is possible because `console_use_framebuffer()`
+  takes an already-mapped buffer rather than a physical address — the thing that knows
+  how to draw a glyph does not also have to know how a framebuffer is found and mapped.
+  Neither test machine has a screen and every assertion reaches the same verdict on both.
+
+- **`make run_text`** and a second GRUB entry that sets `gfxpayload=text`, which is the
+  only thing outside the test suite that ever walks the text-mode fallback.
+
+### Fixed
+
+- **`clear` would have frozen the screen on a framebuffer boot.** Backend selection was
+  put in `terminal_initialize()`, which is the obvious place and the wrong one:
+  `SYSCALL_CLEAR_SCREEN` calls that function, so the backend would have been chosen again
+  every time a program ran `clear` — dropping the console back into text mode mid-session
+  with every write after it going somewhere the display does not read. Which backend is
+  right is a fact about how the machine booted, so the boot path is the only thing that
+  gets to say. Found by reading the callers rather than by running anything; both test
+  machines boot in text mode, where the bug has no effect.
+
+- **The GRUB menu waited for a keypress for ever.** There was no `timeout` in
+  `grub/grub.cfg` at all, which was invisible while there was one entry and somebody was
+  always watching. It stops anything from booting this image unattended, which is how it
+  was found: an automated screendump captured a picture of the menu.
+
+### Changed
+
+- **`make run` serves the display over VNC.** curses renders a text-mode screen as
+  terminal characters and answers a graphics mode by printing its dimensions and nothing
+  else, which is exactly what it now does. The kernel is drawing correctly and the front
+  end cannot show it. Copying the ISO and a disk image to a machine with a screen works
+  too, and `make run_text` still puts the whole thing in a terminal.
+
+### Known issues
+
+- **The console is 80x25 whatever the screen is.** The backend draws those cells at the
+  largest whole-number scale the display leaves room for and centres the result — one at
+  1024x768, two at the 1920x1080 a real panel is likely to report. Growing the terminal
+  itself means changing the size of three scrollback buffers in `tty.c`, which is a
+  decision about the terminal rather than the screen.
+
+- **32 bits per pixel only**, and the font covers ASCII 32 to 126. The framebuffer is
+  mapped uncached rather than write-combining; setting up the page attribute table is
+  separate work and nothing has measured a reason for it.
+
+- **Output before the framebuffer is mapped goes only to the serial port.** The mapping
+  needs paging. Nothing is lost — the terminal's cell buffers fill the whole time and the
+  first repaint after the mapping shows all of it at once — but a machine that fails to
+  map its framebuffer boots to a blank screen with only the log to say why.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status
+  v1.2.0 gave them. A device larger than about 1 GB is still used only up to that.
+
 ## [1.5.0-beta.1] - 2026-08-29
 
 The disk on a machine built this century. v1.4.0 taught the kernel to ask the bus what

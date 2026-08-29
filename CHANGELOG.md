@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta.1] - 2026-08-29
+
+esdumanOS boots on a machine whose firmware has no BIOS. That is the second of the three
+things standing between it and the hardware it is aimed at, and it cost one line of
+bootloader configuration — the roadmap had budgeted a migration to Multiboot 2 and none
+of it was needed.
+
+### Fixed
+
+- **The ISO had no EFI boot path at all, and nothing said so.** `grub-mkrescue` builds a
+  hybrid image only when the EFI platform files are installed; without
+  `grub-efi-amd64-bin` it succeeds, prints nothing, and produces an image that boots on
+  BIOS only. Every ISO this project published before this release was one of those, so
+  anyone with a UEFI-only machine could not start it. It is a build dependency now, named
+  in the README, in CONTRIBUTING and in the CI install step, and `make test_kernel_uefi`
+  refuses to run without it rather than testing a BIOS image and reporting success.
+
+- **`grub.cfg` loaded no video driver.** On a BIOS machine `grub-mkrescue` builds VBE
+  support into the core image, so the kernel's Multiboot video request has been satisfied
+  since the day it was added. On UEFI the driver is a separate module, and without it GRUB
+  has no modes to offer: it refuses the kernel with `error: no suitable video mode found`,
+  which reads like a complaint about the resolution asked for and is GRUB saying it has no
+  video driver at all. `insmod all_video` is the whole of the fix.
+
+- **`test_console` assumed which machine it was running on.** It ended by forcing text
+  mode and asserting the backend was named "vga", with a comment explaining that this is
+  what both test machines boot in. That was a fact about the two machines rather than
+  about the console: under a bootloader that hands over a framebuffer it would take the
+  screen away from every module after it while asserting, wrongly, that it had put things
+  back — and the fake framebuffer it installs had already overwritten where the real one
+  is. It now saves the console on entry and restores it on exit, which is the discipline
+  `test_blockdev.c` has had with the root block device since v1.2.0.
+
+### Added
+
+- **`console_save()` and `console_restore()`**, the pair that makes the above possible.
+  Restoring a framebuffer goes back through `console_use_framebuffer()` rather than
+  putting the fields back, because the shadow and the screen have to agree: whatever ran
+  in between drew over both, and a shadow that claims a cell is already correct is a cell
+  that never gets redrawn.
+
+- **`make test_kernel_uefi`**, and a sixth CI step. Every other target passes `-kernel`,
+  which hands the binary to QEMU's own loader and skips the bootloader entirely — so
+  until now nothing tested the part a real machine actually uses. This one builds an ISO
+  of its own, because on this path the kernel command line comes from `grub.cfg` rather
+  than from `-append`, boots it under OVMF, and runs the whole suite with a framebuffer
+  console. It reports the same assertion total as the other two.
+
+### Changed
+
+- **No kernel source changed in this release.** The boot worked as soon as GRUB could set
+  a mode: the framebuffer console v1.6.0 added took the screen, the bus walk v1.4.0 added
+  found the controller, and the SATA driver v1.5.0 added took the disk, because a q35
+  machine has no IDE controller to fall back to. Three releases meeting for the first time
+  on the platform they were written for.
+
+### Known issues
+
+- **No ACPI, and on a UEFI machine that stops being a tidy limitation.** Shutdown and
+  reboot go through the legacy keyboard controller. QEMU's q35 provides one under UEFI
+  firmware so both work there; a physical machine of this class may have no i8042 at all,
+  and there is no second way to power it down.
+
+- **No Secure Boot.** The EFI image is unsigned and a machine with Secure Boot enabled
+  refuses it.
+
+- **Multiboot 1 cannot simply become Multiboot 2.** MB1 carries what is needed so far —
+  the memory map and the framebuffer. MB2 would add the EFI system table and the ACPI
+  pointer, and it would have to be added *alongside*: every test target except the UEFI
+  one boots with QEMU's `-kernel`, which reads an MB1 header, so the binary would have to
+  carry both.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status
+  v1.2.0 gave them. A device larger than about 1 GB is still used only up to that.
+
 ## [1.6.0-beta.1] - 2026-08-29
 
 The terminal stops knowing where the screen is. It has written characters into text-mode

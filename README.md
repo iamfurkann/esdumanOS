@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.6.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.7.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -738,7 +738,10 @@ unattended and so creates both accounts with the password `test`.
 | `grub-mkrescue` | 2.04+ | Bootable ISO creation |
 | `xorriso` | 1.5+ | ISO 9660 filesystem (used by grub-mkrescue) |
 | `mtools` | 4.0+ | FAT filesystem utilities (used by grub-mkrescue) |
+| `grub-efi-amd64-bin` | 2.04+ | The EFI half of the ISO. Without it `grub-mkrescue` still succeeds and quietly produces an image that boots on BIOS only — which every ISO before v1.7.0 was |
+| `ovmf` | any | UEFI firmware, for `make test_kernel_uefi`. Not needed to build |
 | `qemu-system-i386` | 5.0+ | x86 emulation |
+| `qemu-system-x86_64` | 5.0+ | Only for `make test_kernel_uefi`: the firmware is 64-bit even though the kernel is not |
 | `openssl` | 1.1+ | Build-time ELF encryption tooling |
 | `python3` | 3.6+ | Not used by anything in this repository as of v0.9.0; kept in the install commands below because some distributions' GRUB image tooling wants it |
 
@@ -762,7 +765,7 @@ works too but is not required by anything here.
 ```bash
 sudo apt-get update
 sudo apt-get install -y gcc-multilib nasm make qemu-system-x86 \
-    grub-common grub-pc-bin xorriso mtools libssl-dev python3
+    grub-common grub-pc-bin grub-efi-amd64-bin ovmf xorriso mtools libssl-dev python3
 ```
 
 A minimal Debian netinst does not ship everything the build needs. Add
@@ -773,14 +776,14 @@ want a `compile_commands.json` for your editor.
 
 ```bash
 sudo dnf install gcc nasm make qemu-system-x86 \
-    grub2-tools-extra xorriso mtools openssl-devel python3
+    grub2-tools-extra grub2-efi-x64 edk2-ovmf xorriso mtools openssl-devel python3
 ```
 
 **Arch Linux:**
 
 ```bash
 sudo pacman -S gcc nasm make qemu-system-x86 \
-    grub xorriso mtools openssl python
+    grub edk2-ovmf xorriso mtools openssl python
 ```
 
 ### Build Commands
@@ -841,7 +844,7 @@ serves the display over VNC on `:1` — connect to `vnc://<host>:5901` from a ma
 a screen, tunnelling the port over ssh if it is not directly reachable. macOS has a
 client built in, under Finder's *Connect to Server*.
 
-Two alternatives, both real. Copy `esdumanOS-v1.6.0-beta.1.iso` and a disk image to a
+Two alternatives, both real. Copy `esdumanOS-v1.7.0-beta.1.iso` and a disk image to a
 machine with a display and run them there — the build has to happen on the development
 machine but looking at the result does not. Or run `make run_text` and choose the second
 entry in the GRUB menu, which sets `gfxpayload=text`: the kernel finds no framebuffer,
@@ -861,7 +864,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.6.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.7.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display vnc=:1 -k en-us
 ```
 
@@ -896,7 +899,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.6.0-beta.1.iso \
+    -cdrom esdumanOS-v1.7.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -914,6 +917,31 @@ The ISO filename carries the version, and the Makefile derives it from the
 there is no second place to update. Run `make -pn | grep '^ISO ='` if you are not
 sure what the current build produces.
 
+### Booting the way a modern machine boots
+
+As of v1.7.0 the ISO carries an EFI boot path as well as a BIOS one, so it starts
+on a machine whose firmware has no BIOS to fall back to. Under QEMU that needs
+the firmware and the 64-bit binary — the firmware is 64-bit even though the
+kernel is not:
+
+```
+cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/ovmf_vars.fd
+qemu-system-x86_64 -M q35 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/ovmf_vars.fd \
+    -cdrom esdumanOS-v1.7.0-beta.1.iso \
+    -drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+    -serial file:kernel_log_uefi.txt
+```
+
+The variables file has to be a writable copy; the one in `/usr/share` is not. And
+this is the configuration in which all three of the last releases are used at
+once: there is no IDE controller, so the disk arrives through the SATA driver
+v1.5.0 added, found by the bus walk v1.4.0 added, and drawn on a framebuffer by
+the console v1.6.0 added, because UEFI has no text mode to draw on instead.
+
+`make test_kernel_uefi` runs the whole self-test suite through this path.
+
 ### Booting a machine with no IDE controller
 
 Everything above runs on QEMU's default i440fx, which carries a PIIX3 IDE
@@ -924,7 +952,7 @@ undecoded port answers with all ones, which has that bit set — and until v1.5.
 it was a system that could say what was holding its disk and not read it.
 
 ```
-qemu-system-i386 -M q35 -cdrom esdumanOS-v1.6.0-beta.1.iso -boot d \
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.7.0-beta.1.iso -boot d \
     -serial file:kernel_log_q35.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
@@ -1205,6 +1233,12 @@ make test_kernel
 # storage exercises the AHCI driver without an assertion being written for it.
 # It must report the same assertion total as the run above.
 make test_kernel_q35
+
+# The same suite again, this time booted the way a real machine boots it: an ISO,
+# GRUB, UEFI firmware, and a framebuffer console. The only target that does not
+# pass -kernel, and therefore the only one in which a bootloader runs at all.
+# Needs ovmf and grub-efi-amd64-bin; it says so if they are missing.
+make test_kernel_uefi
 
 # Run one module instead of all of them, for iteration
 make test_kernel MODULE=fork
@@ -1857,7 +1891,20 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 - **`/dev/kmsg` keeps one cursor per process, not per open descriptor.** The
   device interface has no per-descriptor state to hang one on, so two descriptors
   in the same program share a read position. Linux keeps one per open.
-- **No ACPI.** Shutdown and reboot use legacy keyboard controller reset.
+- **No ACPI, and on a UEFI machine that is a real limit rather than a tidy one.**
+  Shutdown and reboot go through the legacy keyboard controller. QEMU's q35
+  provides one under UEFI firmware, so both work there; a physical machine of the
+  class this is aimed at may not have an i8042 at all, and there is no second way
+  to power it down.
+- **No Secure Boot.** The EFI image in the ISO is unsigned, so a machine with
+  Secure Boot enabled refuses it. Turning it off in firmware setup is the only
+  answer this release has.
+- **Multiboot 1, and it cannot simply become Multiboot 2.** MB1 carries
+  everything needed so far — the memory map and the framebuffer — and MB2 would
+  add the EFI system table and the ACPI pointer if something ever needs them. It
+  would have to be added *alongside*: the entire test suite except the UEFI target
+  boots with QEMU's `-kernel`, which reads an MB1 header, so the binary would need
+  both.
 - **The console is 80x25 whatever the screen is.** What the framebuffer backend
   decides is how large those cells are drawn: the largest whole-number scale that
   still leaves all of them on the display, centred, with black around it. At
@@ -1948,29 +1995,38 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 ## Roadmap
 
 As of v1.5.0 this is a route rather than a list of wishes, because the
-destination is now close enough to name. **2.0.0 is the release that boots on a
-real machine, from a USB stick.** Everything between here and there exists to
-remove one of the three things that stop it.
+destination is close enough to name. **2.0.0 is the release that boots on a real
+machine, from a USB stick.** Everything between here and there removes one of the
+things that stop it.
 
-The three are independent and all of them are real. The machine boots UEFI and
-this kernel is loaded by GRUB through Multiboot under BIOS. Its screen is a
-framebuffer and `drivers/tty.c` writes characters to `0xB8000`. Its keyboard is
-on USB and `drivers/keyboard.c` reads port `0x60`. Each is true of every machine
-this project has been tested on and false of the machine it is aimed at.
+There were three, and two are gone. The screen was a framebuffer while
+`drivers/tty.c` wrote characters to `0xB8000`; v1.6.0 put a seam between them.
+The machine booted UEFI while this kernel was loaded by GRUB under BIOS; v1.7.0
+shipped an ISO that boots either way. What is left is the keyboard, which is on
+USB while `drivers/keyboard.c` reads port `0x60` — and the storage, since a
+machine booted from a stick has to be able to read the stick.
 
 | Release | What it removes |
 |---------|-----------------|
-| v1.7.0 | **UEFI boot.** GRUB in UEFI mode, Multiboot2 and the memory map that comes with it, and the BIOS assumptions retired. Everything after this is developed on the platform it is aimed at rather than ported to it |
-| v1.8.0 | **A keyboard on a machine with no PS/2 controller.** Multi-page contiguous physical allocation, XHCI, and USB HID. The event ring polled from the timer tick rather than through an IOAPIC that does not exist here |
-| v1.9.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
+| v1.8.0 | **The bus underneath both of those.** XHCI: multi-page contiguous physical allocation, the command and event rings, port enumeration — and `lsusb`, so it arrives with a reader rather than as a layer nothing calls. The event ring polled from the timer tick rather than through an IOAPIC that does not exist here |
+| v1.9.0 | **A keyboard on a machine with no PS/2 controller.** USB HID over the bus above, and a second backend behind the keyboard driver in the same shape the console got in v1.6.0 |
+| v1.10.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
+| v1.11.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
 | v2.0.0 | The machine. Named, as only major versions are |
+
+XHCI is split from the drivers above it deliberately. It is the most complicated
+controller on the platform, it can only be developed against an emulator here,
+and v1.4.0 established what works: bring the bus up with a tool that reads it,
+then write the driver in the release after. PCI arrived with `lspci` and AHCI
+came next; this is the same pair.
 
 **2.0.0 ships as a beta too**, and that was decided along with the rest of this
 table rather than deferred again. Running on hardware is a claim about reach, and
 this project has spent several releases learning that reach and correctness are
 different things — v1.4.0 found a hang that had been in every release ever made,
-and v1.5.0 found a regression test that had been asserting the wrong thing for
-four years. The suffix comes off when somebody decides it should.
+v1.5.0 found a regression test that had been asserting the wrong thing for four
+years, and v1.7.0 found that every ISO ever published booted on BIOS only. The
+suffix comes off when somebody decides it should.
 
 Not on the route, and waiting behind it: `su` with the semantics it claims — it
 takes a username and ignores it, which is a lie rather than a hole, since the
@@ -2016,6 +2072,22 @@ freeze stops numbers from changing meaning and says nothing about adding new one
 `mount` and `umount` take 70 and 71 whenever they are written. That sentence said "68 and
 69" until v1.4.0, having been written before `SETKEY` took 68 and left standing for three
 releases four lines below the paragraph that says `SETKEY` took 68.
+
+UEFI boot left this list in v1.7.0, and it left for one line of configuration.
+The row said the release would need Multiboot2; it needed nothing of the sort.
+GRUB's Multiboot 1 command loads a 32-bit kernel perfectly well from 64-bit EFI
+firmware — what it could not do was set a video mode, because on a BIOS machine
+`grub-mkrescue` builds the video driver into the core image and on UEFI it is a
+separate module. The failure said `no suitable video mode found`, which reads
+like a complaint about the resolution and is GRUB saying it has no video driver
+loaded. `insmod all_video` in `grub.cfg` is the whole of the fix, and no line of
+the kernel changed.
+
+What the release did carry is a build dependency nobody had noticed was missing.
+`grub-mkrescue` succeeds without `grub-efi-amd64-bin` and quietly produces an
+image with no EFI boot path at all — so every ISO this project published before
+v1.7.0 booted on BIOS only, and anyone with a UEFI-only machine could not start
+it.
 
 The screen left this list in v1.6.0, and it left cheaper than the row had
 promised. The terminal is eight hundred lines of scrollback, escape sequences and

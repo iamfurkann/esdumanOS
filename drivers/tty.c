@@ -6,6 +6,13 @@
  */
 #include "tty.h"
 #include "io.h"
+/*
+ * Where the cells go, which this file used to know and no longer does. Six lines
+ * here wrote to text-mode video memory and programmed a hardware cursor; they
+ * were the only thing tying eight hundred lines of terminal to a machine with a
+ * text mode. See include/console.h.
+ */
+#include "console.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -57,7 +64,6 @@ typedef struct {
 
 terminal_state_t terminals[NUM_TERMINALS];
 size_t current_terminal = 0;
-volatile uint16_t* vga_memory = (uint16_t*) 0xC00B8000;
 
 /**
  * @brief Combines foreground and background colors into a VGA color byte.
@@ -80,18 +86,19 @@ static inline uint16_t vga_entry(unsigned char uc, uint8_t color) {
 }
 
 /**
- * @brief Updates the hardware cursor position on the screen.
- * @param x The column index.
- * @param y The row index.
+ * @brief Moves the cursor to a screen position, or hides it.
+ *
+ * The name and the signature are unchanged and eleven callers rely on both. What
+ * changed in v1.6.0 is that this no longer knows how a cursor is moved: in text
+ * mode it is two CRT controller registers, on a framebuffer it is two rows of
+ * pixels painted over the bottom of a cell, and neither of those is the
+ * terminal's business.
+ *
+ * A column of VGA_WIDTH or beyond means "hide", which is how update_screen()
+ * asks for it when the cursor has scrolled out of view.
  */
 void	update_cursor(size_t x, size_t y) {
-	uint16_t pos = y * VGA_WIDTH + x;
-
-	outb(0x3D4, 0x0F);
-	outb(0x3D5, (uint8_t) (pos & 0xFF));
-
-	outb(0x3D4, 0x0E);
-	outb(0x3D5, (uint8_t) ((pos >> 8) & 0xFF));
+	console_set_cursor(x, y);
 }
 
 /**
@@ -111,20 +118,20 @@ void terminal_setcolor(uint8_t fg, uint8_t bg) {
 void draw_status_bar(const char* left, const char* right) {
 	uint8_t color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE);
 
-	for (int x = 0; x < VGA_WIDTH; x++) 
-		vga_memory[x] = vga_entry(' ', color);
+	for (int x = 0; x < VGA_WIDTH; x++)
+		console_put_cell((size_t)x, 0, vga_entry(' ', color));
 
 	// left
 	for (int i = 0; left[i] != '\0'; i++)
-		vga_memory[i] = vga_entry(left[i], color);
-	
+		console_put_cell((size_t)i, 0, vga_entry(left[i], color));
+
 	// right -strlen-
 	int len = 0;
 	while (right[len])
 		len++;
 
 	for (int i = 0; i < len; i++)
-		vga_memory[VGA_WIDTH - len + i] = vga_entry(right[i], color);
+		console_put_cell((size_t)(VGA_WIDTH - len + i), 0, vga_entry(right[i], color));
 }
 
 /*
@@ -178,7 +185,7 @@ void update_screen(void) {
 
 	for (size_t y = 1; y < VGA_HEIGHT; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
-			vga_memory[y * VGA_WIDTH + x] = term->buffer[term->view_offset + (y - 1)][x];
+			console_put_cell(x, y, term->buffer[term->view_offset + (y - 1)][x]);
 		}
 	}
 
@@ -202,6 +209,17 @@ void terminal_switch(size_t term_no) {
 
 /**
  * @brief Initializes all virtual terminals.
+ */
+/*
+ * Deliberately does not choose a console backend.
+ *
+ * This is the obvious place to put that and it is the wrong one, because
+ * SYSCALL_CLEAR_SCREEN calls this function: a backend selected here would be
+ * selected again every time a program ran `clear`, and on a machine booted with
+ * a framebuffer that would drop the console back into text mode mid-session and
+ * freeze the screen. Which backend is right depends on how the machine booted,
+ * which is the boot path's knowledge and not the terminal's. See
+ * drivers/console.c.
  */
 void	terminal_initialize(void) {
 	for (size_t i = 0; i < NUM_TERMINALS; i++) {
@@ -576,7 +594,7 @@ static void terminal_putchar_on(terminal_state_t *term, char c) {
 
 		if (visible && term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
 			size_t screen_y = term->cursor_y - term->view_offset + 1;
-			vga_memory[screen_y * VGA_WIDTH + term->cursor_x] = term->buffer[term->cursor_y][term->cursor_x];
+			console_put_cell(term->cursor_x, screen_y, term->buffer[term->cursor_y][term->cursor_x]);
 			update_cursor(term->cursor_x, screen_y);
 		}
 		return;
@@ -591,7 +609,7 @@ static void terminal_putchar_on(terminal_state_t *term, char c) {
 		
 		if (visible && term->cursor_y >= (size_t)term->view_offset && term->cursor_y < (size_t)(term->view_offset + (VGA_HEIGHT - 1))) {
             size_t screen_y = term->cursor_y - term->view_offset + 1;
-            vga_memory[screen_y * VGA_WIDTH + term->cursor_x] = term->buffer[term->cursor_y][term->cursor_x];
+            console_put_cell(term->cursor_x, screen_y, term->buffer[term->cursor_y][term->cursor_x]);
         }
 		
 		term->cursor_x++;

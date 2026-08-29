@@ -359,7 +359,7 @@ else
     KERNEL_PASS := selftest:$(strip $(MODULE))
 endif
 
-.PHONY: all clean run run_text run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_smap fuzz start
+.PHONY: all clean run run_text run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_kernel_uefi test_smap fuzz start
 
 all: $(ISO)
 
@@ -737,6 +737,76 @@ test_kernel_q35:
 		fi; \
 	fi
 
+# The same suite on the boot path a real machine will actually use.
+#
+# Every other test target passes -kernel, which hands the binary straight to
+# QEMU's own Multiboot loader and skips the bootloader entirely. That is fast and
+# it is the wrong shape for testing a UEFI boot, where the bootloader is the part
+# under test: it has to find the image, load the video driver, set a mode and
+# hand over a framebuffer. None of that is exercised by -kernel.
+#
+# So this one builds an ISO. It cannot reuse the release ISO because the kernel
+# command line has to carry kernel_pass, and on this path the command line comes
+# from grub.cfg rather than from -append - so the configuration is generated with
+# whatever KERNEL_PASS is in effect, which is what keeps MODULE= working here.
+#
+# timeout=0, and that is not a detail. A menu that waits for a keypress makes an
+# unattended run hang until the outer timeout kills it, and the evidence it
+# leaves behind is a screenshot of the menu. That happened during the work that
+# produced this target.
+UEFI_TEST_ISO = esdumanOS-uefi-test.iso
+
+# Where the firmware lives, as a variable because distributions disagree. Debian
+# puts it here; Fedora uses /usr/share/edk2/ovmf/OVMF_CODE.fd.
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
+
+test_kernel_uefi:
+	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+	@test -f $(OVMF_CODE) || { \
+		echo "ERROR: UEFI firmware not found at $(OVMF_CODE)."; \
+		echo "       Install the 'ovmf' package, or set OVMF_CODE and OVMF_VARS."; \
+		exit 1; \
+	}
+	@test -d /usr/lib/grub/x86_64-efi || { \
+		echo "ERROR: grub-mkrescue cannot build an EFI image on this machine."; \
+		echo "       /usr/lib/grub/x86_64-efi is missing; install grub-efi-amd64-bin."; \
+		echo "       Without it the ISO boots on BIOS only and this target is pointless."; \
+		exit 1; \
+	}
+	@echo "--- Running Kernel QEMU Self-Tests under UEFI (booted by GRUB) ---"
+	@rm -rf isodir_uefi
+	@mkdir -p isodir_uefi/boot/grub
+	@cp $(TEST_BIN) isodir_uefi/boot/myos.bin
+	@printf 'set default=0\nset timeout=0\ninsmod all_video\n\nmenuentry "esdumanOS self-test" {\n    multiboot /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > isodir_uefi/boot/grub/grub.cfg
+	@grub-mkrescue -o $(UEFI_TEST_ISO) isodir_uefi > /dev/null 2>&1
+	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
+	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
+	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
+	@cp $(OVMF_VARS) /tmp/esdumanos_ovmf_vars.fd
+	@chmod u+w /tmp/esdumanos_ovmf_vars.fd
+	@if timeout --foreground $(QEMU_TEST_TIMEOUT) qemu-system-x86_64 -M q35 \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=/tmp/esdumanos_ovmf_vars.fd \
+		-cdrom $(UEFI_TEST_ISO) -boot d \
+		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-serial stdio -display none -no-reboot; then \
+		echo "ERROR: QEMU exited unexpectedly!"; exit 1; \
+	else \
+		RET=$$?; \
+		if [ $$RET -eq 33 ]; then \
+			echo "ALL KERNEL TESTS PASSED UNDER UEFI! (booted by GRUB, framebuffer console)"; exit 0; \
+		elif [ $$RET -eq 35 ]; then \
+			echo "KERNEL TESTS FAILED UNDER UEFI! (Some modules did not pass)"; exit 1; \
+		elif [ $$RET -eq 124 ]; then \
+			echo "KERNEL HUNG UNDER UEFI! No verdict within $(QEMU_TEST_TIMEOUT)s."; exit 1; \
+		else \
+			echo "KERNEL PANIC/CRASH UNDER UEFI! (Exit Code: $$RET)"; exit 1; \
+		fi; \
+	fi
+
 # SMAP test target: runs the full self-test suite on a SMAP/SMEP-capable CPU.
 # The default QEMU CPU exposes neither feature, so this is the only configuration
 # in which the uaccess paths are actually enforced by hardware. Gated on the same
@@ -859,10 +929,10 @@ clean:
 	rm -f disk.img kernel_log.txt
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/test_elf_validation tests/host/fuzz_parser
 	rm -f $(BIN) $(TEST_BIN)
-	rm -rf isodir message.txt gizli.txt
+	rm -rf isodir isodir_uefi message.txt gizli.txt
 	# Wildcard, not just $(ISO): a version bump renames the ISO, and the image
 	# built under the previous version would otherwise never be cleaned up.
-	rm -f esdumanOS-v*.iso myos.iso
+	rm -f esdumanOS-v*.iso esdumanOS-uefi-test.iso myos.iso
 
 # =============================================================================
 # Developer Mode Targets

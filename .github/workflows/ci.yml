@@ -29,8 +29,13 @@ jobs:
           sudo apt-get update
           # grub-common provides grub-mkrescue and grub-pc-bin the BIOS modules it
           # needs; without them the "Build Operating System" step cannot make the ISO.
+          #
+          # grub-efi-amd64-bin is the other half, and its absence is invisible:
+          # grub-mkrescue succeeds without it and quietly produces an image that
+          # boots on BIOS only. Every ISO this project published before v1.7.0 was
+          # one of those. ovmf is the firmware the UEFI test step boots under.
           sudo apt-get install -y gcc-multilib clang qemu-system-x86 python3 nasm \
-            mtools xorriso libssl-dev grub-common grub-pc-bin
+            mtools xorriso libssl-dev grub-common grub-pc-bin grub-efi-amd64-bin ovmf
 
       - name: 1. Run Host Unit Tests
         run: make test
@@ -64,13 +69,28 @@ jobs:
         # means some assertion has learned which machine it is on.
         run: make test_kernel_q35
 
-      - name: 6. Kernel Tests with RDRAND
-        # Covers the ENTROPY_OK branch, which step 7 cannot reach: "-cpu max"
+      - name: 6. Kernel Tests under UEFI, booted by GRUB
+        # The only step that does not use -kernel, and therefore the only one in
+        # which a bootloader runs at all. It builds its own ISO because the kernel
+        # command line has to come from grub.cfg on this path, boots it under OVMF,
+        # and the console it draws to is the framebuffer rather than text mode.
+        #
+        # What it protects is not the kernel but the way a real machine reaches it:
+        # the EFI image in the ISO, the video module GRUB needs when there is no
+        # BIOS, and the handover of a framebuffer. None of that is visible to any
+        # other step.
+        #
+        # Same assertion total as steps 4 and 5. A different one would mean an
+        # assertion had learned which machine it was on.
+        run: make test_kernel_uefi
+
+      - name: 7. Kernel Tests with RDRAND
+        # Covers the ENTROPY_OK branch, which step 8 cannot reach: "-cpu max"
         # brings RDRAND *and* SMAP, and under SMAP the kernel-mode modules are
         # skipped. Asking for RDRAND on its own gets there.
         run: make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
 
-      - name: 7. SMAP/SMEP Runtime Test
+      - name: 8. SMAP/SMEP Runtime Test
         # The only configuration where the uaccess rules are enforced by hardware
         # rather than by convention: a supervisor access to user memory that
         # bypasses copy_to_user() faults here instead of silently working.

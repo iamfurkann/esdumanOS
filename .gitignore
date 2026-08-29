@@ -45,6 +45,9 @@ build/
 out/
 dist/
 isodir/
+# Staged by test_kernel_uefi, which builds an ISO of its own because the kernel
+# command line comes from grub.cfg on that path rather than from -append.
+isodir_uefi/
 
 # QEMU
 *.qcow2

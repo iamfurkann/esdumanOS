@@ -4,15 +4,15 @@
 
 | Version  | Supported          |
 | -------- | ------------------ |
-| 1.6.x    | :white_check_mark: |
-| 1.5.x    | :x:                |
-| ≤ 1.4.x  | :x:                |
+| 1.7.x    | :white_check_mark: |
+| 1.6.x    | :x:                |
+| ≤ 1.5.x  | :x:                |
 
 Only the current minor line is supported. This table said 0.4.x for five minor releases
 and then 0.9.x for two more, and then it said 1.2.x through the whole of 1.3 — the
 sentence warning about the habit was four lines long and did not stop it happening again,
 which is why the release checklist now names this file. The line that matters is the
-current one, and it is 1.6.x.
+current one, and it is 1.7.x.
 
 **Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
 release before it encrypted the file system under a key compiled into the kernel image,

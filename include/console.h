@@ -120,4 +120,42 @@ void console_put_cell(size_t x, size_t y, uint16_t entry);
  */
 void console_set_cursor(size_t x, size_t y);
 
+/**
+ * @brief Everything needed to put the console back the way it was found.
+ *
+ * The backend pointer alone is not enough. A caller that installs a framebuffer
+ * of its own overwrites where the real one is, how wide it is and what its shadow
+ * holds, so restoring the pointer would leave the console drawing into somebody
+ * else's buffer. The parameters travel with it.
+ */
+typedef struct {
+    const console_backend_t *backend;
+    void    *base;
+    uint32_t pitch;
+    uint32_t width;
+    uint32_t height;
+    uint8_t  bpp;
+} console_state_t;
+
+/**
+ * @brief Records the current console so console_restore() can undo what follows.
+ *
+ * For a caller that has to change the console to test it. The block layer has
+ * had the same pair since v1.2.0 - blockdev_root() and blockdev_set_root() -
+ * and test_blockdev.c uses them for exactly this.
+ */
+void console_save(console_state_t *out);
+
+/**
+ * @brief Puts back what console_save() recorded.
+ *
+ * A text-mode state is restored by selecting the backend. A framebuffer state
+ * goes back through console_use_framebuffer(), because the shadow and the screen
+ * have to be rebuilt: whatever ran in between drew over both, and a shadow that
+ * disagrees with the screen skips exactly the cells it should redraw.
+ *
+ * @return E_OK, or E_INVAL for a state that was never saved.
+ */
+int console_restore(const console_state_t *in);
+
 #endif // CONSOLE_H

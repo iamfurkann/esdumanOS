@@ -154,6 +154,8 @@ void run_blockdev_tests(void);
 void run_pci_tests(void);
 /** @brief Device memory, and the SATA controller reached through it. */
 void run_ahci_tests(void);
+/** @brief Where the terminal's cells land, in text mode and in pixels. */
+void run_console_tests(void);
 void run_string_tests(void);
 void run_memory_tests(void);
 void run_pipe_tests(void);

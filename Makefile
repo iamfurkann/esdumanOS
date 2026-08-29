@@ -93,6 +93,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_blockdev.c \
             tests/kernel/test_pci.c \
             tests/kernel/test_ahci.c \
+            tests/kernel/test_console.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
             tests/kernel/test_memory.c \
@@ -160,7 +161,37 @@ ifeq ($(ARCH), x86)
     # boot works because a blank disk has no signature yet, which is exactly why
     # this went unnoticed from v0.10.0 until a release whose manual test
     # rebooted with the disk still attached.
-    QEMU_FLAGS = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+    # The display, which stopped being a detail in v1.6.0.
+    #
+    # This was -display curses for every release up to v1.5.0, and curses renders
+    # a text-mode screen as terminal characters - which is exactly what this
+    # kernel stopped producing. Asked for a framebuffer, it draws pixels, and
+    # QEMU's curses front end answers by printing "1024 x 768 Graphic mode" and
+    # nothing else. The kernel is drawing correctly and the front end cannot show
+    # it.
+    #
+    # VNC because the development machine is headless: connect from another
+    # machine over an ssh tunnel. The alternative that needs no client at all is
+    # to copy the ISO and disk image to a machine with a screen and run them
+    # there.
+    #
+    # Bound to the loopback address, which is not the default. A bare "vnc=:1"
+    # listens on every interface with no password on it, so anything that can
+    # reach port 5901 can watch the screen and type into it - including the disk
+    # passphrase prompt. Forcing the connection through
+    #
+    #     ssh -L 5901:localhost:5901 <this machine>
+    #
+    # costs one command and closes that.
+    #
+    # -k en-us is not decoration. VNC sends key symbols rather than scancodes,
+    # and without a keymap QEMU guesses - which is how a passphrase typed into
+    # the unlock prompt arrives as something else.
+    QEMU_DISPLAY ?= -display vnc=127.0.0.1:1 -k en-us
+    QEMU_FLAGS = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk $(QEMU_DISPLAY)
+
+    # What `make run_text` uses. Same image, terminal front end.
+    QEMU_FLAGS_TEXT = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
     
     ARCH_ASM_SRCS = arch/x86/boot/boot.asm \
                 arch/x86/cpu/gdt_s.asm \
@@ -177,6 +208,8 @@ ifeq ($(ARCH), x86)
                 drivers/ata.c \
                 drivers/pci.c \
                 drivers/ahci.c \
+                drivers/console.c \
+                drivers/console_font.c \
                 drivers/rtc.c \
                 drivers/serial.c
 
@@ -326,7 +359,7 @@ else
     KERNEL_PASS := selftest:$(strip $(MODULE))
 endif
 
-.PHONY: all clean run run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_smap fuzz start
+.PHONY: all clean run run_text run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_smap fuzz start
 
 all: $(ISO)
 
@@ -778,7 +811,26 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 	@$(MAKE) $(ISO)
 	@echo "--- [4/4] Preparing disk image and launching QEMU..."
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@echo "    Display: VNC on 127.0.0.1:5901 - tunnel with: ssh -L 5901:localhost:5901 <host>"
 	$(QEMU) $(QEMU_FLAGS)
+
+# The same image in a terminal, for when the screen is not what is being tested.
+#
+# curses cannot draw a framebuffer, so this only shows anything if the machine
+# is in text mode - which means choosing the second entry in the GRUB menu, the
+# one that sets gfxpayload=text. The kernel handles being given a text mode: it
+# finds no linear framebuffer in the Multiboot information and stays on the VGA
+# backend, which is the same path a machine whose bootloader ignores the video
+# request takes.
+#
+# Worth having for two reasons. Most development is not about the display, and a
+# terminal is a great deal less trouble than a VNC client over ssh; and this is
+# the only thing that ever exercises the text-mode fallback outside the test
+# suite.
+run_text:
+	@echo "--- Booting in a terminal. Choose the second GRUB entry (text mode). ---"
+	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	$(QEMU) $(QEMU_FLAGS_TEXT)
 
 clean:
 	# build/ holds every flavour's objects, so one rm covers prod, test and dev -

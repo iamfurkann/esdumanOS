@@ -1,14 +1,39 @@
-MBALIGN  equ 1<<0 
-MEMINFO  equ 1<<1 
-FLAGS    equ MBALIGN | MEMINFO 
-MAGIC    equ 0x1BADB002        
-CHECKSUM equ -(MAGIC + FLAGS)  
+MBALIGN  equ 1<<0
+MEMINFO  equ 1<<1
+VIDEO    equ 1<<2
+FLAGS    equ MBALIGN | MEMINFO | VIDEO
+MAGIC    equ 0x1BADB002
+CHECKSUM equ -(MAGIC + FLAGS)
 
+; Asking the bootloader for a screen made of pixels.
+;
+; VIDEO is what makes this kernel bootable on a machine with no text mode, which
+; is every machine that boots UEFI. GRUB sets the mode before handing over and
+; reports where it put the buffer in the Multiboot information; the kernel maps
+; that and draws glyphs into it. Without the flag the request is never made and
+; the framebuffer fields in the information structure are never filled in.
+;
+; The five zeros are not padding that could be dropped. Multiboot 1 puts its
+; fields at fixed offsets: the load addresses occupy bytes 12 through 31 and the
+; video request begins at byte 32, so reaching the video request means writing
+; the addresses whether or not anything reads them. They are ignored here
+; because bit 16 is clear, which is what tells the bootloader to take the load
+; addresses from the ELF headers instead.
+;
+; 1024x768x32 is a request rather than an instruction. A bootloader is free to
+; answer with something else, or with a text mode, and the kernel uses whatever
+; it is actually given - see console_use_framebuffer(), which picks the largest
+; whole-number glyph scale the answer leaves room for and centres the result.
 section .multiboot
 align 4
         dd MAGIC
         dd FLAGS
         dd CHECKSUM
+        dd 0, 0, 0, 0, 0        ; header_addr .. entry_addr, unused
+        dd 0                    ; mode_type: 0 is a linear graphics mode
+        dd 1024                 ; width
+        dd 768                  ; height
+        dd 32                   ; depth, bits per pixel
 
 section .data
 align 4096

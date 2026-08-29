@@ -173,4 +173,15 @@ void terminal_scroll_up(void);
  * and freeing the top line for output.
  */
 void terminal_scroll_down(void);
+
+/**
+ * @brief Redraws the visible terminal from its cell buffer.
+ *
+ * Declared here as of v1.6.0, because it acquired callers outside tty.c. The
+ * boot path calls it the moment a framebuffer has been mapped, which is what
+ * makes every line printed before that appear at once - the buffer was being
+ * filled the whole time and this is the first chance to draw it.
+ */
+void update_screen(void);
+
 #endif

@@ -31,6 +31,7 @@
  */
 #include "xhci.h"
 #include "pci.h"
+#include "usbkbd.h"
 #include "paging.h"
 #include "pmm.h"
 #include "errno.h"
@@ -69,6 +70,20 @@ static int xhci_scratchpads = 0;
  * to be told about both.
  */
 static int xhci_ready = 0;
+
+/**
+ * @brief Whether the timer tick may touch the event ring.
+ *
+ * Cleared until xhci_init() has finished, and it is the whole defence against
+ * the release's one genuine trap. Enumeration waits on the event ring with
+ * interrupts enabled, so a tick that drained the ring while that was happening
+ * would consume the completion the boot path was waiting for - and the symptom
+ * would be a controller that worked until a line was added to the timer, with
+ * nothing anywhere pointing at the timer.
+ *
+ * One owner at a time: the boot path until it is done, the tick from then on.
+ */
+static int xhci_poll_armed = 0;
 
 /** One frame holding the device context array, the segment table and the
  *  scratchpad array; see the offsets in xhci.h. */
@@ -552,6 +567,14 @@ typedef struct {
     uint32_t             ep0_pcs;
     uint8_t             *desc_buf;
     uint32_t             desc_buf_phys;
+
+    /* The fifth frame, and only for a device that turned out to be a keyboard.
+     * A device that is not one never pays for it. */
+    volatile xhci_trb_t *int_ring;
+    uint32_t             int_ring_phys;
+    uint32_t             int_enqueue;
+    uint32_t             int_pcs;
+    uint8_t              kbd_dci;   /**< Device context index of the endpoint. */
 } xhci_devres_t;
 
 static xhci_device_t devices[XHCI_MAX_DEVICES];
@@ -606,7 +629,17 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
 
     ft_memset(&found, 0, sizeof(found));
     found.total_length = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8));
+    found.config_value = buf[5];
+    found.kbd_iface    = XHCI_NO_IFACE;
 
+    /*
+     * Which interface the walk is currently inside. An endpoint descriptor
+     * belongs to the interface most recently seen above it - that is the whole
+     * of how the two are associated, and it is a fact about the order the bytes
+     * arrive in rather than anything either descriptor states. Finding the
+     * keyboard's endpoint in a second pass would mean reconstructing it.
+     */
+    int in_boot_kbd = 0;
     uint32_t off = 0;
 
     while (off + 2 <= len) {
@@ -634,8 +667,37 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
                 found.iface_protocol = buf[off + 7];
             }
             if (found.interfaces < 0xFF) found.interfaces++;
+
+            /*
+             * Boot protocol, and only boot protocol. A keyboard that offers it
+             * promises a fixed eight-byte report, which is what lets this
+             * kernel read one without parsing a report descriptor. One that
+             * does not is left alone rather than guessed at.
+             *
+             * The first one wins, the way the SATA driver takes the first port
+             * with a disk on it. A machine with two keyboards has one this
+             * kernel types on.
+             */
+            in_boot_kbd = (buf[off + 5] == USB_CLASS_HID &&
+                           buf[off + 6] == USB_SUBCLASS_BOOT &&
+                           buf[off + 7] == USB_PROTOCOL_KEYBOARD &&
+                           found.kbd_iface == XHCI_NO_IFACE);
+
+            if (in_boot_kbd) found.kbd_iface = buf[off + 2];
         } else if (dtype == USB_DESC_ENDPOINT) {
             if (found.endpoints < 0xFF) found.endpoints++;
+
+            /* An interrupt endpoint pointing at the host, inside the interface
+             * found above. Anything else on that interface is not where the
+             * reports come from. */
+            if (in_boot_kbd && dlen >= 7 && found.kbd_ep_addr == 0 &&
+                (buf[off + 2] & USB_EP_DIR_IN) &&
+                (buf[off + 3] & USB_EP_TYPE_MASK) == USB_EP_XFER_INTERRUPT) {
+                found.kbd_ep_addr  = buf[off + 2];
+                found.kbd_mps      = (uint16_t)(buf[off + 4] |
+                                                ((uint16_t)buf[off + 5] << 8));
+                found.kbd_interval = buf[off + 6];
+            }
         }
 
         off += dlen;
@@ -728,10 +790,19 @@ static void ep0_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
  *
  * @return E_OK, or E_IO. On success the bytes are in r->desc_buf.
  */
-static int xhci_control_in(int index, uint8_t request_type, uint8_t request,
-                           uint16_t value, uint16_t windex, uint16_t length) {
+static int xhci_control(int index, uint8_t request_type, uint8_t request,
+                        uint16_t value, uint16_t windex, uint16_t length) {
     xhci_devres_t *r = &devres[index];
     uint8_t slot = devices[index].slot;
+
+    /*
+     * The direction is the request type's to state, not this function's to
+     * assume. v1.9.0 only ever read descriptors and hard-coded IN; configuring
+     * an interface and putting a keyboard into boot protocol are both writes
+     * with no data at all, and a transfer whose stages disagree with its setup
+     * packet is one the controller accepts and never completes.
+     */
+    int dir_in = (request_type & USB_DIR_IN) != 0;
 
     uint32_t setup_lo = (uint32_t)request_type
                       | ((uint32_t)request << 8)
@@ -740,16 +811,23 @@ static int xhci_control_in(int index, uint8_t request_type, uint8_t request,
 
     ep0_push(r, setup_lo, setup_hi, 8,
              XHCI_TRB_SET_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT
-             | (length ? XHCI_TRT_IN : XHCI_TRT_NO_DATA));
+             | (length ? (dir_in ? XHCI_TRT_IN : XHCI_TRT_OUT) : XHCI_TRT_NO_DATA));
 
     if (length) {
         ep0_push(r, r->desc_buf_phys, 0, length,
-                 XHCI_TRB_SET_TYPE(XHCI_TRB_DATA_STAGE) | XHCI_TRB_DIR_IN);
+                 XHCI_TRB_SET_TYPE(XHCI_TRB_DATA_STAGE)
+                 | (dir_in ? XHCI_TRB_DIR_IN : 0));
     }
 
+    /*
+     * A status stage runs opposite to the data stage it follows, and a transfer
+     * with no data stage has no opposite - the specification says its status
+     * stage is IN. So the direction bit is set unless there was an IN data
+     * stage to be the opposite of.
+     */
     ep0_push(r, 0, 0, 0,
              XHCI_TRB_SET_TYPE(XHCI_TRB_STATUS_STAGE) | XHCI_TRB_IOC
-             | (length ? 0 : XHCI_TRB_DIR_IN));
+             | ((length && dir_in) ? 0 : XHCI_TRB_DIR_IN));
 
     /* Doorbell for this slot, target 1: endpoint zero. Doorbell zero belongs to
      * the command ring and every other index is a slot. */
@@ -930,14 +1008,14 @@ static int xhci_enumerate_port(int port) {
      * without it, and eight bytes is the amount that fits in one packet at every
      * size the field can hold.
      */
-    if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+    if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                         (uint16_t)(USB_DESC_DEVICE << 8), 0, 8) != E_OK) {
         return E_IO;
     }
 
     if (xhci_refine_ep0(index, r->desc_buf[7]) != E_OK) return E_IO;
 
-    if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+    if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                         (uint16_t)(USB_DESC_DEVICE << 8), 0,
                         USB_DEVICE_DESC_LEN) != E_OK) {
         return E_IO;
@@ -957,7 +1035,7 @@ static int xhci_enumerate_port(int port) {
      * buffer rather than believed - a device claiming 60000 bytes of descriptors
      * would otherwise be a write past a page.
      */
-    if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+    if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                         (uint16_t)(USB_DESC_CONFIG << 8), 0,
                         USB_CONFIG_DESC_LEN) == E_OK) {
         uint32_t total = (uint32_t)(r->desc_buf[2] | ((uint32_t)r->desc_buf[3] << 8));
@@ -965,7 +1043,7 @@ static int xhci_enumerate_port(int port) {
         if (total > XHCI_DESC_BUF_LEN) total = XHCI_DESC_BUF_LEN;
         if (total < USB_CONFIG_DESC_LEN) total = USB_CONFIG_DESC_LEN;
 
-        if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+        if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                             (uint16_t)(USB_DESC_CONFIG << 8), 0,
                             (uint16_t)total) == E_OK) {
             xhci_parse_config(r->desc_buf, total, &devices[index].config);
@@ -974,6 +1052,226 @@ static int xhci_enumerate_port(int port) {
 
     device_count++;
     return E_OK;
+}
+
+/* ── The keyboard's endpoint ────────────────────────────────────────── */
+
+/** @brief The device holding a slot id, or -1. */
+static int device_for_slot(uint32_t slot) {
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].slot == (uint8_t)slot) return i;
+    }
+    return -1;
+}
+
+/** @brief Puts one TRB on a device's interrupt ring, following the link. */
+static void int_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
+                     uint32_t status, uint32_t control) {
+    if (r->int_enqueue == XHCI_TRBS_PER_SEGMENT - 1) {
+        volatile xhci_trb_t *link = &r->int_ring[r->int_enqueue];
+
+        link->control = (link->control & ~(uint32_t)XHCI_TRB_CYCLE) | r->int_pcs;
+        r->int_enqueue = 0;
+        r->int_pcs ^= 1;
+    }
+
+    volatile xhci_trb_t *t = &r->int_ring[r->int_enqueue];
+
+    t->param_lo = lo;
+    t->param_hi = hi;
+    t->status   = status;
+    t->control  = control | r->int_pcs;
+
+    r->int_enqueue++;
+}
+
+/**
+ * @brief Asks the keyboard for its next report.
+ *
+ * One transfer outstanding at a time, which is all this driver needs: it looks
+ * at the ring once per timer tick, and a keyboard polled every ten milliseconds
+ * has nothing to gain from a second request queued behind the first.
+ */
+static void xhci_queue_report(int index) {
+    xhci_devres_t *r = &devres[index];
+
+    int_push(r, r->desc_buf_phys + XHCI_OFF_REPORT, 0, USBKBD_REPORT_LEN,
+             XHCI_TRB_SET_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_IOC);
+
+    /* An endpoint's doorbell target is its device context index. Zero is the
+     * command ring's and belongs to no slot at all. */
+    mmio_write(db_base + (uint32_t)devices[index].slot * 4, r->kbd_dci);
+}
+
+/**
+ * @brief The interval field, which is not the number the descriptor carries.
+ *
+ * The endpoint context wants an exponent: the period is 2^interval microframes
+ * of 125 microseconds. At high speed and above bInterval is already such an
+ * exponent and is simply one larger. At full and low speed it is a count of
+ * one-millisecond frames, and one millisecond is eight microframes - so the
+ * exponent starts at three and rises with the count.
+ *
+ * Reading bInterval straight into the field would ask a full-speed keyboard
+ * reporting every 10 ms to report every 1.25 microseconds.
+ */
+static uint32_t ep_interval(uint8_t speed, uint8_t binterval) {
+    if (speed == XHCI_SPEED_HIGH || speed == XHCI_SPEED_SUPER ||
+        speed == XHCI_SPEED_SUPER_PLUS) {
+        return binterval > 0 ? (uint32_t)(binterval - 1) : 0;
+    }
+
+    uint32_t frames = binterval > 0 ? binterval : 1;
+    uint32_t exponent = 3;
+
+    while (frames > 1 && exponent < 15) {
+        frames >>= 1;
+        exponent++;
+    }
+    return exponent;
+}
+
+/**
+ * @brief Selects the configuration, opens the interrupt endpoint, starts reads.
+ *
+ * The first boot keyboard on the bus wins and the rest are left alone, which is
+ * the decision the SATA driver makes about ports for the same reason: a system
+ * that types on one keyboard needs one, and choosing between two is a policy
+ * nothing here has an opinion to base on.
+ *
+ * @return E_OK when the keyboard is configured and its first read is queued.
+ */
+static int xhci_open_keyboard(int index) {
+    xhci_device_t *d = &devices[index];
+    xhci_devres_t *r = &devres[index];
+
+    if (d->config.kbd_ep_addr == 0) return E_NODEV;
+    if (usbkbd_attached()) return E_NODEV;
+
+    if (xhci_control(index, 0, USB_REQ_SET_CONFIGURATION,
+                     d->config.config_value, 0, 0) != E_OK) {
+        klog(LOG_LEVEL_WARN, "XHCI", "Keyboard would not accept its configuration.");
+        return E_IO;
+    }
+
+    r->int_ring = (volatile xhci_trb_t *)alloc_dma_page(&r->int_ring_phys);
+    if (r->int_ring == 0) {
+        klog(LOG_LEVEL_ERROR, "XHCI", "Out of memory opening the keyboard endpoint.");
+        return E_NOMEM;
+    }
+
+    volatile xhci_trb_t *link = &r->int_ring[XHCI_TRBS_PER_SEGMENT - 1];
+
+    link->param_lo = r->int_ring_phys;
+    link->param_hi = 0;
+    link->status   = 0;
+    link->control  = XHCI_TRB_SET_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC | XHCI_TRB_CYCLE;
+
+    r->int_enqueue = 0;
+    r->int_pcs = 1;
+
+    /*
+     * The device context index of an IN endpoint is twice its number plus one.
+     * Endpoint zero is 1, endpoint 1 IN is 3, and the even indices are the OUT
+     * halves this driver never opens.
+     */
+    r->kbd_dci = (uint8_t)(USB_EP_NUMBER(d->config.kbd_ep_addr) * 2 + 1);
+
+    /*
+     * The input context still holds what Address Device was given, which is what
+     * the specification wants: the slot context here has to describe the device
+     * as it will be, so it is edited rather than rebuilt. Context Entries rises
+     * to the highest index now in use, and the add flags name the slot and the
+     * one endpoint being opened.
+     */
+    volatile uint32_t *control = ctx_entry(r->in_ctx, 0);
+    volatile uint32_t *slot    = ctx_entry(r->in_ctx, 1);
+    volatile uint32_t *ep      = ctx_entry(r->in_ctx, 1 + r->kbd_dci);
+
+    control[0] = 0;
+    control[1] = XHCI_IN_ADD_SLOT | ((uint32_t)1 << r->kbd_dci);
+
+    slot[0] = (slot[0] & 0x07FFFFFFu) | XHCI_SLOT_CTX_ENTRIES(r->kbd_dci);
+
+    ep[0] = ep_interval(d->speed, d->config.kbd_interval) << 16;
+    ep[1] = XHCI_EP_TYPE(XHCI_EP_TYPE_INT_IN)
+          | XHCI_EP_CERR(3)
+          | XHCI_EP_MAX_PACKET(d->config.kbd_mps);
+    ep[2] = r->int_ring_phys | XHCI_EP_DCS;
+    ep[3] = 0;
+    ep[4] = ((uint32_t)d->config.kbd_mps << 16) | d->config.kbd_mps;
+
+    if (xhci_command(r->in_ctx_phys, 0,
+                     XHCI_TRB_SET_TYPE(XHCI_TRB_CONFIG_EP)
+                     | XHCI_TRB_SET_SLOT(d->slot),
+                     0, "Configure Endpoint never completed.") != E_OK) {
+        return E_IO;
+    }
+
+    /*
+     * Boot protocol, and this is what makes the reports a fixed eight bytes.
+     * Without it a keyboard is in report protocol and its reports have whatever
+     * shape its report descriptor declares - which this kernel does not read.
+     */
+    if (xhci_control(index, USB_REQTYPE_CLASS_IFACE, USB_REQ_SET_PROTOCOL,
+                     USB_PROTOCOL_BOOT, d->config.kbd_iface, 0) != E_OK) {
+        klog(LOG_LEVEL_WARN, "XHCI", "Keyboard would not enter boot protocol.");
+        return E_IO;
+    }
+
+    ft_memset(r->desc_buf + XHCI_OFF_REPORT, 0, USBKBD_REPORT_LEN);
+
+    usbkbd_attach();
+    xhci_queue_report(index);
+
+    printk("[XHCI] USB keyboard on port %d, endpoint %d, every %d ms\n",
+           d->port, USB_EP_NUMBER(d->config.kbd_ep_addr), d->config.kbd_interval);
+    klog_int(LOG_LEVEL_INFO, "XHCI", "USB keyboard configured on port", d->port);
+
+    return E_OK;
+}
+
+void xhci_poll(void) {
+    if (!xhci_poll_armed) return;
+
+    /*
+     * Bounded, and the bound is the interrupt handler's. Everything else in this
+     * driver waits with a deadline because it runs on the boot path; this runs a
+     * hundred times a second inside IRQ0, so it does not wait at all - it takes
+     * what is there, up to a limit, and leaves the rest for the next tick.
+     */
+    for (int drained = 0; drained < XHCI_POLL_MAX_EVENTS; drained++) {
+        volatile xhci_trb_t *ev = xhci_next_event();
+
+        if (ev == 0) return;
+
+        uint32_t type = XHCI_TRB_TYPE(ev->control);
+        uint32_t slot = XHCI_TRB_SLOT(ev->control);
+        uint32_t code = XHCI_TRB_COMPLETION(ev->status);
+
+        xhci_consume_event();
+
+        /* Port status changes still arrive here and are still dropped. This
+         * release does not react to a device appearing, and saying so is better
+         * than a handler that looks like it might. */
+        if (type != XHCI_TRB_TRANSFER_EV) continue;
+
+        int index = device_for_slot(slot);
+
+        if (index < 0 || devres[index].int_ring == 0) continue;
+
+        /*
+         * Success, or a short packet - which is what a keyboard with nothing to
+         * say produces and is not a failure. Anything else means the report did
+         * not arrive, and the read is re-armed without one being handed on: a
+         * stale buffer read as a report would look like keys being released.
+         */
+        if (code == XHCI_COMPLETION_SUCCESS || code == 13) {
+            usbkbd_report(devres[index].desc_buf + XHCI_OFF_REPORT);
+        }
+
+        xhci_queue_report(index);
+    }
 }
 
 /**
@@ -999,6 +1297,14 @@ static void xhci_enumerate(void) {
          * record is corrected from what enumeration learned. */
         port_state[i].speed   = devices[device_count - 1].speed;
         port_state[i].enabled = 1;
+
+        /*
+         * And if it turned out to be a keyboard, open it. A device that is not
+         * one returns E_NODEV here and costs nothing; one that is and then
+         * fails is logged and left enumerated, because a keyboard that would
+         * not configure is still a device worth naming in lsusb.
+         */
+        xhci_open_keyboard(device_count - 1);
     }
 }
 
@@ -1089,6 +1395,7 @@ static const char *xhci_speed_name(uint8_t speed) {
  */
 static int xhci_give_up(int err) {
     xhci_ready = 0;
+    xhci_poll_armed = 0;
     xhci_ports = 0;
     device_count = 0;
     return err;
@@ -1512,14 +1819,22 @@ int xhci_init(void) {
 
     xhci_enumerate();
 
+    /*
+     * And only now may the timer touch the event ring. Everything above waited
+     * on it with interrupts enabled; from here nothing does, and the tick is its
+     * only reader. The flag is the handover.
+     */
+    xhci_poll_armed = 1;
+
     int connected = 0;
 
     for (int i = 0; i < xhci_ports; i++) {
         if (port_state[i].connected) connected++;
     }
 
-    printk("[XHCI] USB controller %02x:%02x.%d: %d ports, %d connected, %d addressed [Polled]\n",
-           dev->bus, dev->device, dev->function, xhci_ports, connected, device_count);
+    printk("[XHCI] USB controller %02x:%02x.%d: %d ports, %d connected, %d addressed, keyboard %s [Polled]\n",
+           dev->bus, dev->device, dev->function, xhci_ports, connected, device_count,
+           usbkbd_attached() ? "yes" : "no");
 
     /*
      * And a record as well as a line on the screen, which is not the same thing.

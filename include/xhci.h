@@ -424,6 +424,28 @@ typedef struct {
  * this release sends are named. */
 #define USB_DIR_IN                0x80
 #define USB_REQ_GET_DESCRIPTOR    0x06
+#define USB_REQ_SET_CONFIGURATION 0x09
+
+/* HID class request, and the request type that carries it: host to device,
+ * class, recipient interface. SET_PROTOCOL with a value of zero is what puts a
+ * keyboard into boot protocol, which is the fixed eight-byte report this kernel
+ * reads and the reason it does not parse a report descriptor. */
+#define USB_REQ_SET_PROTOCOL      0x0B
+#define USB_REQTYPE_CLASS_IFACE   0x21
+#define USB_PROTOCOL_BOOT         0
+
+/* What a HID boot keyboard says it is, at the interface. A device that answers
+ * these three is one whose reports have a shape this kernel can rely on. */
+#define USB_CLASS_HID             0x03
+#define USB_SUBCLASS_BOOT         0x01
+#define USB_PROTOCOL_KEYBOARD     0x01
+
+/* Endpoint descriptor: the direction bit in bEndpointAddress, and the transfer
+ * type in the low two bits of bmAttributes. */
+#define USB_EP_DIR_IN             0x80
+#define USB_EP_NUMBER(addr)       ((addr) & 0x0F)
+#define USB_EP_TYPE_MASK          0x03
+#define USB_EP_XFER_INTERRUPT     0x03
 
 /*
  * There is no SET_ADDRESS here and that is not an omission. On this controller
@@ -468,7 +490,52 @@ typedef struct {
     uint8_t  iface_class;    /**< The first interface's class...             */
     uint8_t  iface_subclass; /**< ...subclass...                             */
     uint8_t  iface_protocol; /**< ...and protocol.                           */
+
+    /**
+     * @brief Which configuration to select, from bConfigurationValue.
+     *
+     * Read rather than assumed to be 1. It usually is, and "usually" is the word
+     * that makes a driver work on the device it was written against.
+     */
+    uint8_t  config_value;
+
+    /*
+     * The boot keyboard, if this device has one. Found during the same walk
+     * rather than by a second pass: an endpoint descriptor belongs to the
+     * interface most recently seen above it, which is a fact about the order the
+     * bytes arrive in and is lost the moment the walk ends.
+     */
+    uint8_t  kbd_iface;      /**< Interface number, or XHCI_NO_IFACE.        */
+    uint8_t  kbd_ep_addr;    /**< bEndpointAddress, 0 when there is none.    */
+    uint8_t  kbd_interval;   /**< bInterval, in the units its speed uses.    */
+    uint16_t kbd_mps;        /**< wMaxPacketSize.                            */
 } xhci_config_info_t;
+
+/** @brief kbd_iface when the device has no boot keyboard interface. */
+#define XHCI_NO_IFACE 0xFF
+
+/**
+ * @brief Where a keyboard's reports land inside the device's descriptor page.
+ *
+ * The same frame, at a different offset, because the two are never wanted at the
+ * same time: descriptors are read during enumeration and reports only once the
+ * endpoint is open. Reusing the page saves a frame per device; the offset rather
+ * than offset zero is so that the reuse is visible in a hex dump instead of
+ * being two things that happen to alias.
+ */
+#define XHCI_OFF_REPORT 0x800
+
+/**
+ * @brief The most events one poll will drain before returning.
+ *
+ * A bound, because xhci_poll() runs in the timer interrupt. A controller
+ * producing events faster than they are consumed - through a fault or through a
+ * device that will not stop - must not be able to hold the interrupt handler
+ * forever; whatever is left waits for the next tick, a hundredth of a second
+ * later. Every unbounded loop this driver has is on the boot path where a
+ * deadline can be enforced, and this is not that path.
+ */
+#define XHCI_POLL_MAX_EVENTS 16
 
 /**
  * @brief One device this driver addressed and asked about itself.
@@ -589,6 +656,27 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
 
 /** @brief Non-zero once the controller is out of reset and not halted. */
 int xhci_running(void);
+
+/**
+ * @brief Drains whatever the controller has finished, and queues the next read.
+ *
+ * Called from the timer interrupt, a hundred times a second, and that placement
+ * is the load-bearing decision in this release rather than a detail.
+ *
+ * It runs in interrupt context, so it blocks on nothing: there is no deadline
+ * loop and no call to xhci_wait() anywhere beneath it. It looks at the event
+ * ring, handles what is there, re-arms the transfer that produced it, and
+ * returns - and when the ring is empty it returns immediately, which is what it
+ * does on ninety-nine ticks out of a hundred.
+ *
+ * It does nothing at all until xhci_init() has finished. During enumeration the
+ * boot path owns the event ring and waits on it with interrupts enabled, so a
+ * tick that helpfully drained the ring would consume the very completion the
+ * boot path was waiting for - and the failure would look like a controller that
+ * stopped working when a line was added to the timer, with nothing pointing at
+ * the timer. One owner at a time, in both periods.
+ */
+void xhci_poll(void);
 
 /**
  * @brief Renders the controller and its ports as text, one port per line.

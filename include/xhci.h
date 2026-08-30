@@ -13,22 +13,26 @@
  * Both of those are USB on the machine this project is aiming at, and this is
  * the controller they arrive through.
  *
- * It is deliberately the smallest driver that brings the bus up and can prove
- * it did: the controller is reset, the device context array and both rings are
- * installed, the ports are powered, and a No Op command is issued and its
- * completion read back off the event ring. Nothing here talks to a device.
- * Enable Slot, Address Device and the control transfers that fetch a descriptor
- * are the next release's, because the first thing that needs them is a keyboard.
+ * v1.8.0 brought the bus up and proved it with a No Op command. v1.9.0 talks to
+ * what is on it: every connected port is reset, its device given a slot and an
+ * address, and asked to describe itself. What comes back is a vendor, a product,
+ * a class and a count of interfaces and endpoints - which is what turns lsusb
+ * from a list of ports into a list of devices.
+ *
+ * It stops there. No interface is selected, no configuration is set, and no
+ * endpoint other than the control one is ever opened, so nothing on this bus can
+ * yet send anything. That is the keyboard's release, and the reason it is
+ * separate is that this file was already 944 lines before any of the above.
  *
  * Four absences, each argued rather than pending.
  *
  * It polls, and it polls inline. The same reason ahci.h gives: the interrupt
  * this controller can raise travels a PCI line to an IOAPIC, and this kernel has
  * no IOAPIC, no ACPI to describe the routing, and an interrupt dispatcher that
- * is a hand-written chain of comparisons in isr.c. The roadmap said the event
- * ring would be polled from the timer tick; nothing in this release needs to be
- * serviced while something else runs, so that hook would have no caller. It
- * arrives with the interrupt endpoint that needs it.
+ * is a hand-written chain of comparisons in isr.c. The roadmap put the event
+ * ring's timer-tick poll in v1.8.0 and it had no caller there; it still has
+ * none, because every transfer here is issued on the boot path and waited for.
+ * It arrives with the interrupt endpoint that needs it.
  *
  * It asks the physical allocator for one frame at a time. The roadmap also said
  * this release needed contiguous multi-frame allocation, and the arithmetic
@@ -86,11 +90,10 @@
 /**
  * @brief The most device slots this driver will enable.
  *
- * Nothing in this release uses a slot - no device is addressed - so this only
- * sizes the device context array. It is written now rather than left at zero
- * because CONFIG.MaxSlotsEn is programmed before the controller runs and a
- * controller told it has no slots is one the next release would have to reset to
- * change its mind about.
+ * This is what CONFIG.MaxSlotsEn is programmed with, and it sizes the device
+ * context array. It is the ceiling on slots the controller will hand out; how
+ * many of them this driver is prepared to follow up on with four frames each is
+ * XHCI_MAX_DEVICES, which is smaller and is the number that actually binds.
  */
 #define XHCI_MAX_SLOTS 32
 
@@ -107,14 +110,31 @@
 #define XHCI_MAX_SCRATCHPAD 64
 
 /**
+ * @brief The most devices this driver will address and describe.
+ *
+ * Four frames go to each one - a device context, an input context, a transfer
+ * ring for endpoint zero and a buffer to read descriptors into - so this is a
+ * memory budget as much as a table size. It is well below XHCI_MAX_SLOTS because
+ * enabling a slot is cheap and addressing a device is not, and nothing in this
+ * kernel yet has a use for more than a keyboard and a stick at once.
+ */
+#define XHCI_MAX_DEVICES 8
+
+/**
  * @brief Buffer the rendered inventory needs, terminator included.
  *
- * Derived from the port table rather than written out, so raising XHCI_MAX_PORTS
- * cannot leave the rendering silently truncated at the old number of lines. The
- * 128 covers the controller's own line and the truncation notice; 48 bytes
- * covers the longest port line this file can produce.
+ * Derived from the tables rather than written out, so raising XHCI_MAX_PORTS or
+ * XHCI_MAX_DEVICES cannot leave the rendering silently truncated at the old
+ * number of lines. 48 bytes covers the longest port line and 72 the longest
+ * device line; the 128 covers the controller's own line and the truncation
+ * notice.
+ *
+ * apps/bin/lsusb.c carries a buffer that has to match this. A short one there is
+ * not a fault - the kernel copies at most what it is given - but it would lose
+ * the end of the list, which is the half somebody running lsusb is least likely
+ * to already know about.
  */
-#define USBINFO_BUF (XHCI_MAX_PORTS * 48 + 128)
+#define USBINFO_BUF (XHCI_MAX_PORTS * 48 + XHCI_MAX_DEVICES * 72 + 128)
 
 /*
  * The PCI identity this driver looks for lives in pci.h with the rest of the
@@ -199,7 +219,30 @@
 #define XHCI_PORTSC_PED   0x00000002  /**< Port enabled. Write 1 disables.*/
 #define XHCI_PORTSC_PR    0x00000010  /**< Port reset.                    */
 #define XHCI_PORTSC_PP    0x00000200  /**< Port power.                    */
+#define XHCI_PORTSC_CSC   0x00020000  /**< Connect status change; W1C.    */
+#define XHCI_PORTSC_PRC   0x00200000  /**< Port reset change; W1C.        */
 #define XHCI_PORTSC_SPEED(v) (((v) >> 10) & 0x0F)
+
+/**
+ * @brief The wait budget for a port reset, in timer ticks.
+ *
+ * Separate from XHCI_TIMEOUT_TICKS and shorter, because a reset that is going to
+ * happen happens in tens of milliseconds and a port with nothing usable behind
+ * it will simply never raise PRC. Enumeration walks every connected port, so a
+ * dead one must not spend the whole general budget before the next is tried.
+ */
+#define XHCI_RESET_TICKS 20
+
+/* The speeds the default speed table assigns, named where the driver has to
+ * branch on them rather than only print them. Endpoint zero's maximum packet
+ * size is decided by this and by nothing else until the device descriptor has
+ * been read - which cannot be read without it, which is why the first read is a
+ * short one. */
+#define XHCI_SPEED_FULL   1
+#define XHCI_SPEED_LOW    2
+#define XHCI_SPEED_HIGH   3
+#define XHCI_SPEED_SUPER  4
+#define XHCI_SPEED_SUPER_PLUS 5
 
 /**
  * @brief The PORTSC bits a read-modify-write must not carry back in.
@@ -233,8 +276,17 @@
 #define XHCI_TRBS_PER_SEGMENT 256
 
 /* The TRB types this driver produces or consumes. */
+#define XHCI_TRB_NORMAL        1
+#define XHCI_TRB_SETUP_STAGE   2
+#define XHCI_TRB_DATA_STAGE    3
+#define XHCI_TRB_STATUS_STAGE  4
 #define XHCI_TRB_LINK          6
+#define XHCI_TRB_ENABLE_SLOT   9
+#define XHCI_TRB_ADDRESS_DEV  11
+#define XHCI_TRB_CONFIG_EP    12
+#define XHCI_TRB_EVAL_CTX     13
 #define XHCI_TRB_NOOP_CMD     23
+#define XHCI_TRB_TRANSFER_EV  32
 #define XHCI_TRB_CMD_COMPLETE 33
 #define XHCI_TRB_PORT_STATUS  34
 
@@ -243,6 +295,32 @@
 
 #define XHCI_TRB_CYCLE 0x00000001  /**< Bit 0 of the control field.       */
 #define XHCI_TRB_TC    0x00000002  /**< Link TRB: toggle cycle.           */
+#define XHCI_TRB_IOC   0x00000020  /**< Interrupt on completion; bit 5.   */
+#define XHCI_TRB_IDT   0x00000040  /**< Immediate data; bit 6.            */
+#define XHCI_TRB_DIR_IN 0x00010000 /**< Data/Status stage: device to host.*/
+
+/* Setup Stage's transfer type, bits 17:16. "No data" is not the same as "in
+ * with zero length", and getting it wrong makes the controller wait for a data
+ * stage that is never queued. */
+#define XHCI_TRT_NO_DATA  0x00000000
+#define XHCI_TRT_OUT      0x00020000
+#define XHCI_TRT_IN       0x00030000
+
+/** @brief The slot a Command Completion Event is about, in its control field. */
+#define XHCI_TRB_SLOT(control) (((control) >> 24) & 0xFF)
+
+/** @brief Puts a slot id into a command TRB's control field. */
+#define XHCI_TRB_SET_SLOT(s)   ((uint32_t)(s) << 24)
+
+/**
+ * @brief Bytes a transfer did not move, out of a Transfer Event's status.
+ *
+ * The field is the *residual*, not the length: a control read of 18 bytes that
+ * moved all 18 reports zero here. Reading it as a length is the mistake it is
+ * shaped to invite, and the one place this driver needs it is deciding whether a
+ * descriptor arrived whole.
+ */
+#define XHCI_TRB_RESIDUAL(status) ((status) & 0x00FFFFFF)
 
 /** @brief The completion code a command that worked reports. */
 #define XHCI_COMPLETION_SUCCESS 1
@@ -275,6 +353,137 @@ typedef struct {
     uint32_t size;      /**< TRBs in the segment, in the low 16 bits. */
     uint32_t reserved;
 } __attribute__((packed)) xhci_erst_entry_t;
+
+/* ── Device and input contexts ──────────────────────────────────────── */
+
+/**
+ * @brief One context entry: a slot context, or an endpoint context.
+ *
+ * Eight doublewords, and that is the whole of the structure. What it is not is
+ * the distance between two of them - see xhci_context_stride().
+ */
+typedef struct {
+    uint32_t dword[8];
+} __attribute__((packed)) xhci_context_t;
+
+/**
+ * @brief Entries in a device context: the slot, then endpoints 1 through 31.
+ *
+ * Endpoint zero is entry 1, because entry 0 is the slot context. The two halves
+ * of an endpoint - in and out - share an entry only for endpoint zero, which is
+ * bidirectional by definition; every other endpoint number has two.
+ */
+#define XHCI_DEV_CTX_ENTRIES   32
+
+/** @brief Entries in an input context: an input control context, then the above. */
+#define XHCI_IN_CTX_ENTRIES    33
+
+/* Slot context, dword 0. */
+#define XHCI_SLOT_SPEED(s)        ((uint32_t)(s) << 20)
+#define XHCI_SLOT_CTX_ENTRIES(n)  ((uint32_t)(n) << 27)
+
+/* Slot context, dword 1: which root hub port the device is on, numbered from 1. */
+#define XHCI_SLOT_ROOT_PORT(p)    ((uint32_t)(p) << 16)
+
+/* Endpoint context, dword 1. */
+#define XHCI_EP_CERR(n)           ((uint32_t)(n) << 1)
+#define XHCI_EP_TYPE(t)           ((uint32_t)(t) << 3)
+#define XHCI_EP_MAX_PACKET(n)     ((uint32_t)(n) << 16)
+
+#define XHCI_EP_TYPE_CONTROL      4
+#define XHCI_EP_TYPE_INT_IN       7
+
+/** @brief Endpoint context dwords 2-3: the ring, with its cycle state in bit 0. */
+#define XHCI_EP_DCS               0x00000001
+
+/* Input control context, dword 1: which entries the command should act on. A0
+ * is the slot context and A1 is endpoint zero, and Address Device wants both. */
+#define XHCI_IN_ADD_SLOT          0x00000001
+#define XHCI_IN_ADD_EP0           0x00000002
+
+/**
+ * @brief Endpoint zero's maximum packet size, before the device has said.
+ *
+ * It is decided by the link speed for every speed but one. A full-speed device
+ * may use 8, 16, 32 or 64 and the only way to find out is to read the first
+ * eight bytes of its device descriptor - which fits in one packet whatever the
+ * answer turns out to be. So endpoint zero is opened at 8, the descriptor's
+ * bMaxPacketSize0 is read, and the endpoint is re-evaluated if it disagrees.
+ *
+ * QEMU's keyboard and mouse are full-speed devices that answer 8, so the
+ * re-evaluation never runs here. It is written because the machine this is aimed
+ * at is full of devices that answer 64.
+ */
+#define XHCI_EP0_MPS_DEFAULT      8
+#define XHCI_EP0_MPS_HIGH        64
+#define XHCI_EP0_MPS_SUPER      512
+
+/* ── USB, above the controller ──────────────────────────────────────── */
+
+/* Setup packet: direction, type and recipient in one byte. Only the two forms
+ * this release sends are named. */
+#define USB_DIR_IN                0x80
+#define USB_REQ_GET_DESCRIPTOR    0x06
+
+/*
+ * There is no SET_ADDRESS here and that is not an omission. On this controller
+ * the Address Device command performs it; a driver that also sent the standard
+ * request would be addressing the device twice.
+ */
+
+#define USB_DESC_DEVICE           1
+#define USB_DESC_CONFIG           2
+#define USB_DESC_INTERFACE        4
+#define USB_DESC_ENDPOINT         5
+
+/** @brief Bytes in a device descriptor, and in a configuration descriptor's head. */
+#define USB_DEVICE_DESC_LEN       18
+#define USB_CONFIG_DESC_LEN        9
+
+/**
+ * @brief The most descriptor bytes this driver will read for one device.
+ *
+ * A configuration descriptor is followed by its interfaces and endpoints, and
+ * the total is whatever wTotalLength says - a number that comes from the device.
+ * It is clamped to this rather than believed.
+ *
+ * Written as 4096 rather than as PAGE_SIZE because this header includes only
+ * types.h and a macro defined in terms of one the header does not guarantee is a
+ * dependency nobody declared. The test module asserts the two are equal, which
+ * is the coupling made visible instead of assumed.
+ */
+#define XHCI_DESC_BUF_LEN         4096
+
+/**
+ * @brief What the walk over a configuration descriptor found.
+ *
+ * Deliberately small. This release reports what is attached; choosing an
+ * interface and an endpoint to talk to is the keyboard's problem, one release
+ * later.
+ */
+typedef struct {
+    uint16_t total_length;   /**< wTotalLength, as the device reported it.   */
+    uint8_t  interfaces;     /**< Interface descriptors seen.                */
+    uint8_t  endpoints;      /**< Endpoint descriptors seen.                 */
+    uint8_t  iface_class;    /**< The first interface's class...             */
+    uint8_t  iface_subclass; /**< ...subclass...                             */
+    uint8_t  iface_protocol; /**< ...and protocol.                           */
+} xhci_config_info_t;
+
+/**
+ * @brief One device this driver addressed and asked about itself.
+ */
+typedef struct {
+    uint8_t  port;           /**< Root hub port, numbered from 1.            */
+    uint8_t  slot;           /**< Slot the controller assigned.              */
+    uint8_t  speed;          /**< PORTSC speed id, valid after the reset.    */
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint8_t  dev_class;      /**< 0 means "look at the interface instead".   */
+    uint8_t  dev_subclass;
+    uint8_t  dev_protocol;
+    xhci_config_info_t config;
+} xhci_device_t;
 
 /*
  * Where each structure sits inside the single frame this driver owns for them.
@@ -331,6 +540,52 @@ int xhci_init(void);
 
 /** @brief Ports the controller reported, capped at XHCI_MAX_PORTS. 0 if none. */
 int xhci_port_count(void);
+
+/** @brief Devices addressed and described at boot, capped at XHCI_MAX_DEVICES. */
+int xhci_device_count(void);
+
+/**
+ * @brief The device at @p index.
+ *
+ * @param index 0 to xhci_device_count() - 1.
+ * @return The entry, or 0 when @p index addresses nothing.
+ */
+const xhci_device_t *xhci_get_device(int index);
+
+/**
+ * @brief The distance between two context entries, in bytes.
+ *
+ * 32 or 64, and it comes out of HCCPARAMS1's CSZ bit rather than out of
+ * sizeof(xhci_context_t). Those two are the same number on every machine this
+ * project can run on and different on plenty it cannot, which is exactly the
+ * shape of the defect ata_identify() hid for thirty-six releases: correct on the
+ * machine it was written against and wrong on the machine it was aimed at.
+ *
+ * A driver that indexed contexts by sizeof() would read every one of them from
+ * the wrong offset on a controller with 64-byte contexts, and QEMU's has 32-byte
+ * ones, so nothing here would ever say so.
+ *
+ * @return 32 or 64; 0 before xhci_init() has read the register.
+ */
+uint32_t xhci_context_stride(void);
+
+/**
+ * @brief Walks a configuration descriptor and reports what is in it.
+ *
+ * Separated from the transfer that fetches it so that it can be driven with a
+ * buffer of one's choosing - the same reason keyboard_handle_scancode() is
+ * separate from the port read above it. Everything it walks came from the
+ * device, including every length it steps by.
+ *
+ * @param buf The bytes as they arrived.
+ * @param len How many of them there are.
+ * @param out Filled in on success; untouched on failure.
+ * @return E_OK, or E_INVAL for a buffer too short to hold a configuration
+ *         descriptor, one whose first descriptor is not a configuration, or one
+ *         carrying a zero length - which is not a malformed value to skip past
+ *         but a walk that would never end.
+ */
+int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out);
 
 /** @brief Non-zero once the controller is out of reset and not halted. */
 int xhci_running(void);

@@ -257,6 +257,59 @@ static void run_inventory_assertions(void) {
  * including the one this machine does not use. That second half is the only
  * thing in the suite that exercises the 64-byte layout at all.
  */
+/**
+ * @brief What a device says endpoint zero's packet size is, and what it means.
+ *
+ * The same shape as the stride assertions below, and for the same reason: the
+ * interesting cases are the ones no machine this project runs on produces. Every
+ * device on the test bench until v1.11.0 was a full-speed keyboard or mouse
+ * answering 8, so the re-evaluation path never ran, and the paragraph above it
+ * saying "only a full-speed device can surprise us here" went nine releases
+ * without the code enforcing it.
+ *
+ * Then a USB stick arrived on a SuperSpeed port. At SuperSpeed bMaxPacketSize0
+ * carries the base-2 logarithm rather than a byte count - 9 means 512 - and the
+ * driver programmed nine. Endpoint zero at nine bytes is not a legal packet size
+ * at any speed; the descriptors read back through it were not descriptors, and
+ * the only symptom anywhere was a disk that never appeared.
+ *
+ * None of this needs a controller, which is the point.
+ */
+static void run_ep0_size_assertions(void) {
+    KTEST_ASSERT(xhci_ep0_size_reported(XHCI_SPEED_FULL, 8)  == 8  &&
+                 xhci_ep0_size_reported(XHCI_SPEED_FULL, 16) == 16 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_FULL, 32) == 32 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_FULL, 64) == 64,
+                 "[STRICT] [XHCI] a full-speed device may name any of the four sizes it is allowed");
+
+    /*
+     * 9 is the value that caused this, and at full speed it is simply illegal.
+     * Refused rather than programmed: endpoint zero is already open at 8, which
+     * every speed permits, so ignoring a bad answer costs throughput and keeps
+     * the device.
+     */
+    KTEST_ASSERT(xhci_ep0_size_reported(XHCI_SPEED_FULL, 9)   == 0 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_FULL, 0)   == 0 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_FULL, 63)  == 0 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_FULL, 255) == 0,
+                 "[STRICT] [XHCI] and a size no device may use is refused rather than programmed");
+
+    KTEST_ASSERT(xhci_ep0_size_reported(XHCI_SPEED_LOW, 8)   == 0 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_HIGH, 64) == 0,
+                 "[STRICT] [XHCI] every other speed fixes the size, so nothing the device says moves it");
+
+    /*
+     * The regression itself. A SuperSpeed device answers 9 and means 512, and
+     * what must not happen is the 9 reaching the endpoint context - so the
+     * answer here is "change nothing", because ep0_packet_size() programmed 512
+     * before the device was ever asked.
+     */
+    KTEST_ASSERT(xhci_ep0_size_reported(XHCI_SPEED_SUPER, 9) == 0 &&
+                 xhci_ep0_size_reported(XHCI_SPEED_SUPER_PLUS, 9) == 0 &&
+                 XHCI_EP0_MPS_SUPER == 512,
+                 "[STRICT] [XHCI] and a SuperSpeed 9 is 512 bytes, which is what it means and not what it says");
+}
+
 static void run_context_assertions(void) {
     KTEST_ASSERT(sizeof(xhci_context_t) == 32,
                  "[STRICT] [XHCI] a context entry is eight doublewords");
@@ -397,6 +450,7 @@ void run_xhci_tests(void) {
     run_layout_assertions();
     run_segment_placement_assertions();
     run_context_assertions();
+    run_ep0_size_assertions();
     run_register_field_assertions();
     run_descriptor_walk_assertions();
     run_lookup_assertions();

@@ -34,6 +34,24 @@
 static int bc_fail_reads = 0;
 static int bc_fail_writes = 0;
 
+/*
+ * Whether the fake device is currently refusing writes.
+ *
+ * A switch rather than an unconditional refusal, because the module has to be
+ * able to get its own sector back out of the cache at the end. It could not:
+ * once the cache started keying a slot on the device as well as the sector - the
+ * whole point of v1.11.0 - the slot dirtied here belongs to this device
+ * permanently, and putting the real disk back no longer sends the flush
+ * anywhere else. The cleanup below flushed to the real root, the write still
+ * arrived at failing_write(), the assertion failed, and the slot stayed dirty
+ * against a device with no storage behind it for the rest of the run.
+ *
+ * E_IO deliberately, and it stays E_IO: this is the transient class, the one the
+ * cache is supposed to keep and retry. Letting the device relent is what proves
+ * that the retry it was holding the sector for actually happens.
+ */
+static int bc_writes_refused = 1;
+
 static int failing_read(void *ctx, uint32_t lba, uint8_t *buf) {
     (void)ctx; (void)lba; (void)buf;
     bc_fail_reads++;
@@ -43,7 +61,7 @@ static int failing_read(void *ctx, uint32_t lba, uint8_t *buf) {
 static int failing_write(void *ctx, uint32_t lba, const uint8_t *buf) {
     (void)ctx; (void)lba; (void)buf;
     bc_fail_writes++;
-    return E_IO;
+    return bc_writes_refused ? E_IO : E_OK;
 }
 
 static blockdev_t failing_dev = {
@@ -79,9 +97,10 @@ static void run_device_failure_assertions(void) {
     blockdev_set_root(&failing_dev);
     bc_fail_reads = 0;
     bc_fail_writes = 0;
+    bc_writes_refused = 1;
 
     ft_memset(buf, 0x5A, sizeof(buf));
-    KTEST_ASSERT(bcache_read_sector(BC_TEST_BASE + 90, buf) == E_IO,
+    KTEST_ASSERT(bcache_read_sector(blockdev_root(), BC_TEST_BASE + 90, buf) == E_IO,
                  "[STRICT] [BCACHE] a read the device refuses is reported, not swallowed");
 
     {
@@ -97,7 +116,7 @@ static void run_device_failure_assertions(void) {
      * The assertion that matters. If the failed read had been cached, this second
      * one would be served from memory and the device would see one read, not two.
      */
-    bcache_read_sector(BC_TEST_BASE + 90, buf);
+    bcache_read_sector(blockdev_root(), BC_TEST_BASE + 90, buf);
     KTEST_ASSERT(bc_fail_reads == 2,
                  "[STRICT] [BCACHE] a failed read is not cached, so the next one asks the device again");
 
@@ -107,7 +126,7 @@ static void run_device_failure_assertions(void) {
      * it again.
      */
     ft_memset(buf, 0x31, sizeof(buf));
-    KTEST_ASSERT(bcache_write_sector(BC_TEST_BASE + 91, buf) == E_OK,
+    KTEST_ASSERT(bcache_write_sector(blockdev_root(), BC_TEST_BASE + 91, buf) == E_OK,
                  "[BCACHE] a write is accepted into the cache without touching the device");
 
     uint32_t dirty_before = bcache_dirty_count();
@@ -117,13 +136,96 @@ static void run_device_failure_assertions(void) {
                  "[STRICT] [BCACHE] and the sector stays dirty, so a later flush tries it again");
 
     /*
-     * Put the real disk back, then get rid of the sector that cannot be written -
-     * it is dirty against a device that no longer exists, and leaving it would
-     * make the next flush anywhere in the suite write it to the real disk.
+     * Let the device relent, and then take the sector back off it.
+     *
+     * This is the retry the cache kept the sector dirty for, so it is worth
+     * asserting rather than just performing: the assertion above says the sector
+     * stayed, and this one says staying was good for something.
+     *
+     * bcache_flush_dev() rather than bcache_flush(), because the slot has to be
+     * dropped as well as written. It is dirty against a fake device with no
+     * storage behind it, and a slot keyed to a blockdev_t that is about to go out
+     * of scope is exactly what that function exists to clear.
      */
+    bc_writes_refused = 0;
+
+    KTEST_ASSERT(bcache_flush_dev(&failing_dev) == E_OK,
+                 "[STRICT] [BCACHE] and the device takes the sector it refused once it relents");
+
+    KTEST_ASSERT(bcache_dirty_count() == 0,
+                 "[STRICT] [BCACHE] leaving nothing of it behind");
+
     blockdev_set_root(saved);
     KTEST_ASSERT(bcache_flush() == E_OK,
-                 "[BCACHE] and the real device takes it once it is back");
+                 "[BCACHE] and the real device is clean with the fake one gone");
+}
+
+/**
+ * @brief A sector the device could never take, and the slot it used to pin.
+ *
+ * The defect this guards was found in v1.11.0 and it was not subtle in effect,
+ * only in cause. A write past the end of a disk is refused by the block layer,
+ * the cache kept the slot dirty so that a later flush could try again, and a
+ * later flush was refused for the identical reason. A slot nothing can write is
+ * also a slot nothing touches, so it settled at the bottom of the LRU order and
+ * every eviction from then on chose it, failed, and returned no slot - which is
+ * the entire cache, stopped, by one sector nobody needed.
+ *
+ * Keeping a refused sector is still right for a device having a bad moment; the
+ * assertions above cover that. What this covers is the other kind, where trying
+ * again cannot ever produce a different answer.
+ */
+static void run_hopeless_write_assertions(void) {
+    blockdev_t *root = blockdev_root();
+    uint8_t buf[512];
+
+    /*
+     * Above the guard rather than below it, so that both paths through this
+     * function make the same number of assertions. bcache_flush() does not need
+     * a root - it writes each slot to the device that slot names - so there is
+     * nothing to move it below.
+     */
+    KTEST_ASSERT(bcache_flush() == E_OK,
+                 "[BCACHE] the cache is clean before the sector that cannot be written");
+
+    if (root == 0) {
+        KTEST_ASSERT(0, "[STRICT] [BCACHE] a sector past the end of the disk is taken by the cache");
+        KTEST_ASSERT(0, "[STRICT] [BCACHE] and the flush that cannot place it says so");
+        KTEST_ASSERT(0, "[STRICT] [BCACHE] but does not keep it, because no later attempt could succeed");
+        KTEST_ASSERT(0, "[STRICT] [BCACHE] and the cache still has slots to give afterwards");
+        return;
+    }
+
+    ft_memset(buf, 0x7E, sizeof(buf));
+
+    /*
+     * Taken, and that is not a bug being tolerated. This is a write-back cache:
+     * it does not know where the device ends and is not the layer that decides.
+     * The failure belongs at the flush, which is where the device is asked.
+     */
+    KTEST_ASSERT(bcache_write_sector(root, root->sector_count + 1, buf) == E_OK,
+                 "[STRICT] [BCACHE] a sector past the end of the disk is taken by the cache");
+
+    KTEST_ASSERT(bcache_flush() == E_IO,
+                 "[STRICT] [BCACHE] and the flush that cannot place it says so");
+
+    KTEST_ASSERT(bcache_dirty_count() == 0,
+                 "[STRICT] [BCACHE] but does not keep it, because no later attempt could succeed");
+
+    /*
+     * The assertion the whole of this exists for. Everything above would still
+     * hold in a cache that had quietly stopped working; this is the one that
+     * fails if the slot was pinned, because a pinned slot is the oldest one and
+     * eviction would hand back nothing.
+     */
+    int served = 1;
+
+    for (int i = 0; i < BCACHE_SIZE + 1; i++) {
+        if (bcache_read_sector(root, (uint32_t)i, buf) != E_OK) { served = 0; break; }
+    }
+
+    KTEST_ASSERT(served,
+                 "[STRICT] [BCACHE] and the cache still has slots to give afterwards");
 }
 
 /**
@@ -157,9 +259,9 @@ void run_bcache_tests(void) {
     // Select a distant sector to minimize risk of overwriting critical filesystem metadata.
     uint32_t test_sector = 1024; 
 
-    bcache_write_sector(test_sector, w_buf);
+    bcache_write_sector(blockdev_root(), test_sector, w_buf);
     
-    bcache_read_sector(test_sector, r_buf);
+    bcache_read_sector(blockdev_root(), test_sector, r_buf);
     
     // Verify that the data retrieved from the cache perfectly matches the initial write buffer.
     int is_match = 1;
@@ -191,7 +293,7 @@ void run_bcache_tests(void) {
     KTEST_ASSERT(!bcache_flush_is_due(),
                  "[BCACHE] a clean cache is never due for a flush");
 
-    bcache_write_sector(BC_TEST_BASE, w_buf);
+    bcache_write_sector(blockdev_root(), BC_TEST_BASE, w_buf);
     KTEST_ASSERT(bcache_dirty_count() == 1,
                  "[BCACHE] one write leaves exactly one dirty sector");
     KTEST_ASSERT(!bcache_flush_is_due(),
@@ -222,7 +324,7 @@ void run_bcache_tests(void) {
      */
     uint32_t peak_dirty = 0;
     for (uint32_t i = 0; i < BCACHE_DIRTY_HIGH_WATER; i++) {
-        bcache_write_sector(BC_TEST_BASE + i, w_buf);
+        bcache_write_sector(blockdev_root(), BC_TEST_BASE + i, w_buf);
         if (bcache_dirty_count() > peak_dirty) peak_dirty = bcache_dirty_count();
     }
     KTEST_ASSERT(bcache_dirty_count() == 0,
@@ -233,4 +335,5 @@ void run_bcache_tests(void) {
                  "[BCACHE] write-behind is a bound, not a flush on every single write");
 
     run_device_failure_assertions();
+    run_hopeless_write_assertions();
 }

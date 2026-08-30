@@ -57,6 +57,8 @@ static const ktest_module_t kernel_modules[] = {
     { "ahci",        run_ahci_tests },
     { "xhci",        run_xhci_tests },
     { "usbkbd",      run_usbkbd_tests },
+    { "usbmsc",      run_usbmsc_tests },
+    { "mount",       run_mount_tests },
     { "console",     run_console_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },

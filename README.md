@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.10.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.11.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -30,7 +30,8 @@
 > number, errno, flag and security level by literal value. It is a promise about the
 > interface, not a claim about the system underneath it: the
 > [Known Limitations](#known-limitations) are the same list they were, one test module is
-> not deterministic, and there is still no `mount`. That is what the `-beta.1` is for.
+> not deterministic, and one file system is mounted at a time. That is what the
+> `-beta.1` is for.
 
 ---
 
@@ -67,7 +68,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 1.10.0-beta.1
+**Version:** 1.11.0-beta.1
 
 esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -568,6 +569,39 @@ types on a real machine is the disk passphrase, at a prompt that is a Ring 0 rea
 the boot path. It would have been unreachable at exactly the moment it is needed, and it
 would have passed every automated test in the tree.
 
+v1.11.0 gives the stick a file system. USB mass storage over the endpoints the
+controller driver opens: Bulk-Only Transport, which is a 31-byte command wrapper
+out, the data, and a 13-byte status wrapper back, with five SCSI commands on top
+of it. Sticks register as `usb0` and `usb1` and deliberately do not become the
+root - the boot order that made v1.5.0 additive is untouched - and `mount` is
+what chooses one. That word is exactly the one `include/blockdev.h` used in
+v1.2.0 when it said the second device would arrive with a caller that had to
+choose between them; nine releases later it did.
+
+Two sticks rather than one, because that is the machine: booting esdumanOS from a
+flash drive and keeping its file system on another means both are plugged in, and
+a driver that took whichever enumerated first would have picked the right disk
+about half the time. And if the disk the machine booted from holds no file system
+this kernel can read, the others get a turn and the one it settles on is named
+out loud - without that, an internal SATA disk carrying somebody else's
+partitions is refused, correctly and untouched, and then there is no `/bin`, so
+no shell, so nowhere to type `mount usb1`. The machine that most needs to be told
+which disk to use was the one that could not be told.
+
+The dangerous part was not the transport. The block cache keyed a slot on the
+sector number alone, which was correct with one disk and silently wrong with two:
+sector 4000 of the root and sector 4000 of the stick would have been one slot,
+and a write-back cache would have eventually flushed it to whichever device the
+code believed it belonged to. A plumbing fault is loud; that one is not, and it
+is what the middle of `tests/kernel/test_mount.c` exists to catch.
+
+The other decision worth recording is how a synchronous read reaches an event
+ring whose only reader runs in the timer interrupt. Waiting for a tick to drain
+it would have worked and cost ten milliseconds a transfer - three transfers to a
+sector, so hours to format a disk. The wait drives the poll itself instead, and
+the poll grew a guard so that a tick landing in the middle of one does not step
+the same dequeue pointer twice.
+
 It remains a development release, intended for developers, OS enthusiasts, and
 anyone curious about kernel internals — not for storing anything you care about.
 
@@ -576,8 +610,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Preemptive multitasking with ELF binary execution
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
-- 21 user-space programs and 34 shell builtins
-- 42 kernel self-test modules and CI pipeline
+- 23 user-space programs and 34 shell builtins
+- 44 kernel self-test modules and CI pipeline
 - Boots on UEFI as well as BIOS, draws to a framebuffer, and types on a USB keyboard
 
 **What to expect:**
@@ -597,7 +631,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 65 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 67 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -629,8 +663,8 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, a disk that cannot be read is refused rather than formatted, and the directory table is checked against its own invariants before it is believed. The directory table and the allocation table are sized from the device at mount, up to 8192 entries and ~1 GB; entries are 96 bytes each, with an owner, a group, permission bits and creation and modification times |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
-| **Block Cache** | 64-slot LRU sector cache, write-back. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()`. A read the device refuses is not cached, and a sector the device will not take stays dirty so a later flush tries it again |
-| **Block Device Layer** | One registered device under the cache, with the sector bounds check in one place rather than in each driver. ATA registers itself at boot; the file system never names it. A driver's errno reaches the file system unchanged, which is what lets the mount path tell a disk it cannot read from a disk with nothing on it |
+| **Block Cache** | 64-slot LRU sector cache, write-back, keyed on the device as well as the sector — without which the same sector number on two disks would be one cached slot, and a write-back cache would eventually flush it to whichever device it thought it belonged to. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()`. A read the device refuses is not cached, and a sector the device will not take stays dirty so a later flush tries it again |
+| **Block Device Layer** | A table of up to four registered devices under the cache, with the sector bounds check in one place rather than in each driver — which matters more with two disks than it did with one, because there are two sector counts to check against and two chances to forget. Devices are found by the name they publish, which is how `mount` is told which one to use, and two may not share one. A driver's errno reaches the file system unchanged, which is what lets the mount path tell a disk it cannot read from a disk with nothing on it |
 | **DevFS** | `/dev/null`, `/dev/random`, `/dev/urandom` and `/dev/kmsg` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically, and `/dev/kmsg` streams log records with a per-process cursor |
 
 ### Drivers
@@ -642,6 +676,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **AHCI (SATA)** | The disk on a machine with no IDE controller. One controller, one port, one command slot, one sector per command, polled rather than interrupt-driven. Registers as a block device exactly as the IDE driver does, so nothing in the file system knows which of the two it is on |
 | **XHCI (USB)** | The bus a machine with no PS/2 controller puts its keyboard on. One controller, one interrupter, one event ring segment, polled. Resets the controller, takes it from the firmware where the firmware is holding it, installs the device context array and both rings, powers the ports and proves the rings work with a No Op command before believing any of it. Then it resets each connected port, gives its device a slot and an address, and reads the device and configuration descriptors — so `lsusb` reports vendors, products and classes rather than only ports. Where one of them is a boot keyboard it selects the configuration, opens the interrupt endpoint and queues a read; the event ring is then drained from the timer tick, a hundred times a second, by a poll that waits on nothing |
 | **USB HID Keyboard** | Boot protocol only, which is what makes a report a fixed eight bytes and means no report descriptor has to be parsed. A report says which keys are held rather than which changed, so each one is read as a difference against the last; a rollover report is dropped whole rather than diffed. HID usages are translated into set-1 scancodes and handed to `keyboard_handle_scancode()`, so the Turkish layout, AltGr, the Ctrl fold, Ctrl-D and the arrow sequences all work on a USB keyboard without one line of the PS/2 driver changing. The first boot keyboard on the bus is the one it types on |
+| **USB Mass Storage** | Up to two sticks, each presented to the file system as a disk. Bulk-Only Transport - a 31-byte command wrapper out, the data, a 13-byte status wrapper back - and five SCSI commands on top of it: enough to learn the device is there, learn how big it is, and move a sector each way. Each stick carries its own transport frame, tag counter and capacity, reached through `blockdev_t`'s `ctx`. They register as `usb0` and `usb1` and are deliberately **not** made the root; the boot order that made v1.5.0 additive is unchanged, and a stick is chosen with `mount` |
 | **PS/2 Keyboard** | IRQ1 handler, US and Turkish layouts, Shift/CapsLock/AltGr, 256-byte ring buffer |
 | **Console** | Two backends behind one seam. VGA text mode writes cells to `0xB8000` and drives the hardware cursor; the framebuffer backend draws each cell as an 8x16 glyph into the linear pixel buffer the bootloader hands over, with a software cursor and a shadow so an unchanged cell is not blitted again. The terminal above them knows about neither |
 | **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management. 80x25 whichever backend is drawing it |
@@ -663,7 +698,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 34 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more; four are deliberately absent from Tab completion and `help`, `panic` among them), four-stage pipelines, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion, line editing with history, and Tab completion that walks its candidates |
-| **Programs** | 21 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown`, `lspci`, `lsusb` |
+| **Programs** | 23 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown`, `lspci`, `lsusb`, `mount`, `umount` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -671,7 +706,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 42 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, xhci, usbkbd, console, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 44 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, xhci, usbkbd, usbmsc, mount, console, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -940,7 +975,7 @@ serves the display over VNC on `:1` — connect to `vnc://<host>:5901` from a ma
 a screen, tunnelling the port over ssh if it is not directly reachable. macOS has a
 client built in, under Finder's *Connect to Server*.
 
-Two alternatives, both real. Copy `esdumanOS-v1.10.0-beta.1.iso` and a disk image to a
+Two alternatives, both real. Copy `esdumanOS-v1.11.0-beta.1.iso` and a disk image to a
 machine with a display and run them there — the build has to happen on the development
 machine but looking at the result does not. Or run `make run_text` and choose the second
 entry in the GRUB menu, which sets `gfxpayload=text`: the kernel finds no framebuffer,
@@ -960,7 +995,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.10.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.11.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display vnc=:1 -k en-us
 ```
 
@@ -995,7 +1030,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.10.0-beta.1.iso \
+    -cdrom esdumanOS-v1.11.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -1025,7 +1060,7 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/ovmf_vars.fd
 qemu-system-x86_64 -M q35 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/tmp/ovmf_vars.fd \
-    -cdrom esdumanOS-v1.10.0-beta.1.iso \
+    -cdrom esdumanOS-v1.11.0-beta.1.iso \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk \
     -serial file:kernel_log_uefi.txt
 ```
@@ -1048,7 +1083,7 @@ undecoded port answers with all ones, which has that bit set — and until v1.5.
 it was a system that could say what was holding its disk and not read it.
 
 ```
-qemu-system-i386 -M q35 -cdrom esdumanOS-v1.10.0-beta.1.iso -boot d \
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.11.0-beta.1.iso -boot d \
     -serial file:kernel_log_q35.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
@@ -1320,7 +1355,7 @@ make test
 # Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 42 kernel-mode modules, then a Ring 3 payload.
+# Boot kernel in self-test mode: 44 kernel-mode modules, then a Ring 3 payload.
 # The machine is i440fx, so the disk is reached through the IDE driver.
 #
 # Every kernel target below also gets an xHCI controller with a USB keyboard and
@@ -1368,10 +1403,12 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
-| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 65 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
+| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 67 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
 | `test_console.c` | Both console backends, against an array in RAM rather than a screen: that the framebuffer info sits where the Multiboot specification puts it, that a glyph is drawn pixel for pixel from the font, that foreground and background come out of the attribute byte, that a byte outside the font is drawn as a fallback box, that a cell the buffer does not have is not drawn at all, that a cell redrawn with what it already holds is skipped and one whose contents changed is not, that the cursor is painted over its cell and taken away again, and that a pixel format the backend cannot draw is refused without changing which backend is current |
 | `test_ahci.c` | Device memory and the SATA driver, asserted so that the same assertions reach the same verdict on a machine that has an AHCI controller and one that does not: the four structures the controller reads out of memory are the sizes it indexes them by and fit one page with every alignment satisfied, a device mapping preserves its offset within the page and carries the cache-disable bit (read back out of the page table, because nothing else can see it), `pci_enable_device()` sets the two bits it is asked for and leaves the rest of the command register alone, and exactly one of the two storage drivers owns the disk — the one the bus says this machine has |
 | `test_xhci.c` | The USB controller, the arithmetic that decided how it is fed, and the bytes the devices on it chose. A TRB and a segment table entry are the sixteen bytes the hardware indexes them by; a ring segment is exactly one page rather than merely smaller than one; the three structures sharing a frame fit it without overlapping and each sits on the 64-byte boundary its register wants; and a frame the allocator actually handed out holds a segment without crossing the 64 KB boundary that is the only placement rule a segment has — which is why `mm/pmm.c` has never been touched for this driver. The context stride is asserted to come from the controller's CSZ bit rather than from `sizeof()`, and the placement is checked at both 32 and 64 bytes, including the one no machine here uses: a device context and an input context each fit a frame at either stride and together do not at 64, which is the whole reason they get a frame each. Then the two register fields that are not where they look — the scratchpad count, whose halves are at 25:21 and 31:27 and are not adjacent, and the PORTSC write mask, which is what stands between a read-modify-write and switching off every working port. Then the walk over a configuration descriptor, driven with buffers made up on the spot: one that parses, one whose descriptor claims zero length and is refused rather than stepped over, one that does not begin with a configuration, and one cut short by the transfer. Then the hardware: a controller found by its programming interface rather than by class, the controller running, a device given a slot and an address and answering with a vendor and a product, and its speed being a named one — which it only is after the port reset this release added |
+| `test_usbmsc.c` | Bulk-Only Transport, and the disk it presents. Half of it is arithmetic about two structures and that half matters more than it looks: a command wrapper is 31 bytes and a status wrapper 13, and those are fields of the protocol rather than properties of the C - a device handed 32 bytes where it expects 31 stalls the endpoint, and the recovery for that is a reset this driver does not implement. So the sizes are asserted, the command block is asserted to start at byte 15, and the two signatures are asserted as the ASCII they are rather than against the constants they are defined as. Then the hardware: a stick was found and registered under the name `mount` uses, it reports a capacity and 512-byte sectors, it is **not** the root - the boot order decides that - a sector reads back through the whole transport, and a sector past the end is refused before the device ever sees it. Then the second stick, which is why this driver has a table at all: both were brought up rather than only the first, each registered under a name and a `ctx` of its own, and **their capacities differ** - the test bench gives the two images deliberately different sizes, because a driver keeping the capacity in a single static would register the second stick with the first one's size and produce a disk that mounts and lies about where it ends |
+| `test_mount.c` | Two disks, and the cache that has to tell them apart. The registry first: a device is findable by the name it published, a name nothing answers to finds nothing, a second device may not take a name already in use, registering the same device twice is simply nothing to do, and one that cannot read is refused at the table rather than at the first mount. Then the assertion this release turns on - the same sector number written on two devices holds two different things, and each reads back what was written to it rather than to the other, which before the cache carried a device would have been one slot and a silent corruption. Then the root moved to another disk, detached entirely as `umount` leaves it, and put back where the suite found it. Before any of the writes, one assertion that the sector they use exists on *both* disks - it did not, once, and a sector past the end of a device leaves a dirty slot the cache can never place, which is not a failed assertion here but an eviction path that stops working for every module after this one |
 | `test_usbkbd.c` | HID boot reports and the scancodes they turn into, almost all of it without a controller, a device or a register read: `usbkbd_report()` is handed eight bytes and told nothing about where they came from, so eight made up here are indistinguishable from eight a keyboard sent. The table is asked directly for a letter, for a navigation key that must carry its prefix or arrive as its keypad twin, for right alt which has to become AltGr or the Turkish layout loses a third of its characters, and for a usage set 1 cannot express — which must translate to nothing rather than to something wrong. Then the diff, which is where the shape of this protocol sets its trap: a report says what is held rather than what changed, so a key present in two reports must be pressed once, and a driver that emitted what it saw would repeat every held key a hundred times a second. A release types nothing and is therefore invisible at the ring, so it is proved through a modifier instead — a shift whose break code went missing would leave every letter after it capitalised. A rollover report is dropped whole and, the assertion that matters, leaves the previous report undisturbed. And one key end to end: Up arrives as the escape sequence xterm sends, through a driver that was never told about USB |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
@@ -1401,7 +1438,7 @@ filtered run proves one module, not the tree.
 | `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
-| `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()` |
+| `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()`. Then what the cache does when the device underneath says no, in both of the two ways it can. A device having a bad moment: the read is reported rather than swallowed, the failed read is not cached so the next one asks again, the write is taken and the failure surfaces at the flush, the sector stays dirty - and then the device relents and the sector it was holding is finally written, which is what keeping it was for. A device that could never have taken it: a sector past the end of the disk is accepted by the cache, reported by the flush, and **dropped**, because no later attempt could answer differently. The last of those is asserted by the cache still handing out slots afterwards, which is the assertion that fails if the slot was pinned - a slot nothing can write is a slot nothing touches, so it sinks to the bottom of the LRU order and takes every later eviction with it |
 | `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall, and the conversions to and from the Unix epoch — checked against each other across sixty years, with the leap rules asserted as rules rather than as dates worked out by hand. Setting the clock too: that a time set reads back as itself, that a leap day is accepted in a leap year and refused otherwise, and that a refused date leaves the clock where it was |
 
 The Ring 3 payload (`tests/user/ktest_user.c`) runs after these and reports its
@@ -1465,6 +1502,7 @@ esdumanOS/
 |   |-- ahci.c                       SATA disk driver (polled, one port)
 |   |-- xhci.c                       USB controller: rings, ports, devices, endpoints
 |   |-- usbkbd.c                     HID boot reports into set-1 scancodes
+|   |-- usbmsc.c                     USB mass storage: Bulk-Only Transport, SCSI
 |   |-- console.c                    Console backends: VGA text and framebuffer
 |   |-- console_font.c               8x16 glyphs, ASCII 32-126
 |   |-- keyboard.c                   PS/2 keyboard (US + Turkish)
@@ -1505,12 +1543,14 @@ esdumanOS/
 |       |-- chown.c                  Change owner and group
 |       |-- lspci.c                  List the PCI devices found at boot
 |       |-- lsusb.c                  List the USB controller and its ports
+|       |-- mount.c                  Choose which block device the file system is on
+|       |-- umount.c                 Unmount the file system
 |       +-- stat.c                   Show a file's size, type, owner, mode and times
 |
-|-- include/                         51 header files
+|-- include/                         52 header files
 |   |-- kernel.h                     Master header, and where the version lives
 |   |-- types.h                      Integer type definitions
-|   |-- syscall.h                    65 syscall number definitions
+|   |-- syscall.h                    67 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
 |   |-- fs.h                         VFS structures, file operations
 |   |-- stat.h                       esd_stat_t and the lseek origins
@@ -1519,7 +1559,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      42 kernel-mode test modules + framework
+|   |-- kernel/                      44 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1538,7 +1578,7 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 65 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 67 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 **These numbers are frozen as of v1.0.0.** None of them will change value or meaning. The
 numbers 11, 28, 30, 31, 32 and 99 are retired and will never be reused — they held calls
@@ -1759,6 +1799,8 @@ for future crypto API" for one release after that stopped being true.*
 | 42 | `GET_ARGS` | Retrieve process command-line arguments |
 | 69 | `PCIINFO` | Render the PCI inventory the kernel took at boot into `ebx`, capacity in `ecx` (root only). Reports what the enumeration recorded; it does not re-read configuration space |
 | 70 | `USBINFO` | Render the USB controller, its ports and the devices addressed on them into `ebx`, capacity in `ecx` (root only). A snapshot taken at boot, like `PCIINFO`: there is no hotplug behind it. A machine with no xHCI controller gets one line saying so and a successful return |
+| 71 | `MOUNT` | Move the file system to the block device named in `ebx` (root only). With `ebx` zero it asks instead of setting: `ecx` is a buffer and `edx` its capacity, and the registered devices are rendered into it with the mounted one marked. **One file system at a time** — this mounts a device *instead of* the current one, which is the choice `include/blockdev.h` said the second device would arrive needing |
+| 72 | `UMOUNT` | Unmount the file system (root only). Flushes and drops what the cache holds for that device, then detaches it. Refused with `E_BUSY` while any process has a file open. Takes no argument, because there is one file system to unmount |
 
 ---
 
@@ -1856,6 +1898,8 @@ The following are known constraints of the current implementation. These are doc
 | PCI functions recorded | 32 (`PCI_MAX_DEVICES`). A machine with more gets the first 32 and a log line saying the list stops there |
 | USB ports recorded | 32 (`XHCI_MAX_PORTS`). A controller with more gets the first 32 and says so in `lsusb` as well as the log |
 | USB devices addressed | 8 (`XHCI_MAX_DEVICES`). Each costs four frames — a device context, an input context, a control transfer ring and a descriptor buffer — so this is a memory budget as much as a table size. A ninth attached device is reported as a connected port with no device line under it |
+| Block devices registered | 4 (`BLOCKDEV_MAX`). An IDE disk, a SATA disk and a stick or two is everything this kernel can currently produce. Two may not share a name, because the name is how `mount` is told which to use |
+| File systems mounted at once | 1. `mount` changes which device carries the file system rather than attaching a second one — holding two means giving every directory id a file system to belong to, and every one of them is a bare `int` that crosses the frozen syscall boundary |
 | USB keyboards driven | 1. The first boot keyboard found wins, the way the SATA driver takes the first port with a disk on it. It costs a fifth frame, for its interrupt transfer ring; the reports themselves land in the descriptor buffer, which enumeration has finished with by then |
 | USB events per timer tick | 16 (`XHCI_POLL_MAX_EVENTS`). The poll runs inside IRQ0, so it takes what is there up to a limit and leaves the rest for the next tick rather than holding the interrupt handler |
 | USB device slots enabled | 32 (`XHCI_MAX_SLOTS`). Nothing uses one yet; the number sizes the device context array, which is programmed before the controller runs |
@@ -1991,15 +2035,45 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   transfers are the hardware's to give and the block interface's to ask for:
   `blockdev_t` reads and writes a sector at a time, and changing that is a
   decision about every driver rather than about this one.
-- **One kind of USB device is driven, and it is the keyboard.** Everything else
-  on the bus is enumerated and named and never spoken to again: a USB stick
-  appears in `lsusb` and is not readable, and a mouse appears and is not a
-  pointer, because this kernel has no pointer. The keyboard is boot protocol
-  only — a fixed eight-byte report, which is what lets the driver skip parsing a
-  report descriptor — and the first one found is the one it types on. There are
-  no LEDs: Caps Lock is tracked inside the kernel and the lamp on the keyboard
-  is never told. The device list is still a snapshot taken at boot, with the same
-  absence of hotplug the PCI inventory has.
+- **Two kinds of USB device are driven: the keyboard and the disk.** A mouse is
+  still enumerated and named and never spoken to, because this kernel has no
+  pointer. The keyboard is boot protocol only — a fixed eight-byte report, which
+  is what lets the driver skip parsing a report descriptor — and the first one
+  found is the one it types on. There are no LEDs: Caps Lock is tracked inside
+  the kernel and the lamp on the keyboard is never told. The device list is still
+  a snapshot taken at boot, with the same absence of hotplug the PCI inventory
+  has.
+- **The USB disk is Bulk-Only Transport and five SCSI commands, and no more.**
+  One logical unit, one command outstanding, one sector per transfer — the shape
+  of `blockdev_t` rather than of the hardware. A device reporting a sector size
+  other than 512 is refused by name rather than read with the wrong arithmetic,
+  which would produce a disk that mounts and is wrong everywhere. A device larger
+  than `READ CAPACITY(10)` can describe is refused too, rather than wrapped. The
+  two other transports the specification defines are not implemented, and there
+  is no reset recovery: a stalled endpoint ends that disk's usefulness until the
+  next boot. Two sticks is the ceiling, and it is a stated number rather than a
+  memory condition found at boot, as every other table here is.
+- **A device behind a USB hub is invisible.** The driver walks the controller's
+  root hub ports and stops there. A hub plugged into one of them enumerates as a
+  device like any other and nothing underneath it is ever reached, so a stick in
+  a hub, a dock, or a monitor's USB ports does not appear — it has to go into a
+  port on the machine itself. Nothing reports this as an error, because from the
+  root hub's side there is no error: there is a device on the port, and it was
+  enumerated.
+- **`mount` on a genuinely blank device formats it.** It is `init_fs()`'s
+  blank-disk path reached through a second caller, and it is how a new stick is
+  made usable — there is no other way to prepare one today. A device that is
+  *not* blank is refused untouched, which is what keeps another operating
+  system's disk safe: a partition table this kernel does not recognise is a disk
+  it will not write to. Whether there is anything there at all is what tells the
+  two cases apart.
+- **One file system is mounted at a time.** `mount` moves it to another device
+  rather than attaching a second one, which is what `include/blockdev.h` asked
+  for in v1.2.0 when it said the next device would arrive with a caller that had
+  to *choose between* them. Holding two at once means giving every directory id a
+  file system to belong to, and every one of them is a bare `int` that crosses
+  the frozen syscall boundary; that is v1.12.0. `umount` leaves the system with
+  no file system at all, which the command says out loud.
 - **The USB keyboard is read from the timer interrupt, not from an interrupt of
   its own.** A hundred polls a second, so a keystroke is seen within ten
   milliseconds of arriving; the controller's own interrupt would need an IOAPIC
@@ -2170,17 +2244,19 @@ shipped an ISO that boots either way. The keyboard was on USB while
 to talk to what is on it, and v1.10.0 opened the endpoint the keys come out of —
 without changing one line of the PS/2 driver.
 
-What is left is not an obstacle in that sense but a requirement: a machine booted
-from a stick has to be able to read the stick, and that is storage rather than
-access. It is the release after this one.
+And the requirement behind them - that a machine booted from a stick be able to
+read the stick - is met as of v1.11.0. What stands between here and 2.0.0 is no
+longer a missing capability but the packaging: one stick that carries both the
+EFI boot path and a file system this kernel can mount. Two sticks work today.
 
 | Release | What it removes |
 |---------|-----------------|
 | ~~v1.8.0~~ | **Done.** The bus underneath both of those. XHCI: the command and event rings, port enumeration, and `lsusb`, so it arrived with a reader rather than as a layer nothing calls |
 | ~~v1.9.0~~ | **Done.** Talking to what is on the bus: port reset, Enable Slot, Address Device, control transfers, descriptors. `lsusb` names devices rather than ports |
 | ~~v1.10.0~~ | **Done.** A keyboard on a machine with no PS/2 controller. HID boot protocol, an interrupt endpoint, and the event ring polled from the timer tick. `drivers/keyboard.c` did not change: it has one line that touches hardware and `keyboard_handle_scancode()` had been the seam for nine releases |
-| v1.11.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
-| v1.12.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
+| ~~v1.11.0~~ | **Done.** The stick as a real disk. USB mass storage, and `mount`/`umount` — the caller `include/blockdev.h` has been waiting for since v1.2.0, in the sense that header actually used: one that *chooses between* devices |
+| v1.12.0 | **Two file systems at once.** The mount above changes which disk carries the one file system; holding two means every directory id needs a file system to belong to, and every one of them is a bare `int` that crosses the frozen syscall boundary. Measured while v1.11.0 was being written: 466 references across `fs/`, `kernel/` and the tests. It is a release of its own and gets one |
+| v1.13.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
 | v2.0.0 | The machine. Named, as only major versions are |
 
 XHCI was split from the drivers above it deliberately, and then split again. It

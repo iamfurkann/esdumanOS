@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "rtc.h"
+#include "blockdev.h"
 
 /**
  * @brief Maximum number of sectors that can be stored in the block cache.
@@ -33,6 +34,22 @@
  * Contains the cached sector data along with metadata for cache eviction and synchronization.
  */
 typedef struct {
+    /**
+     * @brief Which device this sector belongs to.
+     *
+     * Added in v1.11.0, and it is the difference between a cache and a
+     * corruption. Until then a slot was keyed on the sector number alone, which
+     * was correct while there was exactly one disk and silently wrong the moment
+     * there were two: sector 100 of one device and sector 100 of another would
+     * land in the same slot, and the second reader would be handed the first
+     * one's data. Write-back makes it worse than a bad read - the slot is
+     * eventually written out, to whichever device the code thought it belonged
+     * to.
+     *
+     * A pointer rather than an index, so that a slot cannot outlive the meaning
+     * of its key. There is no table position to go stale.
+     */
+    blockdev_t *dev;
     uint32_t sector;      /**< The logical sector number being cached. */
     uint8_t  data[512];   /**< The 512-byte data buffer for the sector. */
     uint32_t last_access; /**< Timestamp of the last access, used for LRU eviction. */
@@ -65,7 +82,7 @@ void bcache_init(void);
  * @param buffer The buffer where the sector data will be copied.
  * @return E_OK, or a negative errno from the device.
  */
-int bcache_read_sector(uint32_t sector, uint8_t *buffer);
+int bcache_read_sector(blockdev_t *dev, uint32_t sector, uint8_t *buffer);
 
 /**
  * @brief Writes data to a cached sector, marking it as dirty.
@@ -80,7 +97,7 @@ int bcache_read_sector(uint32_t sector, uint8_t *buffer);
  * @param buffer The buffer containing the data to write.
  * @return E_OK, or E_IO when no slot could be freed.
  */
-int bcache_write_sector(uint32_t sector, uint8_t *buffer);
+int bcache_write_sector(blockdev_t *dev, uint32_t sector, uint8_t *buffer);
 
 /**
  * @brief Flushes all dirty sectors in the block cache to the underlying physical storage.
@@ -89,10 +106,34 @@ int bcache_write_sector(uint32_t sector, uint8_t *buffer);
  * tries it again. Marking it clean would report success over data that never
  * left RAM and guarantee nothing ever retried it.
  *
+ * The exception is a sector the device could never take - one past the end of
+ * it, or any write to a device with no write handler. Retrying that is not
+ * patience: the slot can never be freed, so it stays the least recently used
+ * one, so every eviction after it picks it and fails, and the cache stops
+ * handing out slots at all. Such a sector is reported, logged by name, and
+ * dropped.
+ *
  * @return E_OK when everything dirty reached the device, E_IO when any sector
- *         did not.
+ *         did not - whether it was kept for a later attempt or given up on.
  */
 int bcache_flush(void);
+
+/**
+ * @brief Writes out and drops every slot belonging to one device.
+ *
+ * What umount() calls. Flushing everything would be correct and would also push
+ * out another mount's dirty sectors for no reason; dropping the slots as well is
+ * the part that matters, because a device that has been unmounted may be
+ * unplugged, and a cached sector of a disk that is no longer there is a sector
+ * nothing can ever reconcile.
+ *
+ * @param dev The device to flush and forget.
+ * @return E_OK, or E_IO when any sector did not reach the device. Slots that
+ *         could not be written are kept dirty rather than dropped - the same
+ *         refusal to forget an unwritten sector that bcache_flush() has, and
+ *         with the same exception for a sector the device could never take.
+ */
+int bcache_flush_dev(blockdev_t *dev);
 
 /**
  * @brief Whether dirty data has been waiting past BCACHE_FLUSH_INTERVAL_TICKS.

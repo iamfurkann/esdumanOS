@@ -5,6 +5,182 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0-beta.1] - 2026-08-31
+
+esdumanOS can read the stick it booted from. That was the requirement standing behind the
+three obstacles v1.6.0, v1.7.0 and v1.10.0 removed - a machine booted from USB has to be
+able to read USB - and it is the last capability 2.0.0 was waiting on. What is left
+between here and there is packaging, not function.
+
+### Added
+
+- **A USB mass storage driver.** Bulk-Only Transport: a 31-byte command wrapper out, the
+  data in whichever direction the command wants, a 13-byte status wrapper back. Five SCSI
+  commands on top of it - TEST UNIT READY, INQUIRY, READ CAPACITY(10), READ(10) and
+  WRITE(10) - which is enough to learn the device is there, learn how big it is, and move
+  a sector each way. Sticks register as `usb0` and `usb1` and are deliberately **not** made
+  the root: the boot path tries IDE, then AHCI only if IDE found nothing, and that order is
+  what made v1.5.0 additive rather than a gamble.
+
+- **Two sticks, not one.** The machine this release is written for has both plugged in -
+  one to boot from, one to keep the file system on - and a driver that took whichever
+  enumerated first would have picked the right disk about half the time. Each stick carries
+  its own transport frame, its own tag counter and its own capacity, reached through
+  `blockdev_t`'s `ctx` field, which had said "Unused by ATA" for nine releases because no
+  driver had ever owned two devices before.
+
+- **A root that is not the disk the machine booted from.** If the boot disk holds no file
+  system this kernel can read, the other registered disks get a turn, in order, and the one
+  it settles on is named out loud. Without it the machine that most needs to be told which
+  disk to use is the one that cannot be: an internal SATA disk with somebody else's
+  partitions on it is refused - correctly, and untouched - and then there is no `/bin`, so
+  no shell, so nowhere to type `mount usb1`. Nothing about the formatting rules changed;
+  `init_fs()` applies to the second device exactly what it applied to the first.
+
+- **`mount` and `umount`, at 71 and 72.** The numbers this table has named as "the next
+  ones" since v1.0.0, three revisions of that sentence ago. They are not POSIX mount:
+  there is one file system at a time and `mount` changes which device carries it, which is
+  the word `include/blockdev.h` used in v1.2.0 when it said the second device would arrive
+  with a caller that had to *choose between* them. `umount` refuses with `E_BUSY` while any
+  process holds a file open, and says out loud that it has left the system with no file
+  system.
+
+- **A block device registry.** Up to four devices, found by the name they publish, and two
+  may not share one - a name is how `mount` is told which disk to use, and a duplicate
+  would make the instruction ambiguous. The bounds check is still in one place, which
+  matters more with two devices than with one: two sector counts to check against is two
+  chances to forget.
+
+- **Bulk endpoints in the xHCI driver**, and one endpoint opener where there were two. The
+  keyboard's interrupt endpoint and the disk's two bulk endpoints differ in three fields
+  and agree on everything else; having the input context, the add flags, the context
+  entries count and the Configure Endpoint command in one place is the difference between
+  one thing to get right and two.
+
+### Changed
+
+- **The block cache carries a device, and that is the release's real hazard.** A slot was
+  keyed on the sector number alone, which was correct while there was one disk and
+  silently wrong the moment there were two: sector 4000 of the root and sector 4000 of the
+  stick would have been one slot, and the second reader would have been handed the first
+  one's data. Write-back makes it worse than a bad read, because the slot is eventually
+  written out - to whichever device the code believed it belonged to. A plumbing fault is
+  loud; this one is not, which is why `tests/kernel/test_mount.c` asserts it directly.
+
+- **A synchronous read reaches an asynchronous ring by driving it.** `blockdev_read()` may
+  not return before the sector arrives, and the event ring's only reader runs in the timer
+  interrupt. Waiting for a tick to drain it would have worked and cost ten milliseconds a
+  transfer - three transfers to a sector, so formatting a disk would have taken hours. The
+  wait calls `xhci_poll()` itself instead, and the poll gained a guard so that a tick
+  landing in the middle of one does not step the same dequeue pointer twice.
+
+- **The cache tells a device that will not take a sector from one that cannot.** It kept
+  every refused write dirty and retried it forever, which is right for a disk having a bad
+  moment and a deadlock for a sector past the end of one: the answer is the same every
+  time, the slot is never freed, and because nothing touches an unwritable slot it settles
+  at the bottom of the LRU order - so every eviction after it picks it, fails, and returns
+  no slot at all. One sector nobody needed stopped the whole cache. A write refused for a
+  reason that describes the request rather than the device is now reported, logged by name
+  once, and dropped.
+
+- **Setting the root and registering a device became two questions.** They were one call
+  until a temporary stand-in - a copy of a device with its write handler removed, which is
+  how the read-only path has been tested since v1.2.0 - collided with the original over a
+  name neither was being looked up by. "Which device does the file system use" and "which
+  devices exist" stopped being the same question the moment `mount` could change the first
+  without changing the second.
+
+### Found in passing
+
+- **A comment stated the rule and the code beside it did not enforce it, for three
+  releases.** `xhci_refine_ep0()` opens endpoint zero at 8, reads `bMaxPacketSize0`, and
+  re-evaluates the endpoint if the device disagrees - and the paragraph above it has said
+  since v1.8.0 that "only a full-speed device can surprise us here: every other speed
+  fixes the size". The code compared the two numbers at every speed. It never mattered,
+  because every device on the test bench was a full-speed keyboard or mouse answering 8,
+  so the comparison was always equal and the function never ran. Attaching a USB stick ran
+  it: QEMU gives it a SuperSpeed port, and at SuperSpeed `bMaxPacketSize0` is not a byte
+  count but its base-2 logarithm - a device using 512-byte packets answers **9**. The
+  driver programmed nine, which is not a legal packet size at any speed. The decision now
+  lives in `xhci_ep0_size_reported()`, where it is asserted without a device at all four
+  speeds, including the ones this project has never met.
+
+- **The test bench changed its own topology, and nothing said so.** Attaching a second
+  stick without naming its port made QEMU insert a **USB hub** and hang that stick off it
+  at port 4.1. This driver walks root hub ports and has never had hub support, so the
+  device it enumerated on that port was the hub: a real device, with a configuration
+  descriptor that parses cleanly and a class that is not mass storage. Four devices
+  connected, four addressed, every descriptor read, no error anywhere - and one disk that
+  simply never appeared. The evidence pointed at the driver for two rounds and the answer
+  was one `port=` on each `-device`. It is worth stating plainly: the thing that finally
+  answered it was asking QEMU what it had built, rather than asking the kernel what it had
+  found.
+
+- **A device the driver could not read looked exactly like a device with nothing on it.**
+  Both configuration-descriptor transfers and the parse that follows them failed into an
+  empty `config` with no line logged anywhere, so a stick whose descriptors came back
+  unreadable was indistinguishable from a mouse. That is the v1.8.0 lesson arriving from
+  the other side - there it was the *successful* path that left no record - and it is why
+  a missing disk cost a debugging round trip that a single WARN would have saved.
+
+- **A test module was updated mechanically and stopped meaning what it said.**
+  `test_bcache.c` installs a device that refuses everything, dirties a sector against it,
+  and takes the sector back at the end. Adding the cache's new device dimension turned
+  every call in that file into the same call with `blockdev_root()` threaded through, which
+  compiled and read correctly and was wrong: the slot now belongs to the fake device
+  permanently, so putting the real disk back no longer sends the flush anywhere else. The
+  cleanup would have failed and left a slot pinned against a device with no storage behind
+  it. The fake device can relent now, which both clears the slot and asserts the retry the
+  cache had been holding it for.
+
+- **The release was re-scoped mid-implementation, and the number is why.** It began as
+  real multi-mount - two file systems at once - and the refactor was estimated at 225
+  references. Measured against the tree it is **466**: `fs/vfs.c` 288, `test_vfs.c` 103,
+  `sys_fs.c` 41, `kernel/core/kernel.c` 22. That is a release of its own and it gets one,
+  v1.12.0. What shipped instead is the mount `blockdev.h` actually asked for, and the two
+  commits already written - the registry and the cache's device dimension - were
+  prerequisites either way, so nothing was spent twice.
+
+### Known issues
+
+- **One file system at a time.** `mount` moves it rather than adding one. Holding two
+  means giving every directory id a file system to belong to, and every one of them is a
+  bare `int` crossing the frozen syscall boundary.
+
+- **One logical unit, one command outstanding, one sector per transfer.** The last of
+  those is the shape of `blockdev_t` rather than of the hardware, and changing it is a
+  decision about every driver rather than about this one.
+
+- **A sector size other than 512 is refused by name**, rather than read with arithmetic
+  that would produce a disk that mounts and is wrong everywhere. So is a device larger
+  than `READ CAPACITY(10)` can describe.
+
+- **No reset recovery.** A stalled bulk endpoint ends that disk's usefulness until the
+  next boot. The two other mass storage transports are not implemented either.
+
+- **A device behind a USB hub is invisible.** The driver walks the controller's root hub
+  ports and stops there; a hub on one of them enumerates as a device and nothing under it
+  is ever reached. On a real machine that means a stick in a hub, a dock or a monitor's
+  ports does not appear - it has to go into a port on the machine itself. This is stated
+  now rather than after v1.11.0 because it is the first release where it can cost somebody
+  a disk instead of a keyboard.
+
+- **Still one stick for booting and one for data.** The hybrid ISO owns the partition
+  table on the disk it is written to, and this file system wants a partition of its own
+  type; making one image carry both is packaging work and belongs to v2.0.0. Two is also
+  the ceiling: `USBMSC_MAX_DISKS` is 2 and the block device table holds four.
+
+- **`mount` on a genuinely blank device formats it.** That is `init_fs()`'s blank-disk path
+  reached through a second caller, and it is deliberate rather than overlooked - it is how
+  a new stick is made usable, and there is no other way to prepare one today. A device that
+  is *not* blank is still refused untouched, which is what keeps another operating system's
+  disk safe: a partition table this kernel does not recognise is a disk it will not write
+  to. The dangerous-sounding case and the safe one are told apart by whether there is
+  anything there at all.
+
+- Still no ACPI, no Secure Boot, and Multiboot 1 still cannot simply become Multiboot 2.
+  `test_time`'s clock round trip is still not deterministic.
+
 ## [1.10.0-beta.1] - 2026-08-30
 
 esdumanOS types on a keyboard that is not plugged into a PS/2 port. That was the third

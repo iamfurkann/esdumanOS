@@ -309,6 +309,15 @@
 /** @brief The slot a Command Completion Event is about, in its control field. */
 #define XHCI_TRB_SLOT(control) (((control) >> 24) & 0xFF)
 
+/**
+ * @brief The endpoint a Transfer Event is about, as its device context index.
+ *
+ * Bits 20:16 of the control field. With one endpoint per device this was not
+ * needed - anything that completed was the keyboard's. With a keyboard and a
+ * disk on the same bus it is the only thing that says which of them finished.
+ */
+#define XHCI_TRB_EP_ID(control) (((control) >> 16) & 0x1F)
+
 /** @brief Puts a slot id into a command TRB's control field. */
 #define XHCI_TRB_SET_SLOT(s)   ((uint32_t)(s) << 24)
 
@@ -385,12 +394,24 @@ typedef struct {
 /* Slot context, dword 1: which root hub port the device is on, numbered from 1. */
 #define XHCI_SLOT_ROOT_PORT(p)    ((uint32_t)(p) << 16)
 
+/* What a USB mass storage device says it is, at the interface: Mass Storage,
+ * SCSI transparent command set, Bulk-Only Transport. All three, because the
+ * transport is what this driver implements and a device offering a different one
+ * is not something it can talk to. */
+#define USB_CLASS_STORAGE         0x08
+#define USB_SUBCLASS_SCSI         0x06
+#define USB_PROTOCOL_BULK_ONLY    0x50
+
+#define USB_EP_XFER_BULK          0x02
+
 /* Endpoint context, dword 1. */
 #define XHCI_EP_CERR(n)           ((uint32_t)(n) << 1)
 #define XHCI_EP_TYPE(t)           ((uint32_t)(t) << 3)
 #define XHCI_EP_MAX_PACKET(n)     ((uint32_t)(n) << 16)
 
 #define XHCI_EP_TYPE_CONTROL      4
+#define XHCI_EP_TYPE_BULK_OUT     2
+#define XHCI_EP_TYPE_BULK_IN      6
 #define XHCI_EP_TYPE_INT_IN       7
 
 /** @brief Endpoint context dwords 2-3: the ring, with its cycle state in bit 0. */
@@ -410,9 +431,13 @@ typedef struct {
  * answer turns out to be. So endpoint zero is opened at 8, the descriptor's
  * bMaxPacketSize0 is read, and the endpoint is re-evaluated if it disagrees.
  *
- * QEMU's keyboard and mouse are full-speed devices that answer 8, so the
- * re-evaluation never runs here. It is written because the machine this is aimed
- * at is full of devices that answer 64.
+ * "QEMU's keyboard and mouse are full-speed devices that answer 8, so the
+ * re-evaluation never runs here" is what this said until v1.11.0, and it stopped
+ * being true the moment a USB stick was attached to the test bench: QEMU gives it
+ * a SuperSpeed port. At SuperSpeed bMaxPacketSize0 is not a byte count but its
+ * base-2 logarithm, so a device using 512-byte packets answers 9 - and a driver
+ * that re-evaluates on any speed but full opens endpoint zero at nine bytes.
+ * xhci_ep0_size_reported() is where that is decided now.
  */
 #define XHCI_EP0_MPS_DEFAULT      8
 #define XHCI_EP0_MPS_HIGH        64
@@ -509,6 +534,17 @@ typedef struct {
     uint8_t  kbd_ep_addr;    /**< bEndpointAddress, 0 when there is none.    */
     uint8_t  kbd_interval;   /**< bInterval, in the units its speed uses.    */
     uint16_t kbd_mps;        /**< wMaxPacketSize.                            */
+
+    /*
+     * And the same for a Bulk-Only mass storage interface. Two endpoints rather
+     * than one, because bulk endpoints are unidirectional and a transport that
+     * sends a command and reads a reply needs both halves.
+     */
+    uint8_t  msc_iface;      /**< Interface number, or XHCI_NO_IFACE.        */
+    uint8_t  msc_in_addr;    /**< Bulk IN endpoint, 0 when there is none.    */
+    uint8_t  msc_out_addr;   /**< Bulk OUT endpoint, 0 when there is none.   */
+    uint16_t msc_in_mps;
+    uint16_t msc_out_mps;
 } xhci_config_info_t;
 
 /** @brief kbd_iface when the device has no boot keyboard interface. */
@@ -677,6 +713,94 @@ int xhci_running(void);
  * the timer. One owner at a time, in both periods.
  */
 void xhci_poll(void);
+
+/**
+ * @brief What endpoint zero's packet size should become, given what a device said.
+ *
+ * Split out of the enumeration so that it can be asserted without a device, which
+ * is the only way the interesting cases are reachable: this project has never met
+ * a full-speed device that answers anything but 8, and until v1.11.0 it had never
+ * enumerated a SuperSpeed one at all. Both of those are ordinary on the machine
+ * this is aimed at, and one of them cost a release.
+ *
+ * @param speed The link speed, as PORTSC reported it.
+ * @param reported bMaxPacketSize0, straight out of the device descriptor.
+ * @return The size to program, or 0 to keep what the speed already fixed - which
+ *         is the answer at every speed but full, and for a full-speed device that
+ *         names a size no device may use.
+ */
+uint32_t xhci_ep0_size_reported(uint8_t speed, uint8_t reported);
+
+/* ── What a device driver above this one may ask ────────────────────── */
+
+/**
+ * @brief The next enumerated Bulk-Only mass storage device after @p after.
+ *
+ * This returned only the first one until v1.11.0, the way the SATA driver takes
+ * the first port with a disk on it. That was a fair reading of "there is a stick"
+ * and the wrong one for the machine this release is aimed at, which has two: the
+ * one the system booted from and the one it is meant to use. Handing back
+ * whichever enumerated first means the answer depends on which port a person
+ * happened to choose, and half the time it is the wrong disk.
+ *
+ * A cursor rather than a count and an index, because a count and an index are two
+ * numbers that can disagree about the same table. Walk it with -1 and stop at -1.
+ *
+ * @param after The last index returned, or -1 to start.
+ * @return The next storage device's index, or -1 when there are no more.
+ */
+int xhci_storage_device_next(int after);
+
+/**
+ * @brief Selects the configuration and opens the device's two bulk endpoints.
+ *
+ * Per device throughout: the rings and the contexts live in devres[index], so
+ * two sticks opened one after the other do not share anything but the
+ * controller.
+ *
+ * @param index A device index from xhci_storage_device_next().
+ * @return E_OK, or a negative errno.
+ */
+int xhci_open_storage(int index);
+
+/**
+ * @brief One bulk transfer, and it does not return until the device answers.
+ *
+ * Synchronous, because the block layer above is: blockdev_read() may not return
+ * before the sector has arrived. That sits awkwardly next to an event ring whose
+ * only reader runs in the timer interrupt, and the way the two are reconciled is
+ * the design decision of this release - the wait calls xhci_poll() itself rather
+ * than waiting for a tick to call it. Waiting for the tick would also work and
+ * would cost ten milliseconds a transfer; a sector is three transfers, so a
+ * format would take hours.
+ *
+ * Must not be called from interrupt context. That is the rule bcache.c already
+ * states about block device handlers - "called from ordinary kernel context and
+ * nowhere else" - and this is the driver that makes it load-bearing.
+ *
+ * @param index Device index.
+ * @param in Non-zero to read from the device, zero to write to it.
+ * @param phys Physical address of the buffer; must be DMA-reachable.
+ * @param len Bytes to move.
+ * @param residual Receives the bytes not moved; may be 0.
+ * @return E_OK, E_IO for a failed or timed-out transfer, E_INVAL for a device
+ *         with no bulk endpoints open.
+ */
+int xhci_bulk_transfer(int index, int in, uint32_t phys, uint32_t len,
+                       uint32_t *residual);
+
+/**
+ * @brief One frame of DMA-reachable memory, mapped uncached.
+ *
+ * Exposed so that a driver above this one does not have to repeat the
+ * pmm_alloc_frame() and vmm_map_device() pair, and more importantly so that it
+ * cannot get the caching flags wrong: a buffer a device reads that the CPU left
+ * in a dirty line is a buffer the device never sees.
+ *
+ * @param phys_out Receives the physical address to hand the controller.
+ * @return The mapped address, or 0.
+ */
+uint8_t *xhci_dma_page(uint32_t *phys_out);
 
 /**
  * @brief Renders the controller and its ports as text, one port per line.

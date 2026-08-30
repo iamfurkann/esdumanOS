@@ -10,15 +10,16 @@
  * reading of it held this release up for two minor versions: no number already
  * assigned here changes its value, changes its meaning, or is given to a
  * different call. It does not mean the table is closed. New calls may be added,
- * and mount()/umount() are expected to be the next ones.
+ * and mount()/umount() finally were, in v1.11.0 - after being named here as "the
+ * next ones" through eleven releases.
  *
  * Three rules follow from that, and they are the whole of the contract:
  *
  *   1. New calls continue from the highest assigned number, not from the lowest
  *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0,
- *      SYSCALL_PCIINFO took 69 in v1.4.0 and SYSCALL_USBINFO took 70 in v1.8.0,
- *      which is the rule working rather than an exception to it, and the next
- *      call takes 71.
+ *      SYSCALL_PCIINFO took 69 in v1.4.0, SYSCALL_USBINFO took 70 in v1.8.0 and
+ *      mount()/umount() took 71 and 72 in v1.11.0, which is the rule working
+ *      rather than an exception to it, and the next call takes 73.
  *
  *   2. The holes are never filled. 11 (CAT_FILE) and 28 (LS_DIR) held calls that
  *      were removed; 30, 31 and 32 were reserved for a crypto API that was never
@@ -512,13 +513,48 @@
  * larger thing to defend than one that reads a table, and nothing here can plug
  * a device in anyway. A snapshot is what this is, and hotplug is not in it.
  *
- * mount() and umount(), which the ABI comment at the top of this file has been
- * promising since v1.0.0, take 71 and 72 when they are written. That sentence
- * said 68 and 69 in v1.0.0, 70 and 71 from v1.4.0, and it will keep moving every
- * time a call is written before them - which is the rule working, and the reason
- * test_abi.c asserts the frontier by literal value rather than trusting prose.
+ * mount() and umount() took 71 and 72 in v1.11.0, which is where that sentence
+ * finally stopped moving. It said 68 and 69 in v1.0.0, 70 and 71 from v1.4.0 and
+ * 71 and 72 from v1.8.0 - three revisions of a promise about numbers nobody had
+ * spent yet, which is the reason test_abi.c asserts the frontier by literal
+ * value rather than trusting prose.
  */
 #define SYSCALL_USBINFO         70
+
+/**
+ * @brief Mount a registered block device, or report what is mounted.
+ *
+ * ebx is the device name - "ata0", "sata0", "usb0" - and the file system is
+ * unmounted, the cache flushed, and the named device mounted in its place.
+ *
+ * With ebx zero it asks instead of setting: ecx is a buffer and edx its
+ * capacity, and the registered devices are rendered into it one per line with
+ * the mounted one marked. Two behaviours in one call because they are two
+ * questions about one thing, and because a diagnostic does not earn a number of
+ * its own while mount() and umount() are still spending the two this table has
+ * been promising since v1.0.0.
+ *
+ * Root only, through the same check every other call that reaches storage uses.
+ *
+ * **One file system at a time.** This mounts a device *instead of* the current
+ * one rather than *as well as* it - which is the word blockdev.h used in v1.2.0
+ * when it said the next device would arrive with a caller that had to choose
+ * between them. Holding two at once means giving every directory id a file
+ * system to belong to, and that is v1.12.0.
+ */
+#define SYSCALL_MOUNT           71
+
+/**
+ * @brief Unmount the current file system.
+ *
+ * Flushes what the cache is holding for that device, drops those slots, and
+ * detaches it. Refused with E_BUSY while any process has a file open: an
+ * unmount that left descriptors pointing at a device nobody is reading is a
+ * descriptor whose next read is somebody else's disk.
+ *
+ * Root only. Takes no arguments, because there is one file system to unmount.
+ */
+#define SYSCALL_UMOUNT          72
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

@@ -175,6 +175,16 @@ int main() {
     run_static_test("apps/bin/lsusb.c", "syscall(4,", "lsusb.c -> Uses SYSCALL_WRITE (4) to emit what the kernel rendered", &fail_count);
     run_static_test("apps/bin/lsusb.c", "syscall(1,", "lsusb.c -> Uses SYSCALL_EXIT (1)", &fail_count);
 
+    // mount.c tests
+    run_static_test("apps/bin/mount.c", "syscall(71,", "mount.c -> Uses SYSCALL_MOUNT (71)", &fail_count);
+    run_static_test("apps/bin/mount.c", "syscall(42,", "mount.c -> Uses SYSCALL_GET_ARGS (42) to read the device name", &fail_count);
+    run_static_test("apps/bin/mount.c", "syscall(4,", "mount.c -> Uses SYSCALL_WRITE (4) to emit what the kernel rendered", &fail_count);
+    run_static_test("apps/bin/mount.c", "syscall(1,", "mount.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
+    // umount.c tests
+    run_static_test("apps/bin/umount.c", "syscall(72,", "umount.c -> Uses SYSCALL_UMOUNT (72)", &fail_count);
+    run_static_test("apps/bin/umount.c", "syscall(1,", "umount.c -> Uses SYSCALL_EXIT (1)", &fail_count);
+
     // whoami.c tests
     run_static_test("apps/bin/whoami.c", "syscall(43,", "whoami.c -> Uses SYSCALL_GETUID (43)", &fail_count);
     run_static_test("apps/bin/whoami.c", "syscall(1,", "whoami.c -> Uses SYSCALL_EXIT (1)", &fail_count);

@@ -40,6 +40,7 @@ CORE_SRCS = kernel/core/kernel.c \
 			kernel/syscall/sys_ipc.c \
 			kernel/syscall/sys_mem.c \
 			kernel/syscall/sys_process.c \
+			kernel/syscall/sys_mount.c \
 			kernel/syscall/sys_sec.c \
 			kernel/syscall/sys_utils.c \
 			kernel/security/passwd.c \
@@ -68,6 +69,8 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/chown_elf_data.c \
 			src/resources/lspci_elf_data.c \
 			src/resources/lsusb_elf_data.c \
+			src/resources/mount_elf_data.c \
+			src/resources/umount_elf_data.c \
 			drivers/blockdev.c \
 			fs/bcache.c \
             fs/vfs.c \
@@ -96,6 +99,8 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_ahci.c \
             tests/kernel/test_xhci.c \
             tests/kernel/test_usbkbd.c \
+            tests/kernel/test_usbmsc.c \
+            tests/kernel/test_mount.c \
             tests/kernel/test_console.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
@@ -201,12 +206,29 @@ ifeq ($(ARCH), x86)
     #
     # No usb-kbd, and that is the whole reason this is a second variable rather
     # than QEMU_TEST_USB reused. QEMU delivers key events to the most recently
-    # added keyboard, so attaching a USB one here would route every keystroke to
-    # a device this kernel cannot read yet - the PS/2 driver would go quiet and
-    # the machine would look hung at the login prompt. It belongs here in v1.9.0,
-    # which is the release that can read it. The test targets have it because
-    # nothing types at them: they run with -display none.
-    QEMU_USB = -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0
+    # added keyboard, so attaching a USB one here routes every keystroke to it
+    # and away from the PS/2 driver. v1.10.0 can read a USB keyboard, so that is
+    # no longer a machine that looks hung - but it is still one where a person
+    # typing a passphrase is exercising one keyboard path and not the other, and
+    # an interactive run is the only place the PS/2 path is ever driven by hand.
+    # The test targets take the USB keyboard because nothing types at them: they
+    # run with -display none.
+    #
+    # Two sticks, and they are what makes `mount` demonstrable by hand: this is
+    # the release where a person can list two disks, move the file system to one
+    # of them and back, and the images have existed since v1.11.0 with nothing
+    # attached to them.
+    #
+    # The ports are named here for the same reason they are named on the test
+    # bench, and the roles keep the same numbers so that "usb0 is on port 3"
+    # reads the same in an interactive log as in a test one. Without them QEMU
+    # inserts a hub and puts the second stick behind it, where this driver
+    # cannot see it.
+    QEMU_USB = -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0,port=2 \
+               -drive id=usbstick,if=none,format=raw,file=usb.img \
+               -device usb-storage,drive=usbstick,bus=xhci.0,port=3 \
+               -drive id=usbstick2,if=none,format=raw,file=usb2.img \
+               -device usb-storage,drive=usbstick2,bus=xhci.0,port=4
 
     QEMU_FLAGS = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk $(QEMU_USB) $(QEMU_DISPLAY)
 
@@ -230,6 +252,7 @@ ifeq ($(ARCH), x86)
                 drivers/ahci.c \
                 drivers/xhci.c \
                 drivers/usbkbd.c \
+                drivers/usbmsc.c \
                 drivers/console.c \
                 drivers/console_font.c \
                 drivers/rtc.c \
@@ -383,12 +406,37 @@ QEMU_TEST_CPU ?=
 # silently not this one. This is the same lesson the q35 target's drive line
 # carries: name the thing you mean.
 #
-# A keyboard and a mouse, and no usb-storage. Two devices are enough to prove two
-# ports come up connected, and they need no backing image; usb-storage would need
-# a drive built per target for a driver that does not exist until v1.10.0.
+# A keyboard, a mouse, and two sticks.
+#
+# Two sticks rather than one, because "two sticks" is the machine v1.11.0 is
+# written for - one to boot from and one to keep the file system on - and one
+# stick cannot tell a driver that drives all of them from a driver that drives
+# the first one it finds. Both spellings pass with a single stick attached.
+#
+# Their sizes are deliberately different, and that is the assertion rather than
+# decoration: a driver that kept the capacity in a single static would register
+# the second stick with the first one's size, and a disk that reports the wrong
+# end is one that mounts, reads the sectors it has, and returns nothing for the
+# rest. Two identical images would let that through.
+#
+# Every device names its port, and that is not tidiness either. Left to choose,
+# QEMU put the keyboard, the mouse and the first stick on root ports and then
+# quietly inserted a **USB hub** and hung the second stick off it at port 4.1.
+# This driver walks root hub ports and has never had hub support, so what it
+# enumerated on that port was the hub - a real device with a config descriptor
+# that parses cleanly and a class that is not mass storage. Four devices
+# connected, four addressed, no error anywhere, and one stick missing.
+#
+# `port=` keeps all four on the root hub. It also puts both sticks at SuperSpeed,
+# which is worth knowing: it makes this the first bench in the project's history
+# where the SuperSpeed path is exercised at all.
 QEMU_TEST_USB ?= -device qemu-xhci,id=xhci \
-                 -device usb-kbd,bus=xhci.0 \
-                 -device usb-mouse,bus=xhci.0
+                 -device usb-kbd,bus=xhci.0,port=1 \
+                 -device usb-mouse,bus=xhci.0,port=2 \
+                 -drive id=usbstick,if=none,format=raw,file=usb.img \
+                 -device usb-storage,drive=usbstick,bus=xhci.0,port=3 \
+                 -drive id=usbstick2,if=none,format=raw,file=usb2.img \
+                 -device usb-storage,drive=usbstick2,bus=xhci.0,port=4
 
 # Run a single test module instead of all of them: make test_kernel MODULE=fork
 #
@@ -520,6 +568,12 @@ apps/bin/lspci.elf: apps/bin/lspci.c
 
 apps/bin/lsusb.elf: apps/bin/lsusb.c
 	$(CC) $(USER_CFLAGS) apps/bin/lsusb.c -o apps/bin/lsusb.elf
+
+apps/bin/mount.elf: apps/bin/mount.c
+	$(CC) $(USER_CFLAGS) apps/bin/mount.c -o apps/bin/mount.elf
+
+apps/bin/umount.elf: apps/bin/umount.c
+	$(CC) $(USER_CFLAGS) apps/bin/umount.c -o apps/bin/umount.elf
 
 
 # Ring 3 half of the kernel self-test suite. Built, encrypted and embedded the
@@ -687,6 +741,18 @@ src/resources/lsusb_elf_data.c: apps/bin/lsusb.elf tools/encrypt_tool
 	@xxd -i apps/bin/lsusb_encrypted.elf | \
 	sed 's/apps_bin_lsusb_encrypted_elf/lsusb_elf/g' > src/resources/lsusb_elf_data.c
 
+src/resources/mount_elf_data.c: apps/bin/mount.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/mount.elf apps/bin/mount_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/mount_encrypted.elf | \
+	sed 's/apps_bin_mount_encrypted_elf/mount_elf/g' > src/resources/mount_elf_data.c
+
+src/resources/umount_elf_data.c: apps/bin/umount.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/umount.elf apps/bin/umount_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/umount_encrypted.elf | \
+	sed 's/apps_bin_umount_encrypted_elf/umount_elf/g' > src/resources/umount_elf_data.c
+
 src/resources/edit_elf_data.c: apps/bin/edit.elf tools/encrypt_tool
 	@mkdir -p src/resources
 	@./tools/encrypt_tool apps/bin/edit.elf apps/bin/edit_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
@@ -721,6 +787,8 @@ test_kernel: hello.elf
 	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
 	@echo "--- Running Kernel QEMU Self-Tests (PBKDF2=$(PBKDF2_TEST_ITERATIONS) iterations, CPU='$(QEMU_TEST_CPU)') ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
@@ -772,6 +840,8 @@ test_kernel_q35:
 	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
 	@echo "--- Running Kernel QEMU Self-Tests on q35 (disk behind AHCI) ---"
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
@@ -861,6 +931,8 @@ test_kernel_uefi:
 	@printf 'set default=0\nset timeout=0\ninsmod all_video\n\nmenuentry "esdumanOS self-test" {\n    multiboot /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > isodir_uefi/boot/grub/grub.cfg
 	@grub-mkrescue -o $(UEFI_TEST_ISO) isodir_uefi > /dev/null 2>&1
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
 	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
 	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
@@ -898,6 +970,8 @@ test_smap:
 	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
 	@echo "[SMAP TEST] Running kernel self-tests with -cpu max (SMEP/SMAP enabled)..."
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=$(KERNEL_PASS)" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
@@ -964,6 +1038,8 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 	@$(MAKE) $(ISO)
 	@echo "--- [4/4] Preparing disk image and launching QEMU..."
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@echo "    Display: VNC on 127.0.0.1:5901 - tunnel with: ssh -L 5901:localhost:5901 <host>"
 	$(QEMU) $(QEMU_FLAGS)
 
@@ -983,6 +1059,8 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 run_text:
 	@echo "--- Booting in a terminal. Choose the second GRUB entry (text mode). ---"
 	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@test -f usb.img || dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@test -f usb2.img || dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	$(QEMU) $(QEMU_FLAGS_TEXT)
 
 clean:
@@ -1009,7 +1087,7 @@ clean:
 	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf
 	rm -f tests/user/*.elf
 	rm -rf src/resources/*_data.c src/resources/*.o
-	rm -f disk.img kernel_log.txt
+	rm -f disk.img usb.img usb2.img kernel_log.txt
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/test_elf_validation tests/host/fuzz_parser
 	rm -f $(BIN) $(TEST_BIN)
 	rm -rf isodir isodir_uefi message.txt gizli.txt
@@ -1045,12 +1123,16 @@ run-dev: apps/init.elf tools/encrypt_tool hello.elf apps/bin/clear.elf apps/bin/
 	@$(MAKE) BUILD=dev EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=1000' $(ISO)
 	@echo "--- [DEV 4/4] Launching QEMU..."
 	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@test -f usb.img || dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@test -f usb2.img || dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	$(QEMU) $(QEMU_FLAGS)
 
 # GDB debug target: starts QEMU with GDB stub, waits for debugger connection.
 # Usage: make debug (then in another terminal: gdb -ex 'target remote :1234' myos.bin)
 debug: $(ISO)
 	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
+	@test -f usb.img || dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
+	@test -f usb2.img || dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@echo "--- Waiting for GDB connection on :1234 ---"
 	@echo "--- Run: gdb -ex 'target remote :1234' myos.bin ---"
 	$(QEMU) $(QEMU_FLAGS) -s -S

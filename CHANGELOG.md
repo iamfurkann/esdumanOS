@@ -5,6 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0-beta.1] - 2026-08-30
+
+esdumanOS types on a keyboard that is not plugged into a PS/2 port. That was the third
+and last of the three things standing between this kernel and the hardware it is aimed
+at, and it cost no change at all to the keyboard driver.
+
+### Added
+
+- **The HID boot protocol, in `drivers/usbkbd.c`.** Boot protocol only, which is the whole
+  reason no report descriptor is parsed: a keyboard in boot protocol promises a fixed
+  eight-byte report. The interrupt endpoint is opened with a Configure Endpoint command,
+  the configuration is selected, `SET_PROTOCOL` puts the device into boot mode, and one
+  read is kept outstanding at a time.
+
+- **A report is read as a difference, not as an event.** A boot report says which keys are
+  held right now, which is the trap this protocol sets: a driver that emitted what it saw
+  would repeat every held key at every poll, and at one poll per timer tick that is a
+  hundred repeats a second. Releases are emitted before presses, because a report showing
+  one key going down and another coming up carries no ordering of its own and letting go
+  first cannot invent a chord the user did not type.
+
+- **A rollover report is dropped whole.** A keyboard holding more keys than it can name
+  fills every slot with ErrorRollOver, and diffing that would emit a release for
+  everything that was down — the user would see every key they were holding let go, at
+  the moment they were holding the most. The previous report is left alone too, so the
+  state the driver believes in stays the last one the keyboard could describe.
+
+- **`xhci_poll()`, called from the timer interrupt.** A hundred times a second, waiting on
+  nothing, draining at most sixteen events before returning. Every other wait in that
+  driver carries a deadline because it runs on the boot path; this one runs inside IRQ0
+  and so does not wait at all.
+
+### Changed
+
+- **`drivers/keyboard.c` did not change, and that is the release.** It is 376 lines with
+  exactly one that touches hardware — the `inb(0x60)` inside the IRQ1 handler — and
+  `keyboard_handle_scancode()` was split out of it for testability nine releases ago. So
+  the USB driver translates HID usages into set-1 scancodes and calls it, and the Turkish
+  layout, AltGr, the Ctrl fold, Ctrl-D, the arrow sequences and the controller's fake
+  shift all work on a USB keyboard without being touched, moved or written twice. The ten
+  assertions in `test_kbd.c` now cover both backends and were not edited either.
+
+- **The control transfer helper learned its direction.** v1.9.0 only ever read descriptors
+  and hard-coded IN; selecting a configuration and setting a protocol are writes with no
+  data at all. A status stage runs opposite to the data stage it follows, and a transfer
+  with no data stage has no opposite and must be IN — a transfer whose stages disagree
+  with its setup packet is one the controller accepts and never completes.
+
+### Found in passing
+
+- **The obvious place for the poll would not have worked.** The tree has a bottom-half
+  mechanism — `register_kernel_timer()` and `process_pending_kernel_timers()` — whose only
+  production caller was deleted in v1.0.0, so giving it one back was tempting. But
+  `process_pending_kernel_timers()` is called from the scheduler, and `isr.c` only calls
+  the scheduler when the interrupted context was Ring 3. A keyboard driven from it would
+  go silent for as long as the kernel stayed in Ring 0 — and the first thing anybody types
+  on a real machine is the disk passphrase, at a prompt that is a Ring 0 read loop on the
+  boot path. It would have been unreachable at exactly the moment it is needed.
+
+- **A poll on the timer tick would have stolen enumeration's completions.** `sti` runs at
+  `kernel.c:992` and `xhci_init()` at 1060, so the timer fires while enumeration is
+  waiting on the event ring with interrupts enabled. A tick that helpfully drained the
+  ring would have consumed the very Command Completion Event the boot path was waiting
+  for, and the symptom would have been a controller that stopped working when a line was
+  added to the timer, with nothing anywhere pointing at the timer. The poll is gated on a
+  flag set at the very end of bring-up: one owner at a time, in both periods.
+
+- **Nothing from the USB keyboard is fed to the entropy pool**, and the reason is narrower
+  than "it carries no entropy". The poll runs inside `timer_interrupt_handler()`, which
+  called `entropy_add_event()` a few lines above on that same tick — so a keystroke here
+  would be a second sample of one instant, and the timer's own justification for being
+  mixed in, that it keeps the pool stirred, has already been spent by the time the poll is
+  reached. `entropy.h`, `entropy.c` and `test_entropy.c` were not opened.
+
+### Known issues
+
+- **Boot protocol only, and no LEDs.** A keyboard that does not offer boot protocol is
+  enumerated and not driven. Caps Lock is tracked inside the kernel and the lamp on the
+  keyboard is never told about it.
+
+- **One keyboard.** The first boot keyboard found on the bus wins, the way the SATA driver
+  takes the first port with a disk on it.
+
+- **Usages set 1 cannot express are dropped**, which is the price of translating through
+  the representation that makes everything else work unchanged: Pause and PrintScreen,
+  which set 1 encodes as multi-byte sequences this kernel has never acted on, and a
+  handful of keys a 1981 keyboard did not have.
+
+- **Everything else on the bus is still enumerated and not driven.** A USB stick appears
+  in `lsusb` and is not readable; that is the next release.
+
+- **`make run` and `make run_text` still attach no USB keyboard.** The test targets do,
+  and `test_usbkbd` covers it, but a fault in this path would leave an interactive run
+  with no way to type at all — QEMU routes keys to the most recently attached keyboard, so
+  PS/2 would go quiet with it. It goes in once this has been run against for a while.
+
+- Still no ACPI, no Secure Boot, and Multiboot 1 still cannot simply become Multiboot 2.
+  `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`.
+
 ## [1.9.0-beta.1] - 2026-08-30
 
 v1.8.0 brought the USB bus up and proved it with a command that moved nothing. This talks

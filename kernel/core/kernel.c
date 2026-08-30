@@ -14,6 +14,11 @@
 #include "pci.h"
 #include "ahci.h"
 #include "xhci.h"
+#include "usbmsc.h"
+/* Not for reading or writing - the file system does that through the cache -
+ * but for the one decision the boot path owns: which of the registered disks
+ * the file system is put on. */
+#include "blockdev.h"
 /* And this is where it is decided what the terminal draws into, which depends
  * entirely on how the machine was booted. */
 #include "console.h"
@@ -1059,7 +1064,76 @@ static int init_filesystem_and_vfs(void) {
      */
     xhci_init();
 
+    /*
+     * And the stick, if there is one. After the controller for the obvious
+     * reason and gated on nothing for the same one the two probes above are:
+     * usbmsc_init() asks whether there is a storage device itself and answers in
+     * one line, so a second copy of that test here would be a link between two
+     * subsystems that nothing watches.
+     *
+     * It registers as "usb0" and does **not** become the root. The boot path
+     * tries IDE, then AHCI only if IDE found nothing, and whichever answered is
+     * the disk the system starts on - that order is what made v1.5.0 additive
+     * rather than a gamble, and a third driver quietly taking the root would
+     * undo it. The stick is chosen with mount().
+     */
+    usbmsc_init();
+
     init_fs();
+
+    /*
+     * If the disk the boot order chose holds nothing, the rest of the table gets
+     * a turn.
+     *
+     * The order above - IDE, then AHCI - answers "which disk did this machine
+     * start with", and on the machine every test here runs on that disk is also
+     * the one with the file system on it. On the machine this release is aimed
+     * at they are two different disks: the internal one has somebody else's
+     * partitions on it, init_fs() refuses it rather than formatting - which is
+     * right, and is v1.2.0's decision - and then there is no file system, so no
+     * /bin, so no shell, so nowhere to type `mount usb1`. The machine that most
+     * needs to be told which disk to use is the one that cannot be told.
+     *
+     * Trying the others is not a new decision about formatting. init_fs()
+     * applies exactly the rules it applied to the first device: a disk it does
+     * not recognise is still refused untouched, and only one that is genuinely
+     * blank is written to.
+     *
+     * It says which disk it fell to, out loud. A fallback that chose silently
+     * would be two defensible decisions with an unwatched link between them -
+     * the shape of the v1.2.0 fault - and the link here is the answer to "whose
+     * disk is this system running on".
+     */
+    if (!fs_mounted && blockdev_count() > 1) {
+        blockdev_t *first = blockdev_root();
+
+        klog(LOG_LEVEL_WARN, "VFS",
+             "The boot disk holds no file system this kernel can read; trying the others.");
+        printk("[VFS] No file system on the boot disk. Trying the other disks.\n");
+
+        for (int i = 0; i < blockdev_count(); i++) {
+            blockdev_t *cand = blockdev_get(i);
+
+            if (cand == 0 || cand == first) continue;
+
+            printk("[VFS] Trying %s.\n", cand->name);
+            blockdev_set_root(cand);
+            init_fs();
+
+            if (fs_mounted) {
+                klog(LOG_LEVEL_INFO, "VFS", "Mounted a disk other than the one booted from.");
+                printk("[VFS] Root file system is on %s.\n", cand->name);
+                break;
+            }
+        }
+
+        /*
+         * Put back, so that everything below - and every message about a machine
+         * with no file system - is about the disk this machine actually booted
+         * from rather than the last one that was tried.
+         */
+        if (!fs_mounted) blockdev_set_root(first);
+    }
 
     /*
      * Between the mount and the first write. Everything below this line that
@@ -1179,6 +1253,8 @@ static int init_filesystem_and_vfs(void) {
                 fs_install_image_asset("chown", chown_elf, chown_elf_len, bin_id);
                 fs_install_image_asset("lspci", lspci_elf, lspci_elf_len, bin_id);
                 fs_install_image_asset("lsusb", lsusb_elf, lsusb_elf_len, bin_id);
+                fs_install_image_asset("mount", mount_elf, mount_elf_len, bin_id);
+                fs_install_image_asset("umount", umount_elf, umount_elf_len, bin_id);
                 fs_install_image_asset("hello", hello_elf, hello_elf_len, bin_id);
                 fs_install_image_asset("clear", clear_elf, clear_elf_len, bin_id);
                 fs_install_image_asset("echo", echo_elf, echo_elf_len, bin_id);

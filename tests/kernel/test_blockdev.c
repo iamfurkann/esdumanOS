@@ -4,7 +4,7 @@
  *
  * This file is part of the esdumanOS test suite.
  *
- * Everything here goes through blockdev_read() and blockdev_write() against a
+ * Everything here goes through blockdev_read(blockdev_root(), ) and blockdev_write(blockdev_root(), ) against a
  * device made up for the occasion. Nothing touches the block cache, and that is
  * deliberate rather than incidental: the cache is keyed by sector number and the
  * real file system is using those numbers right now, so a read served from a
@@ -106,14 +106,14 @@ static void run_routing_assertions(void) {
                  "[STRICT] [BLOCK] and is the one reads and writes go to");
 
     fake_writes = 0;
-    KTEST_ASSERT(blockdev_write(3, pattern) == E_OK,
+    KTEST_ASSERT(blockdev_write(blockdev_root(), 3, pattern) == E_OK,
                  "[BLOCK] a write inside the device succeeds");
     KTEST_ASSERT(fake_writes == 1 && fake_last_lba == 3,
                  "[STRICT] [BLOCK] and reaches the device once, at the sector asked for");
 
     fake_reads = 0;
     ft_memset(buf, 0, sizeof(buf));
-    KTEST_ASSERT(blockdev_read(3, buf) == E_OK,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), 3, buf) == E_OK,
                  "[BLOCK] the sector reads back");
 
     {
@@ -140,17 +140,17 @@ static void run_bounds_assertions(void) {
     fake_reads = 0;
     fake_writes = 0;
 
-    KTEST_ASSERT(blockdev_read(FAKE_SECTORS, buf) == E_INVAL,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), FAKE_SECTORS, buf) == E_INVAL,
                  "[STRICT] [BLOCK] a read one sector past the end is refused");
-    KTEST_ASSERT(blockdev_write(FAKE_SECTORS, buf) == E_INVAL,
+    KTEST_ASSERT(blockdev_write(blockdev_root(), FAKE_SECTORS, buf) == E_INVAL,
                  "[STRICT] [BLOCK] and so is the write");
-    KTEST_ASSERT(blockdev_read(0xFFFFFFFF, buf) == E_INVAL,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), 0xFFFFFFFF, buf) == E_INVAL,
                  "[BLOCK] and a wildly out of range sector");
 
     KTEST_ASSERT(fake_reads == 0 && fake_writes == 0,
                  "[STRICT] [BLOCK] none of which reached the driver at all");
 
-    KTEST_ASSERT(blockdev_read(0, 0) == E_INVAL,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), 0, 0) == E_INVAL,
                  "[BLOCK] a null buffer is refused");
 }
 
@@ -166,17 +166,17 @@ static void run_failure_assertions(void) {
     uint8_t buf[512];
 
     fake_read_result = E_IO;
-    KTEST_ASSERT(blockdev_read(0, buf) == E_IO,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), 0, buf) == E_IO,
                  "[STRICT] [BLOCK] the device's read error reaches the caller as itself");
 
     fake_read_result = E_NODEV;
-    KTEST_ASSERT(blockdev_read(0, buf) == E_NODEV,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), 0, buf) == E_NODEV,
                  "[STRICT] [BLOCK] and is not flattened into one generic failure");
 
     fake_read_result = E_OK;
 
     fake_write_result = E_IO;
-    KTEST_ASSERT(blockdev_write(0, buf) == E_IO,
+    KTEST_ASSERT(blockdev_write(blockdev_root(), 0, buf) == E_IO,
                  "[STRICT] [BLOCK] a write error reaches the caller too");
     fake_write_result = E_OK;
 
@@ -190,7 +190,7 @@ static void run_failure_assertions(void) {
         ro.write = 0;
         KTEST_ASSERT(blockdev_set_root(&ro) == E_OK,
                      "[BLOCK] a device with no write handler still registers");
-        KTEST_ASSERT(blockdev_write(0, buf) == E_ROFS,
+        KTEST_ASSERT(blockdev_write(blockdev_root(), 0, buf) == E_ROFS,
                      "[STRICT] [BLOCK] and refuses writes with E_ROFS, not a null call");
         blockdev_set_root(&fake_dev);
     }
@@ -205,9 +205,9 @@ static void run_detached_assertions(void) {
     blockdev_set_root(0);
     KTEST_ASSERT(blockdev_root() == 0,
                  "[BLOCK] the root device can be detached");
-    KTEST_ASSERT(blockdev_read(0, buf) == E_NODEV,
+    KTEST_ASSERT(blockdev_read(blockdev_root(), 0, buf) == E_NODEV,
                  "[STRICT] [BLOCK] a read with no device is E_NODEV, not a crash");
-    KTEST_ASSERT(blockdev_write(0, buf) == E_NODEV,
+    KTEST_ASSERT(blockdev_write(blockdev_root(), 0, buf) == E_NODEV,
                  "[STRICT] [BLOCK] and so is a write");
 }
 

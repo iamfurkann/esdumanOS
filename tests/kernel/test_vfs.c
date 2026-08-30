@@ -512,7 +512,7 @@ static void test_disk_format(void) {
          * MBR belongs to the disk, not to the partition, and reading it through
          * the offset would be reading 64 sectors into our own file system.
          */
-        bcache_read_sector(0, sec_buf);
+        bcache_read_sector(blockdev_root(), 0, sec_buf);
         ft_memcpy(&mbr, sec_buf, sizeof(mbr));
 
         KTEST_ASSERT(mbr.signature == MBR_SIGNATURE,

@@ -109,6 +109,16 @@ static void run_syscall_number_assertions(void) {
      */
     KTEST_ASSERT(SYSCALL_USBINFO == 70,      "[STRICT] [ABI] USBINFO is 70, continuing from PCIINFO");
 
+    /*
+     * And the two this table has been naming as "the next ones" since v1.0.0.
+     * Eleven releases is a long time for a promise about numbers nobody had
+     * spent, and the sentence that made it moved three times while they waited -
+     * which is the whole reason the frontier below is asserted rather than
+     * trusted.
+     */
+    KTEST_ASSERT(SYSCALL_MOUNT == 71,        "[STRICT] [ABI] MOUNT is 71, where it was promised in v1.0.0");
+    KTEST_ASSERT(SYSCALL_UMOUNT == 72,       "[STRICT] [ABI] and UMOUNT is 72, beside it");
+
     /* Descriptors and I/O. */
     KTEST_ASSERT(SYSCALL_READ == 3,          "[STRICT] [ABI] READ is 3");
     KTEST_ASSERT(SYSCALL_WRITE == 4,         "[STRICT] [ABI] WRITE is 4");
@@ -209,15 +219,15 @@ static void run_retired_number_assertions(void) {
                  "[STRICT] [ABI] 99 stays retired - YIELD left it for 67 at the freeze");
 
     /*
-     * 71 is where the next call goes, and it must be free until one is written.
+     * 73 is where the next call goes, and it must be free until one is written.
      * This is the assertion that catches a number being taken quietly. It said
-     * 68 until v1.1.0 assigned that one, 69 until v1.4.0 assigned that, and 70
-     * until v1.8.0 assigned that - which is what this line is for: the frontier
-     * moves by somebody editing it deliberately, not by drifting. All three
-     * times it moved by failing first.
+     * 68 until v1.1.0 assigned that one, 69 until v1.4.0, 70 until v1.8.0, and
+     * 71 until v1.11.0 spent both 71 and 72 at once - which is what this line is
+     * for: the frontier moves by somebody editing it deliberately, not by
+     * drifting. Every time, it moved by failing first.
      */
-    KTEST_ASSERT(dispatch_retired(71) == E_NOSYS,
-                 "[STRICT] [ABI] 71 is unassigned, and is where the next call continues from");
+    KTEST_ASSERT(dispatch_retired(73) == E_NOSYS,
+                 "[STRICT] [ABI] 73 is unassigned, and is where the next call continues from");
 }
 
 /**

@@ -158,6 +158,10 @@ void run_ahci_tests(void);
 void run_xhci_tests(void);
 /** @brief HID boot reports, and the scancodes they turn into. */
 void run_usbkbd_tests(void);
+/** @brief Bulk-Only Transport, and the disk it presents. */
+void run_usbmsc_tests(void);
+/** @brief Two disks, and the cache that has to tell them apart. */
+void run_mount_tests(void);
 /** @brief Where the terminal's cells land, in text mode and in pixels. */
 void run_console_tests(void);
 void run_string_tests(void);

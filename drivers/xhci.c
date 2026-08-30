@@ -575,6 +575,33 @@ typedef struct {
     uint32_t             int_enqueue;
     uint32_t             int_pcs;
     uint8_t              kbd_dci;   /**< Device context index of the endpoint. */
+
+    /*
+     * And two more frames for a device that turned out to be a disk. Bulk
+     * endpoints are unidirectional, so a transport that sends a command and
+     * reads a reply needs a ring each way.
+     */
+    volatile xhci_trb_t *bulk_in_ring;
+    uint32_t             bulk_in_phys;
+    uint32_t             bulk_in_enqueue;
+    uint32_t             bulk_in_pcs;
+    uint8_t              bulk_in_dci;
+
+    volatile xhci_trb_t *bulk_out_ring;
+    uint32_t             bulk_out_phys;
+    uint32_t             bulk_out_enqueue;
+    uint32_t             bulk_out_pcs;
+    uint8_t              bulk_out_dci;
+
+    /*
+     * What a bulk transfer is waiting for. Written by xhci_poll(), which runs in
+     * the timer interrupt, and read by the transfer that is spinning - so
+     * volatile, or the compiler hoists the load out of the wait and the spin
+     * never ends. The same reason the event ring itself is volatile.
+     */
+    volatile int      bulk_done;
+    volatile uint32_t bulk_code;
+    volatile uint32_t bulk_residual;
 } xhci_devres_t;
 
 static xhci_device_t devices[XHCI_MAX_DEVICES];
@@ -631,6 +658,7 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
     found.total_length = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8));
     found.config_value = buf[5];
     found.kbd_iface    = XHCI_NO_IFACE;
+    found.msc_iface    = XHCI_NO_IFACE;
 
     /*
      * Which interface the walk is currently inside. An endpoint descriptor
@@ -640,6 +668,7 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
      * keyboard's endpoint in a second pass would mean reconstructing it.
      */
     int in_boot_kbd = 0;
+    int in_storage = 0;
     uint32_t off = 0;
 
     while (off + 2 <= len) {
@@ -684,6 +713,20 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
                            found.kbd_iface == XHCI_NO_IFACE);
 
             if (in_boot_kbd) found.kbd_iface = buf[off + 2];
+
+            /*
+             * And the other interface this kernel can talk to. All three fields
+             * are required rather than just the class: Bulk-Only Transport is
+             * the protocol this driver implements, and a stick offering
+             * something else - there are two other transports in the
+             * specification - is one it cannot speak to at all.
+             */
+            in_storage = (buf[off + 5] == USB_CLASS_STORAGE &&
+                          buf[off + 6] == USB_SUBCLASS_SCSI &&
+                          buf[off + 7] == USB_PROTOCOL_BULK_ONLY &&
+                          found.msc_iface == XHCI_NO_IFACE);
+
+            if (in_storage) found.msc_iface = buf[off + 2];
         } else if (dtype == USB_DESC_ENDPOINT) {
             if (found.endpoints < 0xFF) found.endpoints++;
 
@@ -697,6 +740,26 @@ int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out)
                 found.kbd_mps      = (uint16_t)(buf[off + 4] |
                                                 ((uint16_t)buf[off + 5] << 8));
                 found.kbd_interval = buf[off + 6];
+            }
+
+            /*
+             * Storage takes two, and which is which is the direction bit. A
+             * transport that sends a command and reads a reply needs both halves
+             * because a bulk endpoint only ever runs one way.
+             */
+            if (in_storage && dlen >= 7 &&
+                (buf[off + 3] & USB_EP_TYPE_MASK) == USB_EP_XFER_BULK) {
+                uint16_t mps = (uint16_t)(buf[off + 4] |
+                                          ((uint16_t)buf[off + 5] << 8));
+
+                if ((buf[off + 2] & USB_EP_DIR_IN) && found.msc_in_addr == 0) {
+                    found.msc_in_addr = buf[off + 2];
+                    found.msc_in_mps  = mps;
+                } else if (!(buf[off + 2] & USB_EP_DIR_IN) &&
+                           found.msc_out_addr == 0) {
+                    found.msc_out_addr = buf[off + 2];
+                    found.msc_out_mps  = mps;
+                }
             }
         }
 
@@ -892,6 +955,34 @@ static int xhci_address_device(int index, uint8_t speed, int port) {
                         0, "Address Device never completed.");
 }
 
+uint32_t xhci_ep0_size_reported(uint8_t speed, uint8_t reported) {
+    /*
+     * Full speed and nothing else, because full speed is the only one where
+     * bMaxPacketSize0 is a byte count that the device gets to choose. At every
+     * other speed the specification fixes it - 8 at low, 64 at high, 512 at
+     * super - and ep0_packet_size() has already programmed that.
+     *
+     * At SuperSpeed the field is not a byte count at all: it holds the base-2
+     * logarithm, so a stick that uses 512-byte packets writes 9. Believing that
+     * number opens endpoint zero at nine bytes, which is not a legal packet size
+     * at any speed, and the descriptors read through it come back as something
+     * that is not a descriptor. Nothing fails loudly; the device simply turns out
+     * to have no interfaces worth anything.
+     */
+    if (speed != XHCI_SPEED_FULL) return 0;
+
+    /*
+     * And a full-speed device only gets to choose among four. A value outside
+     * them is refused rather than programmed: endpoint zero is already open at
+     * 8, which every speed permits, so ignoring a bad answer costs some
+     * throughput and keeps the device usable.
+     */
+    if (reported == 8 || reported == 16 || reported == 32 || reported == 64) {
+        return reported;
+    }
+    return 0;
+}
+
 /**
  * @brief Re-opens endpoint zero at the packet size the device actually uses.
  *
@@ -900,27 +991,38 @@ static int xhci_address_device(int index, uint8_t speed, int port) {
  * that the first eight bytes can be read whatever the answer is, and this is
  * what corrects it afterwards.
  *
- * QEMU's keyboard and mouse are full-speed devices that answer 8, so on every
- * machine this project can run on the comparison below is equal and this
- * function returns without issuing anything. It exists for the machine the
- * project is aimed at.
+ * That paragraph was here before v1.11.0 and the code below did not enforce a
+ * word of it. It compared the reported value against the programmed one at every
+ * speed, and until this release every device on the test bench was a full-speed
+ * keyboard or mouse answering 8 - so the comparison was always equal and the
+ * function never ran. A USB stick is the first SuperSpeed device this project has
+ * ever enumerated, it answers 9 meaning 512, and this took that 9 literally. The
+ * decision moved into xhci_ep0_size_reported(), where it can be asserted without
+ * a device.
  */
-static int xhci_refine_ep0(int index, uint32_t reported) {
+static int xhci_refine_ep0(int index, uint8_t speed, uint32_t reported) {
     xhci_devres_t *r = &devres[index];
     volatile uint32_t *ep0_in = ctx_entry(r->in_ctx, 2);
     uint32_t current = (ep0_in[1] >> 16) & 0xFFFF;
+    uint32_t want = xhci_ep0_size_reported(speed, (uint8_t)reported);
 
-    if (reported == 0 || reported == current) return E_OK;
+    if (want == 0 && speed == XHCI_SPEED_FULL && reported != 0) {
+        klog_int(LOG_LEVEL_WARN, "XHCI",
+                 "Ignoring an endpoint zero packet size no full-speed device may use",
+                 (int)reported);
+    }
+
+    if (want == 0 || want == current) return E_OK;
 
     klog_int(LOG_LEVEL_INFO, "XHCI",
-             "Re-opening endpoint zero at the size the device reported", (int)reported);
+             "Re-opening endpoint zero at the size the device reported", (int)want);
 
     volatile uint32_t *control = ctx_entry(r->in_ctx, 0);
 
     control[0] = 0;
     control[1] = XHCI_IN_ADD_EP0;
 
-    ep0_in[1] = (ep0_in[1] & 0x0000FFFF) | XHCI_EP_MAX_PACKET(reported);
+    ep0_in[1] = (ep0_in[1] & 0x0000FFFF) | XHCI_EP_MAX_PACKET(want);
 
     return xhci_command(r->in_ctx_phys, 0,
                         XHCI_TRB_SET_TYPE(XHCI_TRB_EVAL_CTX)
@@ -1013,7 +1115,7 @@ static int xhci_enumerate_port(int port) {
         return E_IO;
     }
 
-    if (xhci_refine_ep0(index, r->desc_buf[7]) != E_OK) return E_IO;
+    if (xhci_refine_ep0(index, speed, r->desc_buf[7]) != E_OK) return E_IO;
 
     if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                         (uint16_t)(USB_DESC_DEVICE << 8), 0,
@@ -1035,6 +1137,20 @@ static int xhci_enumerate_port(int port) {
      * buffer rather than believed - a device claiming 60000 bytes of descriptors
      * would otherwise be a write past a page.
      */
+    /*
+     * Whatever happens below, the device keeps its slot and its name. A device
+     * whose configuration could not be read is still a device that is plugged
+     * in, and lsusb saying so is better than lsusb pretending the port is empty.
+     *
+     * What it must not do is happen quietly. Every one of these three steps used
+     * to fail into an empty config with no line anywhere, so a device the driver
+     * could not read was indistinguishable from one with nothing on it worth
+     * driving - and when a USB stick landed in exactly that state, the only
+     * evidence was a disk that never appeared. That is the v1.8.0 lesson from the
+     * other side: there, the path that left no record was the one that worked.
+     */
+    int described = 0;
+
     if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                         (uint16_t)(USB_DESC_CONFIG << 8), 0,
                         USB_CONFIG_DESC_LEN) == E_OK) {
@@ -1046,8 +1162,20 @@ static int xhci_enumerate_port(int port) {
         if (xhci_control(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
                             (uint16_t)(USB_DESC_CONFIG << 8), 0,
                             (uint16_t)total) == E_OK) {
-            xhci_parse_config(r->desc_buf, total, &devices[index].config);
+            if (xhci_parse_config(r->desc_buf, total,
+                                  &devices[index].config) == E_OK) {
+                described = 1;
+            } else {
+                klog_int(LOG_LEVEL_WARN, "XHCI",
+                         "A configuration descriptor this driver could not read, on port",
+                         port + 1);
+            }
         }
+    }
+
+    if (!described) {
+        klog_int(LOG_LEVEL_WARN, "XHCI",
+                 "Device enumerated with no usable configuration, on port", port + 1);
     }
 
     device_count++;
@@ -1132,6 +1260,83 @@ static uint32_t ep_interval(uint8_t speed, uint8_t binterval) {
 }
 
 /**
+ * @brief Opens one endpoint on a configured device.
+ *
+ * The shape xhci_open_keyboard() had, lifted out so that the disk can use it
+ * too. What differs between an interrupt endpoint and a bulk one is three
+ * fields; what is the same is the input context, the add flags, the context
+ * entries count and the Configure Endpoint command, and having that in one place
+ * is the difference between one thing to get right and two.
+ *
+ * @param ring_out Receives the transfer ring; the caller keeps the enqueue state.
+ * @return E_OK, or a negative errno.
+ */
+static int xhci_open_endpoint(int index, uint8_t ep_addr, uint32_t ep_type,
+                              uint16_t mps, uint32_t interval,
+                              volatile xhci_trb_t **ring_out,
+                              uint32_t *ring_phys_out, uint8_t *dci_out) {
+    xhci_devres_t *r = &devres[index];
+    volatile xhci_trb_t *ring;
+    uint32_t ring_phys = 0;
+
+    ring = (volatile xhci_trb_t *)alloc_dma_page(&ring_phys);
+    if (ring == 0) {
+        klog(LOG_LEVEL_ERROR, "XHCI", "Out of memory opening an endpoint.");
+        return E_NOMEM;
+    }
+
+    volatile xhci_trb_t *link = &ring[XHCI_TRBS_PER_SEGMENT - 1];
+
+    link->param_lo = ring_phys;
+    link->param_hi = 0;
+    link->status   = 0;
+    link->control  = XHCI_TRB_SET_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC | XHCI_TRB_CYCLE;
+
+    /*
+     * The device context index of an IN endpoint is twice its number plus one,
+     * and of an OUT endpoint twice its number. That is the whole of why a bulk
+     * pair occupies two entries rather than one.
+     */
+    uint8_t dci = (uint8_t)(USB_EP_NUMBER(ep_addr) * 2 +
+                            ((ep_addr & USB_EP_DIR_IN) ? 1 : 0));
+
+    volatile uint32_t *control = ctx_entry(r->in_ctx, 0);
+    volatile uint32_t *slot    = ctx_entry(r->in_ctx, 1);
+    volatile uint32_t *ep      = ctx_entry(r->in_ctx, 1 + dci);
+
+    control[0] = 0;
+    control[1] = XHCI_IN_ADD_SLOT | ((uint32_t)1 << dci);
+
+    /*
+     * Context Entries is the highest index in use, so it only ever rises. A
+     * second endpoint opened after the first must not lower it, or the
+     * controller stops believing in the one already there.
+     */
+    uint32_t entries = (slot[0] >> 27) & 0x1F;
+
+    if (dci > entries) entries = dci;
+    slot[0] = (slot[0] & 0x07FFFFFFu) | XHCI_SLOT_CTX_ENTRIES(entries);
+
+    ep[0] = interval << 16;
+    ep[1] = XHCI_EP_TYPE(ep_type) | XHCI_EP_CERR(3) | XHCI_EP_MAX_PACKET(mps);
+    ep[2] = ring_phys | XHCI_EP_DCS;
+    ep[3] = 0;
+    ep[4] = ((uint32_t)mps << 16) | mps;
+
+    if (xhci_command(r->in_ctx_phys, 0,
+                     XHCI_TRB_SET_TYPE(XHCI_TRB_CONFIG_EP)
+                     | XHCI_TRB_SET_SLOT(devices[index].slot),
+                     0, "Configure Endpoint never completed.") != E_OK) {
+        return E_IO;
+    }
+
+    *ring_out = ring;
+    *ring_phys_out = ring_phys;
+    *dci_out = dci;
+    return E_OK;
+}
+
+/**
  * @brief Selects the configuration, opens the interrupt endpoint, starts reads.
  *
  * The first boot keyboard on the bus wins and the rest are left alone, which is
@@ -1154,59 +1359,16 @@ static int xhci_open_keyboard(int index) {
         return E_IO;
     }
 
-    r->int_ring = (volatile xhci_trb_t *)alloc_dma_page(&r->int_ring_phys);
-    if (r->int_ring == 0) {
-        klog(LOG_LEVEL_ERROR, "XHCI", "Out of memory opening the keyboard endpoint.");
-        return E_NOMEM;
+    if (xhci_open_endpoint(index, d->config.kbd_ep_addr, XHCI_EP_TYPE_INT_IN,
+                           d->config.kbd_mps,
+                           ep_interval(d->speed, d->config.kbd_interval),
+                           &r->int_ring, &r->int_ring_phys,
+                           &r->kbd_dci) != E_OK) {
+        return E_IO;
     }
-
-    volatile xhci_trb_t *link = &r->int_ring[XHCI_TRBS_PER_SEGMENT - 1];
-
-    link->param_lo = r->int_ring_phys;
-    link->param_hi = 0;
-    link->status   = 0;
-    link->control  = XHCI_TRB_SET_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC | XHCI_TRB_CYCLE;
 
     r->int_enqueue = 0;
     r->int_pcs = 1;
-
-    /*
-     * The device context index of an IN endpoint is twice its number plus one.
-     * Endpoint zero is 1, endpoint 1 IN is 3, and the even indices are the OUT
-     * halves this driver never opens.
-     */
-    r->kbd_dci = (uint8_t)(USB_EP_NUMBER(d->config.kbd_ep_addr) * 2 + 1);
-
-    /*
-     * The input context still holds what Address Device was given, which is what
-     * the specification wants: the slot context here has to describe the device
-     * as it will be, so it is edited rather than rebuilt. Context Entries rises
-     * to the highest index now in use, and the add flags name the slot and the
-     * one endpoint being opened.
-     */
-    volatile uint32_t *control = ctx_entry(r->in_ctx, 0);
-    volatile uint32_t *slot    = ctx_entry(r->in_ctx, 1);
-    volatile uint32_t *ep      = ctx_entry(r->in_ctx, 1 + r->kbd_dci);
-
-    control[0] = 0;
-    control[1] = XHCI_IN_ADD_SLOT | ((uint32_t)1 << r->kbd_dci);
-
-    slot[0] = (slot[0] & 0x07FFFFFFu) | XHCI_SLOT_CTX_ENTRIES(r->kbd_dci);
-
-    ep[0] = ep_interval(d->speed, d->config.kbd_interval) << 16;
-    ep[1] = XHCI_EP_TYPE(XHCI_EP_TYPE_INT_IN)
-          | XHCI_EP_CERR(3)
-          | XHCI_EP_MAX_PACKET(d->config.kbd_mps);
-    ep[2] = r->int_ring_phys | XHCI_EP_DCS;
-    ep[3] = 0;
-    ep[4] = ((uint32_t)d->config.kbd_mps << 16) | d->config.kbd_mps;
-
-    if (xhci_command(r->in_ctx_phys, 0,
-                     XHCI_TRB_SET_TYPE(XHCI_TRB_CONFIG_EP)
-                     | XHCI_TRB_SET_SLOT(d->slot),
-                     0, "Configure Endpoint never completed.") != E_OK) {
-        return E_IO;
-    }
 
     /*
      * Boot protocol, and this is what makes the reports a fixed eight bytes.
@@ -1231,8 +1393,37 @@ static int xhci_open_keyboard(int index) {
     return E_OK;
 }
 
+/**
+ * @brief Guards the event ring against being drained twice at once.
+ *
+ * xhci_poll() has two callers now and one of them can interrupt the other. A
+ * bulk transfer spins calling it from ordinary kernel context; the timer tick
+ * calls it from IRQ0, and a tick lands in the middle of that spin a hundred
+ * times a second. Two readers stepping the same dequeue pointer would each
+ * consume records the other was about to look at, and the ring's cycle state
+ * would stop meaning anything.
+ *
+ * The flag is tested and set with interrupts off - the tree's own idiom, the one
+ * elf.c and entropy.c use - and then interrupts go back to whatever they were,
+ * so the window is a few instructions rather than the whole drain.
+ */
+static volatile int poll_busy = 0;
+
 void xhci_poll(void) {
+    uint32_t eflags;
+
     if (!xhci_poll_armed) return;
+
+    asm volatile("pushf; pop %0" : "=r"(eflags));
+    asm volatile("cli");
+
+    if (poll_busy) {
+        if (eflags & 0x200) asm volatile("sti");
+        return;
+    }
+    poll_busy = 1;
+
+    if (eflags & 0x200) asm volatile("sti");
 
     /*
      * Bounded, and the bound is the interrupt handler's. Everything else in this
@@ -1243,11 +1434,13 @@ void xhci_poll(void) {
     for (int drained = 0; drained < XHCI_POLL_MAX_EVENTS; drained++) {
         volatile xhci_trb_t *ev = xhci_next_event();
 
-        if (ev == 0) return;
+        if (ev == 0) break;
 
         uint32_t type = XHCI_TRB_TYPE(ev->control);
         uint32_t slot = XHCI_TRB_SLOT(ev->control);
+        uint32_t endpoint = XHCI_TRB_EP_ID(ev->control);
         uint32_t code = XHCI_TRB_COMPLETION(ev->status);
+        uint32_t residual = XHCI_TRB_RESIDUAL(ev->status);
 
         xhci_consume_event();
 
@@ -1258,20 +1451,197 @@ void xhci_poll(void) {
 
         int index = device_for_slot(slot);
 
-        if (index < 0 || devres[index].int_ring == 0) continue;
+        if (index < 0) continue;
+
+        xhci_devres_t *r = &devres[index];
 
         /*
-         * Success, or a short packet - which is what a keyboard with nothing to
-         * say produces and is not a failure. Anything else means the report did
-         * not arrive, and the read is re-armed without one being handed on: a
-         * stale buffer read as a report would look like keys being released.
+         * Which endpoint finished, and that question did not exist until this
+         * release. With one endpoint per device anything that completed was the
+         * keyboard's; with a keyboard and a disk on the same bus the endpoint id
+         * in the event is the only thing that says which.
          */
-        if (code == XHCI_COMPLETION_SUCCESS || code == 13) {
-            usbkbd_report(devres[index].desc_buf + XHCI_OFF_REPORT);
+        if (r->int_ring != 0 && endpoint == r->kbd_dci) {
+            /*
+             * Success, or a short packet - which is what a keyboard with nothing
+             * to say produces and is not a failure. Anything else means the
+             * report did not arrive, and the read is re-armed without one being
+             * handed on: a stale buffer read as a report would look like keys
+             * being released.
+             */
+            if (code == XHCI_COMPLETION_SUCCESS || code == 13) {
+                usbkbd_report(r->desc_buf + XHCI_OFF_REPORT);
+            }
+            xhci_queue_report(index);
+            continue;
         }
 
-        xhci_queue_report(index);
+        if (endpoint == r->bulk_in_dci || endpoint == r->bulk_out_dci) {
+            /*
+             * Recorded rather than acted on. The transfer that queued this is
+             * spinning on bulk_done in ordinary kernel context, and it is the
+             * one that knows what to do with the answer - an interrupt handler
+             * deciding what a failed disk read means is an interrupt handler
+             * doing the block layer's job.
+             */
+            r->bulk_residual = residual;
+            r->bulk_code = code;
+            r->bulk_done = 1;
+        }
     }
+
+    poll_busy = 0;
+}
+
+/* ── Bulk endpoints, and the disk above them ────────────────────────── */
+
+uint8_t *xhci_dma_page(uint32_t *phys_out) {
+    if (phys_out == 0) return 0;
+    return alloc_dma_page(phys_out);
+}
+
+int xhci_storage_device_next(int after) {
+    /*
+     * Starts one past whatever was handed in, so -1 starts at the beginning and
+     * the caller never has to know that. A negative other than -1 would be a
+     * caller that lost its place; it is treated the same way rather than allowed
+     * to index backwards into the table.
+     */
+    int start = (after < 0) ? 0 : after + 1;
+
+    for (int i = start; i < device_count; i++) {
+        if (devices[i].config.msc_in_addr != 0 &&
+            devices[i].config.msc_out_addr != 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int xhci_open_storage(int index) {
+    xhci_device_t *d;
+    xhci_devres_t *r;
+
+    if (index < 0 || index >= device_count) return E_INVAL;
+
+    d = &devices[index];
+    r = &devres[index];
+
+    if (d->config.msc_in_addr == 0 || d->config.msc_out_addr == 0) return E_NODEV;
+    if (r->bulk_in_ring != 0) return E_OK;   /* already open */
+
+    if (xhci_control(index, 0, USB_REQ_SET_CONFIGURATION,
+                     d->config.config_value, 0, 0) != E_OK) {
+        klog(LOG_LEVEL_WARN, "XHCI", "Storage device would not accept its configuration.");
+        return E_IO;
+    }
+
+    if (xhci_open_endpoint(index, d->config.msc_in_addr, XHCI_EP_TYPE_BULK_IN,
+                           d->config.msc_in_mps, 0,
+                           &r->bulk_in_ring, &r->bulk_in_phys,
+                           &r->bulk_in_dci) != E_OK) {
+        return E_IO;
+    }
+    r->bulk_in_enqueue = 0;
+    r->bulk_in_pcs = 1;
+
+    if (xhci_open_endpoint(index, d->config.msc_out_addr, XHCI_EP_TYPE_BULK_OUT,
+                           d->config.msc_out_mps, 0,
+                           &r->bulk_out_ring, &r->bulk_out_phys,
+                           &r->bulk_out_dci) != E_OK) {
+        return E_IO;
+    }
+    r->bulk_out_enqueue = 0;
+    r->bulk_out_pcs = 1;
+
+    klog_int(LOG_LEVEL_INFO, "XHCI", "Storage endpoints open on port", d->port);
+    return E_OK;
+}
+
+/** @brief Puts one TRB on a bulk ring, following the link at the end. */
+static void bulk_push(volatile xhci_trb_t *ring, uint32_t *enqueue, uint32_t *pcs,
+                      uint32_t ring_phys, uint32_t lo, uint32_t status,
+                      uint32_t control) {
+    if (*enqueue == XHCI_TRBS_PER_SEGMENT - 1) {
+        volatile xhci_trb_t *link = &ring[*enqueue];
+
+        link->param_lo = ring_phys;
+        link->control = (link->control & ~(uint32_t)XHCI_TRB_CYCLE) | *pcs;
+        *enqueue = 0;
+        *pcs ^= 1;
+    }
+
+    volatile xhci_trb_t *t = &ring[*enqueue];
+
+    t->param_lo = lo;
+    t->param_hi = 0;
+    t->status   = status;
+    t->control  = control | *pcs;
+
+    (*enqueue)++;
+}
+
+int xhci_bulk_transfer(int index, int in, uint32_t phys, uint32_t len,
+                       uint32_t *residual) {
+    if (index < 0 || index >= device_count) return E_INVAL;
+
+    xhci_devres_t *r = &devres[index];
+
+    if (r->bulk_in_ring == 0 || r->bulk_out_ring == 0) return E_INVAL;
+
+    r->bulk_done = 0;
+    r->bulk_code = 0;
+    r->bulk_residual = 0;
+
+    if (in) {
+        bulk_push(r->bulk_in_ring, &r->bulk_in_enqueue, &r->bulk_in_pcs,
+                  r->bulk_in_phys, phys, len,
+                  XHCI_TRB_SET_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_IOC);
+        mmio_write(db_base + (uint32_t)devices[index].slot * 4, r->bulk_in_dci);
+    } else {
+        bulk_push(r->bulk_out_ring, &r->bulk_out_enqueue, &r->bulk_out_pcs,
+                  r->bulk_out_phys, phys, len,
+                  XHCI_TRB_SET_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_IOC);
+        mmio_write(db_base + (uint32_t)devices[index].slot * 4, r->bulk_out_dci);
+    }
+
+    /*
+     * And here is the release's one real design decision, spelled out because it
+     * is not obvious and the obvious alternative is much worse.
+     *
+     * The event ring has one reader, xhci_poll(), and it normally runs from the
+     * timer tick. This wait could simply spin until a tick happened to drain the
+     * completion - that is what ata_wait_irq() does with its IRQ - and it would
+     * be correct and cost up to ten milliseconds per transfer. A Bulk-Only
+     * sector read is three transfers, so a sector would take thirty
+     * milliseconds and formatting a disk would take hours.
+     *
+     * So the wait drives the poll itself. The ring still has exactly one reader
+     * at a time - poll_busy sees to that - but it is read as fast as this loop
+     * goes rather than a hundred times a second.
+     */
+    uint32_t start = timer_get_ticks();
+
+    while (!r->bulk_done) {
+        if ((timer_get_ticks() - start) > XHCI_TIMEOUT_TICKS) {
+            klog(LOG_LEVEL_ERROR, "XHCI", "A bulk transfer never completed.");
+            return E_IO;
+        }
+        xhci_poll();
+        asm volatile("pause");
+    }
+
+    if (residual != 0) *residual = r->bulk_residual;
+
+    /* Short packet is not a failure: a device with less to say than it was asked
+     * for ends the transfer early and reports the shortfall. */
+    if (r->bulk_code != XHCI_COMPLETION_SUCCESS && r->bulk_code != 13) {
+        klog_int(LOG_LEVEL_WARN, "XHCI", "Bulk transfer failed with code",
+                 (int)r->bulk_code);
+        return E_IO;
+    }
+
+    return E_OK;
 }
 
 /**

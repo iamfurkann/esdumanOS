@@ -88,6 +88,12 @@ void sys_pciinfo(arch_regs_t *regs);
 /** @brief Syscall handler for reporting the USB controller and its ports */
 void sys_usbinfo(arch_regs_t *regs);
 
+// sys_mount.c
+/** @brief Syscall handler for choosing which device the file system is on */
+void sys_mount(arch_regs_t *regs);
+/** @brief Syscall handler for unmounting the current file system */
+void sys_umount(arch_regs_t *regs);
+
 // sys_fs.c
 /** @brief Syscall handler for reading from a file descriptor */
 void sys_read(arch_regs_t *regs);

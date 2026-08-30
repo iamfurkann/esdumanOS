@@ -75,6 +75,10 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_PCIINFO:      sys_pciinfo(regs); break;
         case SYSCALL_USBINFO:      sys_usbinfo(regs); break;
 
+        //sys_mount.c
+        case SYSCALL_MOUNT:        sys_mount(regs); break;
+        case SYSCALL_UMOUNT:       sys_umount(regs); break;
+
         //sys_fs.c
         case SYSCALL_READ:         sys_read(regs); break;
         case SYSCALL_POLL:         sys_poll(regs); break;

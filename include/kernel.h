@@ -8,7 +8,7 @@
  * PATCH : Bug fixes, minor patches
  */
 #define OS_VERSION_MAJOR    1
-#define OS_VERSION_MINOR    9
+#define OS_VERSION_MINOR    10
 #define OS_VERSION_PATCH    0
 
 /**

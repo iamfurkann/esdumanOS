@@ -156,6 +156,8 @@ void run_pci_tests(void);
 void run_ahci_tests(void);
 /** @brief The USB controller, and the arithmetic that decided how it is fed. */
 void run_xhci_tests(void);
+/** @brief HID boot reports, and the scancodes they turn into. */
+void run_usbkbd_tests(void);
 /** @brief Where the terminal's cells land, in text mode and in pixels. */
 void run_console_tests(void);
 void run_string_tests(void);

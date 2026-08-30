@@ -279,13 +279,24 @@ const pci_device_t *pci_find(uint8_t bus, uint8_t device, uint8_t function) {
     return 0;
 }
 
-const pci_device_t *pci_find_class(uint8_t class_code, uint8_t subclass) {
+const pci_device_t *pci_find_class_if(uint8_t class_code, uint8_t subclass,
+                                      uint8_t prog_if) {
     for (int i = 0; i < pci_count; i++) {
         if (pci_devices[i].class_code != class_code) continue;
-        if (subclass != 0xFF && pci_devices[i].subclass != subclass) continue;
+        if (subclass != PCI_MATCH_ANY && pci_devices[i].subclass != subclass) continue;
+        if (prog_if  != PCI_MATCH_ANY && pci_devices[i].prog_if  != prog_if)  continue;
         return &pci_devices[i];
     }
     return 0;
+}
+
+/*
+ * The two-field search, expressed as the three-field one with the third
+ * wildcarded, rather than as a second loop that would have to stay in step with
+ * it. Two copies of a search is two places for a match rule to be edited.
+ */
+const pci_device_t *pci_find_class(uint8_t class_code, uint8_t subclass) {
+    return pci_find_class_if(class_code, subclass, PCI_MATCH_ANY);
 }
 
 /**
@@ -312,8 +323,16 @@ const char *pci_class_name(uint8_t class_code, uint8_t subclass) {
             if (subclass == 0x01)                    return "ISA bridge";
             if (subclass == PCI_SUBCLASS_PCI_BRIDGE) return "PCI bridge";
             return "Bridge";
-        case 0x0C:
-            if (subclass == 0x03) return "USB controller";
+        case PCI_CLASS_SERIAL_BUS:
+            /*
+             * Not "xHCI controller", although this kernel now has a driver that
+             * cares about the difference. The generation is in prog_if and this
+             * function is not given one - naming a controller from two thirds of
+             * its identity is how a UHCI would be labelled as the thing that is
+             * about to be driven. pci_find_class_if() is where the distinction
+             * belongs, and it has it.
+             */
+            if (subclass == PCI_SUBCLASS_USB) return "USB controller";
             return "Serial bus controller";
         case 0x00: return "Unclassified device";
         default:   return "Device";

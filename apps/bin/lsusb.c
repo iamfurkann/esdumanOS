@@ -31,7 +31,7 @@ void print(const char *str) {
  * @brief Main entry point for the application
  */
 void main(void) {
-    char report[1664];
+    char report[2240];
     int n;
 
     /*
@@ -47,11 +47,18 @@ void main(void) {
      * with something in it. free printed from inside the kernel until v0.9.2 and
      * that is exactly what it got wrong.
      *
-     * The buffer matches USBINFO_BUF on the kernel side. A short one would not
-     * be a fault - the kernel copies at most what it is given - but it would
-     * silently lose the last ports on the controller, and on a machine where
-     * something is plugged into a high-numbered port that is the half of the
-     * list the person running this is looking for.
+     * The buffer matches USBINFO_BUF on the kernel side, which grew in v1.9.0
+     * when the report started carrying two lines per device as well as one per
+     * port. A short one here would not be a fault - the kernel copies at most
+     * what it is given - but it would silently lose the end of the list, and on
+     * a machine where something is plugged into a high-numbered port that is the
+     * half the person running this is looking for.
+     *
+     * The number is written out rather than derived, because this file is
+     * compiled freestanding and cannot include the kernel's headers. That makes
+     * it a number in two places, which is the arrangement this project distrusts
+     * on principle - so xhci.h names this file where USBINFO_BUF is defined, and
+     * whoever moves one goes looking for the other.
      */
     n = syscall(70, (int)report, sizeof(report), 0); // SYSCALL_USBINFO
 

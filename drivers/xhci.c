@@ -105,6 +105,23 @@ static uint32_t             event_ring_phys = 0;
 static uint32_t event_dequeue = 0;
 static uint32_t event_ccs = 1;
 
+/* The same pair for the command ring, from the producing side. CRCR was
+ * programmed with RCS set, so the controller is looking for a one. */
+static uint32_t cmd_enqueue = 0;
+static uint32_t cmd_pcs = 1;
+
+/**
+ * @brief Bytes between two context entries, from HCCPARAMS1's CSZ bit.
+ *
+ * Not sizeof(xhci_context_t). The structure is eight doublewords on every
+ * controller; the *stride* is 32 or 64 depending on a bit the controller
+ * publishes, and the two are equal on QEMU's. A driver that indexed by sizeof()
+ * would read every context from the wrong offset on a controller with 64-byte
+ * ones and nothing in this tree would ever say so - which is the exact shape of
+ * the defect ata_identify() carried for thirty-six releases.
+ */
+static uint32_t ctx_stride = 0;
+
 /** What the ports reported, recorded once at bring-up. */
 typedef struct {
     uint8_t connected;
@@ -382,31 +399,91 @@ static void xhci_consume_event(void) {
 }
 
 /**
- * @brief Issues the one command this release sends and waits for its answer.
+ * @brief Waits for one event of a given type and copies it out of the ring.
  *
- * The TRB goes in slot zero and the enqueue pointer is not advanced, because
- * there is no second command: a ring index that is only ever zero is not a ring
- * index, and writing one would be writing a wrap case that nothing in this tree
- * can reach and therefore nothing can test. The Link TRB at the end of the
- * segment is still installed by the caller, because the shape of the ring is the
- * hardware's business rather than the driver's - a segment without one is
- * malformed whether or not anybody walks off its end.
+ * Everything else that arrives is read and dropped, and the deadline is
+ * deliberately not restarted by it. Port status change events queue up behind
+ * every reset this driver performs, and a waiter that stopped at the first
+ * record would take one of those for the answer it was waiting for.
  *
- * Port status change events may already be queued ahead of the completion: the
- * ports were powered a moment ago and the controller records that. They are read
- * and dropped. This release reads PORTSC directly rather than reacting to
- * events, so the record has served its purpose by being consumed - but it has to
- * be consumed, or the completion behind it is never reached.
+ * The record is copied before it is consumed. Once the dequeue pointer moves the
+ * controller is free to write over that entry, so reading a field afterwards is
+ * reading whatever arrived next - which for a slot id is the difference between
+ * addressing a device and addressing whatever the controller happened to write.
  *
- * @return E_OK when the command completed successfully, E_IO otherwise.
+ * @param want_type The TRB type to stop on.
+ * @param out Receives the record; may be 0.
+ * @param what Logged if nothing of that type arrives in time.
+ * @return E_OK, or E_IO on timeout.
  */
-static int xhci_noop_command(void) {
-    volatile xhci_trb_t *trb = &cmd_ring[0];
+static int xhci_wait_event(uint32_t want_type, xhci_trb_t *out, const char *what) {
+    uint32_t start = timer_get_ticks();
 
-    trb->param_lo = 0;
-    trb->param_hi = 0;
+    for (;;) {
+        volatile xhci_trb_t *ev = xhci_next_event();
+
+        if (ev != 0) {
+            xhci_trb_t copy;
+
+            copy.param_lo = ev->param_lo;
+            copy.param_hi = ev->param_hi;
+            copy.status   = ev->status;
+            copy.control  = ev->control;
+
+            xhci_consume_event();
+
+            if (XHCI_TRB_TYPE(copy.control) == want_type) {
+                if (out != 0) *out = copy;
+                return E_OK;
+            }
+            continue;
+        }
+
+        if ((timer_get_ticks() - start) > XHCI_TIMEOUT_TICKS) {
+            klog(LOG_LEVEL_ERROR, "XHCI", what);
+            return E_IO;
+        }
+        asm volatile("pause");
+    }
+}
+
+/**
+ * @brief Puts one command on the ring, rings the doorbell, waits for the answer.
+ *
+ * v1.8.0 issued exactly one command in the controller's lifetime and wrote it
+ * into slot zero without a ring pointer, on the argument that an index which is
+ * only ever zero is not an index. Enumeration issues two or three per device, so
+ * the pointer is real now - and with it the wrap, which follows the Link TRB and
+ * flips the producer's cycle state.
+ *
+ * That wrap cannot be reached today: XHCI_MAX_DEVICES is 8, each device costs at
+ * most three commands, and the segment holds 255 usable entries. It is written
+ * anyway for the reason the Link TRB was installed in the first place - the
+ * shape of a ring is the hardware's business, and a producer that walks off the
+ * end of a segment without following the link is wrong whether or not it ever
+ * gets there.
+ *
+ * @param ev Receives the Command Completion Event; may be 0.
+ * @return E_OK, or E_IO for a timeout or a completion code that is not success.
+ */
+static int xhci_command(uint32_t param_lo, uint32_t param_hi, uint32_t control,
+                        xhci_trb_t *ev, const char *what) {
+    if (cmd_enqueue == XHCI_TRBS_PER_SEGMENT - 1) {
+        volatile xhci_trb_t *link = &cmd_ring[cmd_enqueue];
+
+        link->control = (link->control & ~(uint32_t)XHCI_TRB_CYCLE) | cmd_pcs;
+        cmd_enqueue = 0;
+        cmd_pcs ^= 1;
+    }
+
+    volatile xhci_trb_t *trb = &cmd_ring[cmd_enqueue];
+
+    trb->param_lo = param_lo;
+    trb->param_hi = param_hi;
     trb->status   = 0;
-    trb->control  = XHCI_TRB_SET_TYPE(XHCI_TRB_NOOP_CMD) | XHCI_TRB_CYCLE;
+    trb->control  = control | cmd_pcs;
+
+    cmd_enqueue++;
 
     /*
      * The TRB is written above and the doorbell is rung here, in that order, and
@@ -420,37 +497,508 @@ static int xhci_noop_command(void) {
      */
     mmio_write(db_base, 0);
 
-    uint32_t start = timer_get_ticks();
+    xhci_trb_t got;
 
-    for (;;) {
-        volatile xhci_trb_t *ev = xhci_next_event();
+    if (xhci_wait_event(XHCI_TRB_CMD_COMPLETE, &got, what) != E_OK) return E_IO;
 
-        if (ev != 0) {
-            uint32_t type = XHCI_TRB_TYPE(ev->control);
-            uint32_t code = XHCI_TRB_COMPLETION(ev->status);
+    uint32_t code = XHCI_TRB_COMPLETION(got.status);
 
-            xhci_consume_event();
+    if (code != XHCI_COMPLETION_SUCCESS) {
+        klog_int(LOG_LEVEL_ERROR, "XHCI",
+                 "Command ring answered, with a completion code of", (int)code);
+        return E_IO;
+    }
 
-            if (type == XHCI_TRB_CMD_COMPLETE) {
-                if (code != XHCI_COMPLETION_SUCCESS) {
-                    klog_int(LOG_LEVEL_ERROR, "XHCI",
-                             "Command ring answered, with a completion code of", (int)code);
-                    return E_IO;
-                }
-                return E_OK;
+    if (ev != 0) *ev = got;
+    return E_OK;
+}
+
+/**
+ * @brief The command that proves the rings work, and moves nothing.
+ *
+ * A controller that has been reset and started reports itself as running with
+ * its rings pointed at any memory at all. The doorbell, both rings and the
+ * cycle-state agreement between driver and hardware are only demonstrated by
+ * putting a TRB on one and reading its completion off the other.
+ */
+static int xhci_noop_command(void) {
+    return xhci_command(0, 0, XHCI_TRB_SET_TYPE(XHCI_TRB_NOOP_CMD), 0,
+                        "No completion arrived on the event ring; the rings are not talking.");
+}
+
+/* ── Devices ────────────────────────────────────────────────────────── */
+
+/**
+ * @brief The frames one addressed device costs, and where it is in its rings.
+ *
+ * Four frames each, and not one of them has to be contiguous with another: a
+ * device context is at most 2048 bytes, an input context at most 2112, a
+ * transfer ring segment is exactly a page, and the descriptor buffer is a page
+ * because that is the clamp on what a device may claim its descriptors weigh.
+ *
+ * The two contexts do not share a frame, and the arithmetic is why rather than
+ * taste: 2048 and 2112 are 4160 together, which is sixty-four bytes more than
+ * there is. test_xhci.c asserts that, because it is the one place in this driver
+ * where two structures nearly fit and do not.
+ */
+typedef struct {
+    volatile uint8_t    *dev_ctx;
+    uint32_t             dev_ctx_phys;
+    volatile uint8_t    *in_ctx;
+    uint32_t             in_ctx_phys;
+    volatile xhci_trb_t *ep0_ring;
+    uint32_t             ep0_ring_phys;
+    uint32_t             ep0_enqueue;
+    uint32_t             ep0_pcs;
+    uint8_t             *desc_buf;
+    uint32_t             desc_buf_phys;
+} xhci_devres_t;
+
+static xhci_device_t devices[XHCI_MAX_DEVICES];
+static xhci_devres_t devres[XHCI_MAX_DEVICES];
+static int device_count = 0;
+static int device_truncated = 0;
+
+uint32_t xhci_context_stride(void) {
+    return ctx_stride;
+}
+
+int xhci_device_count(void) {
+    return device_count;
+}
+
+const xhci_device_t *xhci_get_device(int index) {
+    if (index < 0 || index >= device_count) return 0;
+    return &devices[index];
+}
+
+/** @brief The device recorded on a root hub port, numbered from one, or 0. */
+static const xhci_device_t *xhci_device_on_port(int port) {
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].port == (uint8_t)port) return &devices[i];
+    }
+    return 0;
+}
+
+/**
+ * @brief The doubleword array of one context entry.
+ *
+ * Every context access in this file goes through here, so the stride is applied
+ * in one place rather than at each call site. That is the whole defence against
+ * indexing by sizeof().
+ */
+static volatile uint32_t *ctx_entry(volatile uint8_t *base, int index) {
+    return (volatile uint32_t *)(base + (uint32_t)index * ctx_stride);
+}
+
+int xhci_parse_config(const uint8_t *buf, uint32_t len, xhci_config_info_t *out) {
+    if (buf == 0 || out == 0) return E_INVAL;
+    if (len < USB_CONFIG_DESC_LEN) return E_INVAL;
+
+    /*
+     * The first descriptor has to be the configuration itself. Anything else is
+     * a buffer that did not come from the transfer this function is for, and
+     * walking it would be reading lengths out of whatever it actually is.
+     */
+    if (buf[1] != USB_DESC_CONFIG) return E_INVAL;
+
+    xhci_config_info_t found;
+
+    ft_memset(&found, 0, sizeof(found));
+    found.total_length = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8));
+
+    uint32_t off = 0;
+
+    while (off + 2 <= len) {
+        uint8_t dlen  = buf[off];
+        uint8_t dtype = buf[off + 1];
+
+        /*
+         * A zero length is not a malformed descriptor to step over. It is a walk
+         * that never ends, and every byte being stepped by came from the device -
+         * so this is the same bound the extended capability chain got in v1.8.0,
+         * arrived at from the other side of the machine. Refused rather than
+         * skipped, because a descriptor set containing one is not describing
+         * anything.
+         */
+        if (dlen == 0) return E_INVAL;
+
+        /* The last descriptor cut short by the transfer. What was read is still
+         * usable; what was not is simply not counted. */
+        if (off + dlen > len) break;
+
+        if (dtype == USB_DESC_INTERFACE && dlen >= 9) {
+            if (found.interfaces == 0) {
+                found.iface_class    = buf[off + 5];
+                found.iface_subclass = buf[off + 6];
+                found.iface_protocol = buf[off + 7];
             }
-
-            /* Something else - a port that just came up. Dropped, and the
-             * deadline below is deliberately not restarted by it. */
-            continue;
+            if (found.interfaces < 0xFF) found.interfaces++;
+        } else if (dtype == USB_DESC_ENDPOINT) {
+            if (found.endpoints < 0xFF) found.endpoints++;
         }
 
-        if ((timer_get_ticks() - start) > XHCI_TIMEOUT_TICKS) {
-            klog(LOG_LEVEL_ERROR, "XHCI",
-                 "No completion arrived on the event ring; the rings are not talking.");
+        off += dlen;
+    }
+
+    *out = found;
+    return E_OK;
+}
+
+/**
+ * @brief Resets one port and leaves it enabled, or reports that it would not.
+ *
+ * A port reset is what makes the speed field mean anything: before one, PORTSC's
+ * speed is undefined, which is why v1.8.0's lsusb could print "unknown speed"
+ * for a device that was plainly attached. It is also what a device needs before
+ * it will answer to a slot.
+ *
+ * The write goes through XHCI_PORTSC_PRESERVE like every other write to this
+ * register, and the acknowledgement afterwards names the two change bits a reset
+ * raises rather than writing back everything that was set.
+ */
+static int xhci_port_reset(int port) {
+    uint32_t portsc = mmio_read(portsc_off(port));
+
+    mmio_write(portsc_off(port), (portsc & XHCI_PORTSC_PRESERVE) | XHCI_PORTSC_PR);
+
+    uint32_t start = timer_get_ticks();
+
+    while (!(mmio_read(portsc_off(port)) & XHCI_PORTSC_PRC)) {
+        if ((timer_get_ticks() - start) > XHCI_RESET_TICKS) {
+            klog_int(LOG_LEVEL_WARN, "XHCI", "Port would not finish resetting", port + 1);
             return E_IO;
         }
         asm volatile("pause");
+    }
+
+    portsc = mmio_read(portsc_off(port));
+    mmio_write(portsc_off(port),
+               (portsc & XHCI_PORTSC_PRESERVE) | XHCI_PORTSC_PRC | XHCI_PORTSC_CSC);
+
+    if (!(mmio_read(portsc_off(port)) & XHCI_PORTSC_PED)) {
+        klog_int(LOG_LEVEL_WARN, "XHCI", "Port did not enable after its reset", port + 1);
+        return E_IO;
+    }
+
+    return E_OK;
+}
+
+/** @brief Endpoint zero's packet size before the device has been asked. */
+static uint32_t ep0_packet_size(uint8_t speed) {
+    if (speed == XHCI_SPEED_HIGH) return XHCI_EP0_MPS_HIGH;
+    if (speed == XHCI_SPEED_SUPER || speed == XHCI_SPEED_SUPER_PLUS) {
+        return XHCI_EP0_MPS_SUPER;
+    }
+    return XHCI_EP0_MPS_DEFAULT;
+}
+
+/** @brief Puts one TRB on a device's control ring, following the link at the end. */
+static void ep0_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
+                     uint32_t status, uint32_t control) {
+    if (r->ep0_enqueue == XHCI_TRBS_PER_SEGMENT - 1) {
+        volatile xhci_trb_t *link = &r->ep0_ring[r->ep0_enqueue];
+
+        link->control = (link->control & ~(uint32_t)XHCI_TRB_CYCLE) | r->ep0_pcs;
+        r->ep0_enqueue = 0;
+        r->ep0_pcs ^= 1;
+    }
+
+    volatile xhci_trb_t *t = &r->ep0_ring[r->ep0_enqueue];
+
+    t->param_lo = lo;
+    t->param_hi = hi;
+    t->status   = status;
+    t->control  = control | r->ep0_pcs;
+
+    r->ep0_enqueue++;
+}
+
+/**
+ * @brief One device-to-host control transfer into the device's own buffer.
+ *
+ * Three stages, and the third is where the direction stops being obvious. A
+ * status stage runs opposite to the data stage it follows, so a read ends with
+ * an OUT; a transfer with no data stage has no opposite and its status stage
+ * must be IN. Getting that backwards is a transfer the controller accepts and
+ * never completes.
+ *
+ * Only the last TRB carries interrupt-on-completion, so one event comes back for
+ * the whole transfer rather than three.
+ *
+ * @return E_OK, or E_IO. On success the bytes are in r->desc_buf.
+ */
+static int xhci_control_in(int index, uint8_t request_type, uint8_t request,
+                           uint16_t value, uint16_t windex, uint16_t length) {
+    xhci_devres_t *r = &devres[index];
+    uint8_t slot = devices[index].slot;
+
+    uint32_t setup_lo = (uint32_t)request_type
+                      | ((uint32_t)request << 8)
+                      | ((uint32_t)value << 16);
+    uint32_t setup_hi = (uint32_t)windex | ((uint32_t)length << 16);
+
+    ep0_push(r, setup_lo, setup_hi, 8,
+             XHCI_TRB_SET_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT
+             | (length ? XHCI_TRT_IN : XHCI_TRT_NO_DATA));
+
+    if (length) {
+        ep0_push(r, r->desc_buf_phys, 0, length,
+                 XHCI_TRB_SET_TYPE(XHCI_TRB_DATA_STAGE) | XHCI_TRB_DIR_IN);
+    }
+
+    ep0_push(r, 0, 0, 0,
+             XHCI_TRB_SET_TYPE(XHCI_TRB_STATUS_STAGE) | XHCI_TRB_IOC
+             | (length ? 0 : XHCI_TRB_DIR_IN));
+
+    /* Doorbell for this slot, target 1: endpoint zero. Doorbell zero belongs to
+     * the command ring and every other index is a slot. */
+    mmio_write(db_base + (uint32_t)slot * 4, 1);
+
+    xhci_trb_t ev;
+
+    if (xhci_wait_event(XHCI_TRB_TRANSFER_EV, &ev,
+                        "A control transfer never completed.") != E_OK) {
+        return E_IO;
+    }
+
+    uint32_t code = XHCI_TRB_COMPLETION(ev.status);
+
+    /*
+     * Short packet is a success. A device that has less to say than it was asked
+     * for ends the transfer early and reports the shortfall as a residual, which
+     * is the normal way a descriptor read of "give me everything" terminates.
+     */
+    if (code != XHCI_COMPLETION_SUCCESS && code != 13 /* Short Packet */) {
+        klog_int(LOG_LEVEL_WARN, "XHCI", "Control transfer failed with code", (int)code);
+        return E_IO;
+    }
+
+    return E_OK;
+}
+
+/**
+ * @brief Builds the input context Address Device reads, and issues it.
+ *
+ * A0 and A1: the slot context and endpoint zero, which is the whole of what this
+ * command is allowed to be given. The slot context carries the speed, the root
+ * hub port the device is on, and a context-entries count of one - meaning the
+ * device has exactly endpoint zero, which is true until an interface is chosen.
+ */
+static int xhci_address_device(int index, uint8_t speed, int port) {
+    xhci_devres_t *r = &devres[index];
+
+    /* Both contexts arrive zeroed - alloc_dma_page() clears the frame - so what
+     * follows sets the fields that must be set and leaves the rest at the zero
+     * the specification wants them at. There is no second pass over a device
+     * here: nothing re-enumerates. */
+    volatile uint32_t *control = ctx_entry(r->in_ctx, 0);
+    volatile uint32_t *slot    = ctx_entry(r->in_ctx, 1);
+    volatile uint32_t *ep0     = ctx_entry(r->in_ctx, 2);
+
+    control[1] = XHCI_IN_ADD_SLOT | XHCI_IN_ADD_EP0;
+
+    slot[0] = XHCI_SLOT_SPEED(speed) | XHCI_SLOT_CTX_ENTRIES(1);
+    slot[1] = XHCI_SLOT_ROOT_PORT(port + 1);
+
+    ep0[1] = XHCI_EP_TYPE(XHCI_EP_TYPE_CONTROL)
+           | XHCI_EP_CERR(3)
+           | XHCI_EP_MAX_PACKET(ep0_packet_size(speed));
+    ep0[2] = r->ep0_ring_phys | XHCI_EP_DCS;
+    ep0[3] = 0;
+    ep0[4] = 8;   /* average TRB length; the specification asks for 8 here */
+
+    return xhci_command(r->in_ctx_phys, 0,
+                        XHCI_TRB_SET_TYPE(XHCI_TRB_ADDRESS_DEV)
+                        | XHCI_TRB_SET_SLOT(devices[index].slot),
+                        0, "Address Device never completed.");
+}
+
+/**
+ * @brief Re-opens endpoint zero at the packet size the device actually uses.
+ *
+ * Only a full-speed device can surprise us here: every other speed fixes the
+ * size, and this one may answer 8, 16, 32 or 64. Endpoint zero is opened at 8 so
+ * that the first eight bytes can be read whatever the answer is, and this is
+ * what corrects it afterwards.
+ *
+ * QEMU's keyboard and mouse are full-speed devices that answer 8, so on every
+ * machine this project can run on the comparison below is equal and this
+ * function returns without issuing anything. It exists for the machine the
+ * project is aimed at.
+ */
+static int xhci_refine_ep0(int index, uint32_t reported) {
+    xhci_devres_t *r = &devres[index];
+    volatile uint32_t *ep0_in = ctx_entry(r->in_ctx, 2);
+    uint32_t current = (ep0_in[1] >> 16) & 0xFFFF;
+
+    if (reported == 0 || reported == current) return E_OK;
+
+    klog_int(LOG_LEVEL_INFO, "XHCI",
+             "Re-opening endpoint zero at the size the device reported", (int)reported);
+
+    volatile uint32_t *control = ctx_entry(r->in_ctx, 0);
+
+    control[0] = 0;
+    control[1] = XHCI_IN_ADD_EP0;
+
+    ep0_in[1] = (ep0_in[1] & 0x0000FFFF) | XHCI_EP_MAX_PACKET(reported);
+
+    return xhci_command(r->in_ctx_phys, 0,
+                        XHCI_TRB_SET_TYPE(XHCI_TRB_EVAL_CTX)
+                        | XHCI_TRB_SET_SLOT(devices[index].slot),
+                        0, "Evaluate Context never completed.");
+}
+
+/**
+ * @brief Gives one connected port's device a slot, an address, and a name.
+ *
+ * Every failure here abandons the device rather than the enumeration: a port
+ * that will not reset, a slot the controller will not enable or a device that
+ * will not describe itself costs that port and nothing else. A machine where one
+ * of four devices is broken should report the other three.
+ *
+ * @return E_OK when the device was recorded.
+ */
+static int xhci_enumerate_port(int port) {
+    if (device_count >= XHCI_MAX_DEVICES) {
+        device_truncated = 1;
+        return E_NOMEM;
+    }
+
+    if (xhci_port_reset(port) != E_OK) return E_IO;
+
+    uint32_t portsc = mmio_read(portsc_off(port));
+    uint8_t  speed  = (uint8_t)XHCI_PORTSC_SPEED(portsc);
+
+    xhci_trb_t ev;
+
+    if (xhci_command(0, 0, XHCI_TRB_SET_TYPE(XHCI_TRB_ENABLE_SLOT), &ev,
+                     "Enable Slot never completed.") != E_OK) {
+        return E_IO;
+    }
+
+    uint8_t slot = (uint8_t)XHCI_TRB_SLOT(ev.control);
+
+    if (slot == 0 || slot > XHCI_MAX_SLOTS) {
+        klog_int(LOG_LEVEL_ERROR, "XHCI", "Controller returned an unusable slot id", slot);
+        return E_IO;
+    }
+
+    int index = device_count;
+    xhci_devres_t *r = &devres[index];
+
+    ft_memset(&devices[index], 0, sizeof(xhci_device_t));
+    devices[index].port  = (uint8_t)(port + 1);
+    devices[index].slot  = slot;
+    devices[index].speed = speed;
+
+    r->dev_ctx = (volatile uint8_t *)alloc_dma_page(&r->dev_ctx_phys);
+    r->in_ctx  = (volatile uint8_t *)alloc_dma_page(&r->in_ctx_phys);
+    r->ep0_ring = (volatile xhci_trb_t *)alloc_dma_page(&r->ep0_ring_phys);
+    r->desc_buf = alloc_dma_page(&r->desc_buf_phys);
+
+    if (r->dev_ctx == 0 || r->in_ctx == 0 || r->ep0_ring == 0 || r->desc_buf == 0) {
+        klog(LOG_LEVEL_ERROR, "XHCI", "Out of memory addressing a device.");
+        return E_NOMEM;
+    }
+
+    /* The control ring is a ring, so it ends in a link back to its own start -
+     * the same shape the command ring has and for the same reason. */
+    volatile xhci_trb_t *link = &r->ep0_ring[XHCI_TRBS_PER_SEGMENT - 1];
+
+    link->param_lo = r->ep0_ring_phys;
+    link->param_hi = 0;
+    link->status   = 0;
+    link->control  = XHCI_TRB_SET_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC | XHCI_TRB_CYCLE;
+
+    r->ep0_enqueue = 0;
+    r->ep0_pcs = 1;
+
+    /* Entry zero of the device context array is the scratchpad array; slots are
+     * numbered from one, and this is why. */
+    volatile uint32_t *dcbaa = (volatile uint32_t *)(dma_virt + XHCI_OFF_DCBAA);
+
+    dcbaa[slot * 2]     = r->dev_ctx_phys;
+    dcbaa[slot * 2 + 1] = 0;
+
+    if (xhci_address_device(index, speed, port) != E_OK) return E_IO;
+
+    /*
+     * Eight bytes first, and the eighth is why: bMaxPacketSize0. It cannot be
+     * read without a working endpoint zero and endpoint zero cannot be sized
+     * without it, and eight bytes is the amount that fits in one packet at every
+     * size the field can hold.
+     */
+    if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+                        (uint16_t)(USB_DESC_DEVICE << 8), 0, 8) != E_OK) {
+        return E_IO;
+    }
+
+    if (xhci_refine_ep0(index, r->desc_buf[7]) != E_OK) return E_IO;
+
+    if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+                        (uint16_t)(USB_DESC_DEVICE << 8), 0,
+                        USB_DEVICE_DESC_LEN) != E_OK) {
+        return E_IO;
+    }
+
+    const uint8_t *d = r->desc_buf;
+
+    devices[index].dev_class    = d[4];
+    devices[index].dev_subclass = d[5];
+    devices[index].dev_protocol = d[6];
+    devices[index].vendor_id    = (uint16_t)(d[8]  | ((uint16_t)d[9]  << 8));
+    devices[index].product_id   = (uint16_t)(d[10] | ((uint16_t)d[11] << 8));
+
+    /*
+     * The configuration descriptor twice: nine bytes to learn wTotalLength, then
+     * that many. The length comes from the device, so it is clamped to the
+     * buffer rather than believed - a device claiming 60000 bytes of descriptors
+     * would otherwise be a write past a page.
+     */
+    if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+                        (uint16_t)(USB_DESC_CONFIG << 8), 0,
+                        USB_CONFIG_DESC_LEN) == E_OK) {
+        uint32_t total = (uint32_t)(r->desc_buf[2] | ((uint32_t)r->desc_buf[3] << 8));
+
+        if (total > XHCI_DESC_BUF_LEN) total = XHCI_DESC_BUF_LEN;
+        if (total < USB_CONFIG_DESC_LEN) total = USB_CONFIG_DESC_LEN;
+
+        if (xhci_control_in(index, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+                            (uint16_t)(USB_DESC_CONFIG << 8), 0,
+                            (uint16_t)total) == E_OK) {
+            xhci_parse_config(r->desc_buf, total, &devices[index].config);
+        }
+    }
+
+    device_count++;
+    return E_OK;
+}
+
+/**
+ * @brief Walks every port that reported a device and enumerates what is there.
+ *
+ * Reported by xhci_bring_up_ports(), which ran before the No Op command. A port
+ * that fails is logged and skipped; the walk continues.
+ */
+static void xhci_enumerate(void) {
+    for (int i = 0; i < xhci_ports; i++) {
+        if (!port_state[i].connected) continue;
+        if (device_count >= XHCI_MAX_DEVICES) {
+            device_truncated = 1;
+            klog_int(LOG_LEVEL_WARN, "XHCI",
+                     "More devices are attached than this driver addresses; the list stops at",
+                     XHCI_MAX_DEVICES);
+            break;
+        }
+
+        if (xhci_enumerate_port(i) != E_OK) continue;
+
+        /* The speed field only means something after the reset, so the port
+         * record is corrected from what enumeration learned. */
+        port_state[i].speed   = devices[device_count - 1].speed;
+        port_state[i].enabled = 1;
     }
 }
 
@@ -542,6 +1090,7 @@ static const char *xhci_speed_name(uint8_t speed) {
 static int xhci_give_up(int err) {
     xhci_ready = 0;
     xhci_ports = 0;
+    device_count = 0;
     return err;
 }
 
@@ -595,6 +1144,38 @@ int xhci_format_inventory(char *out, int cap) {
                         "Port %d: connected, %s, %s\n", i + 1,
                         xhci_speed_name(port_state[i].speed),
                         port_state[i].enabled ? "enabled" : "not enabled");
+
+        /*
+         * The device on that port, if enumeration got that far. A port that
+         * reports a device and has no line under it is a device that would not
+         * answer, which is worth being able to see rather than smoothing over -
+         * so the port line is printed either way and this one is extra.
+         */
+        const xhci_device_t *d = xhci_device_on_port(i + 1);
+
+        if (d == 0) continue;
+
+        used = kbprintf(out, (uint32_t)cap, (uint32_t)used,
+                        "  slot %d %04x:%04x class %02x/%02x/%02x\n",
+                        d->slot, d->vendor_id, d->product_id,
+                        d->dev_class, d->dev_subclass, d->dev_protocol);
+
+        /*
+         * A device class of zero means the device declines to answer at that
+         * level and the interface is where the answer is - which is the case for
+         * every HID device, so it is the common case rather than the odd one.
+         */
+        used = kbprintf(out, (uint32_t)cap, (uint32_t)used,
+                        "  %d interface%s, %d endpoint%s, interface class %02x/%02x/%02x\n",
+                        d->config.interfaces, d->config.interfaces == 1 ? "" : "s",
+                        d->config.endpoints, d->config.endpoints == 1 ? "" : "s",
+                        d->config.iface_class, d->config.iface_subclass,
+                        d->config.iface_protocol);
+    }
+
+    if (device_truncated) {
+        used = kbprintf(out, (uint32_t)cap, (uint32_t)used,
+                        "(devices not addressed past %d)\n", XHCI_MAX_DEVICES);
     }
 
     /*
@@ -780,6 +1361,16 @@ int xhci_init(void) {
 
     uint32_t hcsparams1 = mmio_read(XHCI_CAP_HCSPARAMS1);
     uint32_t hcsparams2 = mmio_read(XHCI_CAP_HCSPARAMS2);
+
+    /*
+     * The distance between two context entries, and the one number in this
+     * driver that must not be taken from sizeof(). A controller with 64-byte
+     * contexts lays them out twice as far apart as the structure is long, and
+     * QEMU's uses 32 - so a driver that indexed by the structure would be
+     * correct on every machine this project can run on and wrong on a great many
+     * it cannot. ata_identify() was that shape of wrong for thirty-six releases.
+     */
+    ctx_stride = XHCI_HCC1_CSZ(hccparams1) ? 64 : 32;
     int reported_ports  = (int)XHCI_HCS1_MAXPORTS(hcsparams1);
     int reported_slots  = (int)XHCI_HCS1_MAXSLOTS(hcsparams1);
 
@@ -911,8 +1502,15 @@ int xhci_init(void) {
      * Only here. Everything above can be true of a controller this driver cannot
      * actually use, so the flag that says otherwise is set after the one thing
      * that could not be true of it.
+     *
+     * Set before enumeration rather than after, and deliberately: a bus that
+     * works is what this flag is about, and a device that refuses to describe
+     * itself does not make the controller stop working. Enumeration reports its
+     * own failures per port and takes nothing else down with them.
      */
     xhci_ready = 1;
+
+    xhci_enumerate();
 
     int connected = 0;
 
@@ -920,8 +1518,8 @@ int xhci_init(void) {
         if (port_state[i].connected) connected++;
     }
 
-    printk("[XHCI] USB controller %02x:%02x.%d: %d ports, %d connected [Polled]\n",
-           dev->bus, dev->device, dev->function, xhci_ports, connected);
+    printk("[XHCI] USB controller %02x:%02x.%d: %d ports, %d connected, %d addressed [Polled]\n",
+           dev->bus, dev->device, dev->function, xhci_ports, connected, device_count);
 
     /*
      * And a record as well as a line on the screen, which is not the same thing.
@@ -938,7 +1536,7 @@ int xhci_init(void) {
      * one that goes right that was invisible.
      */
     klog_int(LOG_LEVEL_INFO, "XHCI",
-             "Controller running; ports with a device attached", connected);
+             "Controller running; devices addressed and described", device_count);
 
     return E_OK;
 }

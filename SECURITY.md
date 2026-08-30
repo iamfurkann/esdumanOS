@@ -4,15 +4,15 @@
 
 | Version  | Supported          |
 | -------- | ------------------ |
-| 1.8.x    | :white_check_mark: |
-| 1.7.x    | :x:                |
-| ≤ 1.6.x  | :x:                |
+| 1.9.x    | :white_check_mark: |
+| 1.8.x    | :x:                |
+| ≤ 1.7.x  | :x:                |
 
 Only the current minor line is supported. This table said 0.4.x for five minor releases
 and then 0.9.x for two more, and then it said 1.2.x through the whole of 1.3 — the
 sentence warning about the habit was four lines long and did not stop it happening again,
 which is why the release checklist now names this file. The line that matters is the
-current one, and it is 1.8.x.
+current one, and it is 1.9.x.
 
 **Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
 release before it encrypted the file system under a key compiled into the kernel image,
@@ -179,6 +179,14 @@ described inaccurately is worse than one described plainly — in either directi
 - The block cache is write-back. Dirty sectors are bounded by volume (32 slots) and by
   time (5 seconds), and `sync()` flushes on demand — but an abrupt power loss inside
   that window still loses the sectors in it.
+- **USB descriptors are the first attacker-supplied structure this kernel walks.** Every
+  length in a configuration descriptor comes from the device, and a USB device is
+  something a person plugs in. The walk refuses a zero length rather than stepping over
+  it, stops at the buffer it was given, and clamps `wTotalLength` to one frame instead of
+  believing it; the device and product identifiers it records are reported and never
+  used to decide anything. What it does not do is authenticate the device, because
+  nothing on this bus can be authenticated - a malicious device is a limitation of USB
+  rather than of this driver, and the answer to it is not plugging one in.
 - Two drivers now enable PCI bus mastering and hand a controller physical addresses to
   read and write: AHCI since 1.5.0, and XHCI since 1.8.0. A bus-mastering device is not
   constrained by the page tables — there is no IOMMU here and no plan for one — so a

@@ -31,6 +31,7 @@
 #include "pci.h"
 #include "pmm.h"
 #include "libft.h"
+#include "errno.h"
 
 /**
  * @brief The shapes the controller reads out of memory on its own.
@@ -240,13 +241,166 @@ static void run_inventory_assertions(void) {
                  "[STRICT] [XHCI] a null buffer and a zero capacity are refused rather than written to");
 }
 
+/**
+ * @brief The one number in this driver that must not come from sizeof().
+ *
+ * A context entry is eight doublewords on every controller ever made. The
+ * distance between two of them is 32 or 64 bytes depending on HCCPARAMS1's CSZ
+ * bit, and those are the same number on QEMU's controller and different on a
+ * great many others. A driver that indexed contexts by the size of the structure
+ * would read every one of them from the wrong offset on such a machine, and
+ * nothing in this tree would ever fail - which is precisely the shape of defect
+ * ata_identify() carried from v0.1.0 to v1.4.0.
+ *
+ * So the stride is asserted to be what the register says rather than what the
+ * structure weighs, and the placement arithmetic is checked at *both* strides,
+ * including the one this machine does not use. That second half is the only
+ * thing in the suite that exercises the 64-byte layout at all.
+ */
+static void run_context_assertions(void) {
+    KTEST_ASSERT(sizeof(xhci_context_t) == 32,
+                 "[STRICT] [XHCI] a context entry is eight doublewords");
+
+    uint32_t stride = xhci_context_stride();
+
+    KTEST_ASSERT(stride == 32 || stride == 64,
+                 "[STRICT] [XHCI] the context stride is one of the two the specification allows");
+    KTEST_ASSERT(stride != 0 && (stride == 32) != (stride == 64),
+                 "[STRICT] [XHCI] and the driver read it rather than leaving it unset");
+
+    /*
+     * Both strides, and the second is the point. At 64 bytes a device context is
+     * 2048 and an input context 2112 - each fits a frame on its own, and the two
+     * together are 4160, which is sixty-four bytes more than there is. That is
+     * the whole argument for allocating them separately, and it is false at 32
+     * bytes, so a test that only checked this machine's stride would prove
+     * nothing about it.
+     */
+    for (uint32_t s = 32; s <= 64; s += 32) {
+        uint32_t dev_ctx = XHCI_DEV_CTX_ENTRIES * s;
+        uint32_t in_ctx  = XHCI_IN_CTX_ENTRIES * s;
+
+        KTEST_ASSERT(dev_ctx <= PAGE_SIZE && in_ctx <= PAGE_SIZE,
+                     s == 32
+                       ? "[STRICT] [XHCI] at a 32-byte stride each context fits one frame"
+                       : "[STRICT] [XHCI] and at a 64-byte stride each still does");
+    }
+
+    KTEST_ASSERT((XHCI_DEV_CTX_ENTRIES * 64) + (XHCI_IN_CTX_ENTRIES * 64) > PAGE_SIZE,
+                 "[STRICT] [XHCI] but the two together do not, which is why they get a frame each");
+
+    KTEST_ASSERT(XHCI_DESC_BUF_LEN == PAGE_SIZE,
+                 "[STRICT] [XHCI] the descriptor buffer is exactly the frame it is allocated from");
+}
+
+/**
+ * @brief The walk over bytes the device chose, including the ones it should not.
+ *
+ * Every length stepped by in a configuration descriptor came from the device.
+ * A zero length is not a malformed field to step over - it is a walk that never
+ * ends - and this is the same bound the extended capability chain got in v1.8.0,
+ * reached from the other side of the machine. Driven with buffers made up here,
+ * because a controller cannot be asked to produce a broken one.
+ */
+static void run_descriptor_walk_assertions(void) {
+    xhci_config_info_t info;
+
+    /* A configuration, one interface (HID boot keyboard), one endpoint. */
+    static const uint8_t good[] = {
+        0x09, USB_DESC_CONFIG, 25, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32,
+        0x09, USB_DESC_INTERFACE, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00,
+        0x07, USB_DESC_ENDPOINT, 0x81, 0x03, 0x08, 0x00, 0x0A
+    };
+
+    KTEST_ASSERT(xhci_parse_config(good, sizeof(good), &info) == E_OK &&
+                 info.interfaces == 1 && info.endpoints == 1 &&
+                 info.total_length == 25,
+                 "[STRICT] [XHCI] a configuration descriptor is walked and its parts counted");
+
+    KTEST_ASSERT(info.iface_class == 0x03 && info.iface_subclass == 0x01 &&
+                 info.iface_protocol == 0x01,
+                 "[STRICT] [XHCI] and the first interface's class, subclass and protocol are kept");
+
+    /* The same bytes with the interface claiming no length. */
+    static const uint8_t zero_len[] = {
+        0x09, USB_DESC_CONFIG, 25, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32,
+        0x00, USB_DESC_INTERFACE, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00
+    };
+
+    KTEST_ASSERT(xhci_parse_config(zero_len, sizeof(zero_len), &info) == E_INVAL,
+                 "[STRICT] [XHCI] a descriptor claiming zero length is refused, not stepped over");
+
+    static const uint8_t not_config[] = {
+        0x09, USB_DESC_INTERFACE, 25, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32
+    };
+
+    KTEST_ASSERT(xhci_parse_config(not_config, sizeof(not_config), &info) == E_INVAL,
+                 "[STRICT] [XHCI] a buffer that does not begin with a configuration is refused");
+
+    KTEST_ASSERT(xhci_parse_config(good, 4, &info) == E_INVAL &&
+                 xhci_parse_config(0, 32, &info) == E_INVAL,
+                 "[STRICT] [XHCI] so are a buffer too short to hold one and no buffer at all");
+
+    /*
+     * A last descriptor the transfer cut in half. What arrived whole is counted
+     * and the fragment is not, and nothing reads past the length given - which
+     * is the difference between a short read and a buffer overrun.
+     */
+    KTEST_ASSERT(xhci_parse_config(good, sizeof(good) - 3, &info) == E_OK &&
+                 info.interfaces == 1 && info.endpoints == 0,
+                 "[STRICT] [XHCI] a descriptor cut short by the transfer is dropped, not read past");
+}
+
+/**
+ * @brief The devices the boot path addressed.
+ *
+ * Every kernel test target attaches a USB keyboard and a USB mouse, so two
+ * devices is what these machines have and one is the floor this asserts.
+ */
+static void run_device_assertions(void) {
+    int n = xhci_device_count();
+
+    KTEST_ASSERT(n > 0 && n <= XHCI_MAX_DEVICES,
+                 "[STRICT] [XHCI] at least one device was given a slot and an address");
+
+    KTEST_ASSERT(xhci_get_device(-1) == 0 && xhci_get_device(n) == 0,
+                 "[STRICT] [XHCI] a negative index and one past the last address nothing");
+
+    const xhci_device_t *d = xhci_get_device(0);
+
+    if (d == 0) {
+        KTEST_ASSERT(0, "[STRICT] [XHCI] the first device answers with a vendor and a product");
+        KTEST_ASSERT(0, "[STRICT] [XHCI] and it sits on a port that reported it connected");
+        KTEST_ASSERT(0, "[STRICT] [XHCI] and its configuration descriptor held an interface");
+        return;
+    }
+
+    KTEST_ASSERT(d->vendor_id != 0 && d->vendor_id != 0xFFFF,
+                 "[STRICT] [XHCI] the first device answers with a vendor and a product");
+    KTEST_ASSERT(d->port >= 1 && d->port <= XHCI_MAX_PORTS && d->slot >= 1,
+                 "[STRICT] [XHCI] and it sits on a port that reported it connected");
+    KTEST_ASSERT(d->config.interfaces > 0 && d->config.endpoints > 0,
+                 "[STRICT] [XHCI] and its configuration descriptor held an interface and an endpoint");
+
+    /*
+     * The observable consequence of the port reset this release added. Before
+     * one, PORTSC's speed field is undefined and v1.8.0's lsusb printed "unknown
+     * speed" for a device that was plainly attached.
+     */
+    KTEST_ASSERT(d->speed >= XHCI_SPEED_FULL && d->speed <= XHCI_SPEED_SUPER_PLUS,
+                 "[STRICT] [XHCI] and its speed is a named one, which it only is after a reset");
+}
+
 void run_xhci_tests(void) {
     printk("\n--- XHCI and USB Bus Tests ---\n");
 
     run_layout_assertions();
     run_segment_placement_assertions();
+    run_context_assertions();
     run_register_field_assertions();
+    run_descriptor_walk_assertions();
     run_lookup_assertions();
     run_controller_assertions();
+    run_device_assertions();
     run_inventory_assertions();
 }

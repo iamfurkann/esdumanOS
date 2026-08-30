@@ -4,15 +4,15 @@
 
 | Version  | Supported          |
 | -------- | ------------------ |
-| 1.9.x    | :white_check_mark: |
-| 1.8.x    | :x:                |
-| ≤ 1.7.x  | :x:                |
+| 1.10.x   | :white_check_mark: |
+| 1.9.x    | :x:                |
+| ≤ 1.8.x  | :x:                |
 
 Only the current minor line is supported. This table said 0.4.x for five minor releases
 and then 0.9.x for two more, and then it said 1.2.x through the whole of 1.3 — the
 sentence warning about the habit was four lines long and did not stop it happening again,
 which is why the release checklist now names this file. The line that matters is the
-current one, and it is 1.9.x.
+current one, and it is 1.10.x.
 
 **Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
 release before it encrypted the file system under a key compiled into the kernel image,
@@ -179,6 +179,14 @@ described inaccurately is worse than one described plainly — in either directi
 - The block cache is write-back. Dirty sectors are bounded by volume (32 slots) and by
   time (5 seconds), and `sync()` flushes on demand — but an abrupt power loss inside
   that window still loses the sectors in it.
+- **A HID report is attacker-supplied too, and six of its eight bytes are used as table
+  indices.** The translation table is 232 entries and a usage is a `uint8_t`, so every
+  possible value indexes inside it - which is arithmetic rather than a bounds check, and
+  is why the table is sized to the type instead of to the usages that are defined. An
+  entry nothing fills reads as zero and the key is dropped. A malicious keyboard can
+  therefore make this kernel believe any key was pressed, which is a limitation of
+  trusting a keyboard at all rather than of this driver: a device that can type is a
+  device that can type.
 - **USB descriptors are the first attacker-supplied structure this kernel walks.** Every
   length in a configuration descriptor comes from the device, and a USB device is
   something a person plugs in. The walk refuses a zero length rather than stepping over

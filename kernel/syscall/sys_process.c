@@ -22,6 +22,7 @@
 #include "paging.h"
 #include "rtc.h"
 #include "pci.h"
+#include "xhci.h"
 /* For the exec() modes and the wait() flags and status bits. */
 #include "syscall.h"
 
@@ -755,6 +756,34 @@ void sys_pciinfo(arch_regs_t *regs) {
     if (!text) { regs->eax = E_NOMEM; return; }
 
     int n = pci_format_inventory(text, PCIINFO_BUF);
+
+    deliver_text(regs, ubuf, ucap, text, n);
+    kfree(text);
+}
+
+/**
+ * @brief Renders the USB controller and its ports into the caller's buffer.
+ *
+ * PCIINFO's twin, down to the heap staging and the root check, because it is the
+ * same kind of answer: a table the boot path filled in, rendered by the kernel
+ * and written out by the program so that redirecting it produces a file.
+ *
+ * A machine with no xHCI controller is not an error here. xhci_format_inventory()
+ * says so in one line and this returns that line, because "there is no USB
+ * controller on this machine" is the answer to the question rather than a
+ * failure to answer it - and every test target that lacks one would otherwise
+ * make `lsusb` look broken.
+ */
+void sys_usbinfo(arch_regs_t *regs) {
+    void *ubuf = (void *)regs->ebx;
+    uint32_t ucap = (uint32_t)regs->ecx;
+
+    if (!diag_ready(regs, ubuf, ucap)) return;
+
+    char *text = (char *)kmalloc(USBINFO_BUF);
+    if (!text) { regs->eax = E_NOMEM; return; }
+
+    int n = xhci_format_inventory(text, USBINFO_BUF);
 
     deliver_text(regs, ubuf, ucap, text, n);
     kfree(text);

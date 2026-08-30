@@ -85,6 +85,8 @@ void sys_test_malloc(arch_regs_t *regs);
 void sys_hexdump(arch_regs_t *regs);
 /** @brief Syscall handler for listing the PCI devices found at boot */
 void sys_pciinfo(arch_regs_t *regs);
+/** @brief Syscall handler for reporting the USB controller and its ports */
+void sys_usbinfo(arch_regs_t *regs);
 
 // sys_fs.c
 /** @brief Syscall handler for reading from a file descriptor */

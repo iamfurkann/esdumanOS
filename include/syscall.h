@@ -15,9 +15,10 @@
  * Three rules follow from that, and they are the whole of the contract:
  *
  *   1. New calls continue from the highest assigned number, not from the lowest
- *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0 and
- *      SYSCALL_PCIINFO took 69 in v1.4.0, which is the rule working rather than
- *      an exception to it, and the next call takes 70.
+ *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0,
+ *      SYSCALL_PCIINFO took 69 in v1.4.0 and SYSCALL_USBINFO took 70 in v1.8.0,
+ *      which is the rule working rather than an exception to it, and the next
+ *      call takes 71.
  *
  *   2. The holes are never filled. 11 (CAT_FILE) and 28 (LS_DIR) held calls that
  *      were removed; 30, 31 and 32 were reserved for a crypto API that was never
@@ -484,16 +485,40 @@
  * STACK_DUMP do.
  *
  * The second number handed out after the freeze, continuing from SETKEY at 68
- * rather than filling a hole. mount() and umount(), which the ABI comment above
- * has been promising since v1.0.0, take 70 and 71 when they are written; the
- * README said they would take 68 and 69 and was two releases out of date when it
- * said it.
+ * rather than filling a hole.
  *
  * It reports what the bus was asked at boot rather than re-reading configuration
  * space. A user-space call that poked at 0xCF8 on every invocation would be a
  * different and much larger thing to have to defend.
  */
 #define SYSCALL_PCIINFO         69
+
+/**
+ * @brief Render the USB controller and its ports into the caller's buffer.
+ *
+ * ebx is the buffer, ecx its capacity. Returns the number of bytes written, or a
+ * negative errno. Root only, through the same check MEMINFO, HEXDUMP, STACK_DUMP
+ * and PCIINFO go through.
+ *
+ * The third number handed out after the freeze, and the shape of the call is
+ * PCIINFO's on purpose: the kernel renders and the program writes, which is what
+ * makes `lsusb > usb.txt` a file with something in it. free() printed from
+ * inside the kernel until v0.9.2 and produced an empty file that reported
+ * success; there is no reason to build a third command that way.
+ *
+ * Like PCIINFO it reports what was found at boot rather than going back to the
+ * hardware. Port status is a register read and could honestly be re-taken on
+ * every call - but a syscall that touches a live controller's registers is a
+ * larger thing to defend than one that reads a table, and nothing here can plug
+ * a device in anyway. A snapshot is what this is, and hotplug is not in it.
+ *
+ * mount() and umount(), which the ABI comment at the top of this file has been
+ * promising since v1.0.0, take 71 and 72 when they are written. That sentence
+ * said 68 and 69 in v1.0.0, 70 and 71 from v1.4.0, and it will keep moving every
+ * time a call is written before them - which is the rule working, and the reason
+ * test_abi.c asserts the frontier by literal value rather than trusting prose.
+ */
+#define SYSCALL_USBINFO         70
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

@@ -547,7 +547,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **ATA/IDE** | PIO-mode disk I/O with IRQ-based waiting, 28-bit LBA, single-sector read/write, cache flush. Every wait is bounded, including the one after `IDENTIFY` that was not until v1.4.0 |
 | **PCI** | Configuration space through ports 0xCF8/0xCFC, read and written; the buses behind bridges walked from a worklist; up to 32 functions recorded with their class, IDs and base address registers. Memory decoding and bus mastering are enabled for a device a driver claims |
 | **AHCI (SATA)** | The disk on a machine with no IDE controller. One controller, one port, one command slot, one sector per command, polled rather than interrupt-driven. Registers as a block device exactly as the IDE driver does, so nothing in the file system knows which of the two it is on |
-| **XHCI (USB)** | The bus a machine with no PS/2 controller puts its keyboard on. One controller, one interrupter, one event ring segment, polled. Resets the controller, takes it from the firmware where the firmware is holding it, installs the device context array and both rings, powers the ports and proves the rings work with a No Op command before believing any of it. Nothing is addressed and no device is spoken to — that is v1.9.0 |
+| **XHCI (USB)** | The bus a machine with no PS/2 controller puts its keyboard on. One controller, one interrupter, one event ring segment, polled. Resets the controller, takes it from the firmware where the firmware is holding it, installs the device context array and both rings, powers the ports and proves the rings work with a No Op command before believing any of it. Then it resets each connected port, gives its device a slot and an address, and reads the device and configuration descriptors — so `lsusb` reports vendors, products and classes rather than only ports. No interface is selected and no endpoint but the control one is opened, so nothing on the bus can send anything yet; that is v1.10.0 |
 | **PS/2 Keyboard** | IRQ1 handler, US and Turkish layouts, Shift/CapsLock/AltGr, 256-byte ring buffer |
 | **Console** | Two backends behind one seam. VGA text mode writes cells to `0xB8000` and drives the hardware cursor; the framebuffer backend draws each cell as an 8x16 glyph into the linear pixel buffer the bootloader hands over, with a software cursor and a shadow so an unchanged cell is not blitted again. The terminal above them knows about neither |
 | **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management. 80x25 whichever backend is drawing it |
@@ -1277,7 +1277,7 @@ filtered run proves one module, not the tree.
 | `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 65 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
 | `test_console.c` | Both console backends, against an array in RAM rather than a screen: that the framebuffer info sits where the Multiboot specification puts it, that a glyph is drawn pixel for pixel from the font, that foreground and background come out of the attribute byte, that a byte outside the font is drawn as a fallback box, that a cell the buffer does not have is not drawn at all, that a cell redrawn with what it already holds is skipped and one whose contents changed is not, that the cursor is painted over its cell and taken away again, and that a pixel format the backend cannot draw is refused without changing which backend is current |
 | `test_ahci.c` | Device memory and the SATA driver, asserted so that the same assertions reach the same verdict on a machine that has an AHCI controller and one that does not: the four structures the controller reads out of memory are the sizes it indexes them by and fit one page with every alignment satisfied, a device mapping preserves its offset within the page and carries the cache-disable bit (read back out of the page table, because nothing else can see it), `pci_enable_device()` sets the two bits it is asked for and leaves the rest of the command register alone, and exactly one of the two storage drivers owns the disk — the one the bus says this machine has |
-| `test_xhci.c` | The USB controller and the arithmetic that decided how it is fed: a TRB and a segment table entry are the sixteen bytes the hardware indexes them by, a ring segment is exactly one page rather than merely smaller than one, the three structures sharing a frame fit it without overlapping and each sits on the 64-byte boundary its register wants, and a frame the allocator actually handed out holds a segment without crossing the 64 KB boundary that is the only placement rule a segment has — which is the whole of why `mm/pmm.c` was not touched this release. Then the two register fields that are not where they look: the scratchpad count, whose halves are at 25:21 and 31:27 and are not adjacent, and the PORTSC write mask, which is what stands between a read-modify-write and switching off every working port. Then the hardware: a controller found by its programming interface rather than by class, the controller running, and the rendered inventory naming a port with a device on it |
+| `test_xhci.c` | The USB controller, the arithmetic that decided how it is fed, and the bytes the devices on it chose. A TRB and a segment table entry are the sixteen bytes the hardware indexes them by; a ring segment is exactly one page rather than merely smaller than one; the three structures sharing a frame fit it without overlapping and each sits on the 64-byte boundary its register wants; and a frame the allocator actually handed out holds a segment without crossing the 64 KB boundary that is the only placement rule a segment has — which is why `mm/pmm.c` has never been touched for this driver. The context stride is asserted to come from the controller's CSZ bit rather than from `sizeof()`, and the placement is checked at both 32 and 64 bytes, including the one no machine here uses: a device context and an input context each fit a frame at either stride and together do not at 64, which is the whole reason they get a frame each. Then the two register fields that are not where they look — the scratchpad count, whose halves are at 25:21 and 31:27 and are not adjacent, and the PORTSC write mask, which is what stands between a read-modify-write and switching off every working port. Then the walk over a configuration descriptor, driven with buffers made up on the spot: one that parses, one whose descriptor claims zero length and is refused rather than stepped over, one that does not begin with a configuration, and one cut short by the transfer. Then the hardware: a controller found by its programming interface rather than by class, the controller running, a device given a slot and an address and answering with a vendor and a product, and its speed being a named one — which it only is after the port reset this release added |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
 | `test_keyslot.c` | The passphrase key slot, against the slot alone — no disk, no prompt: round trip, a wrong passphrase refused with the caller's buffer left untouched, every field of the slot edited in turn to confirm the tag covers the salt and IV as well as the ciphertext, iteration counts above and below what the build accepts, and the same data key wrapped under a second passphrase to prove a passphrase change preserves it |
@@ -1662,7 +1662,7 @@ for future crypto API" for one release after that stopped being true.*
 | 39 | `DMESG` | Copy a slice of the kernel log into a user buffer (root only) |
 | 42 | `GET_ARGS` | Retrieve process command-line arguments |
 | 69 | `PCIINFO` | Render the PCI inventory the kernel took at boot into `ebx`, capacity in `ecx` (root only). Reports what the enumeration recorded; it does not re-read configuration space |
-| 70 | `USBINFO` | Render the USB controller and its ports into `ebx`, capacity in `ecx` (root only). A snapshot taken at boot, like `PCIINFO`: there is no hotplug behind it. A machine with no xHCI controller gets one line saying so and a successful return |
+| 70 | `USBINFO` | Render the USB controller, its ports and the devices addressed on them into `ebx`, capacity in `ecx` (root only). A snapshot taken at boot, like `PCIINFO`: there is no hotplug behind it. A machine with no xHCI controller gets one line saying so and a successful return |
 
 ---
 
@@ -1759,6 +1759,7 @@ The following are known constraints of the current implementation. These are doc
 | Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
 | PCI functions recorded | 32 (`PCI_MAX_DEVICES`). A machine with more gets the first 32 and a log line saying the list stops there |
 | USB ports recorded | 32 (`XHCI_MAX_PORTS`). A controller with more gets the first 32 and says so in `lsusb` as well as the log |
+| USB devices addressed | 8 (`XHCI_MAX_DEVICES`). Each costs four frames — a device context, an input context, a control transfer ring and a descriptor buffer — so this is a memory budget as much as a table size. A ninth attached device is reported as a connected port with no device line under it |
 | USB device slots enabled | 32 (`XHCI_MAX_SLOTS`). Nothing uses one yet; the number sizes the device context array, which is programmed before the controller runs |
 | USB scratchpad buffers | 64 (`XHCI_MAX_SCRATCHPAD`). A controller asking for more is refused rather than half-served, since an array the hardware believes is longer than it is gets read past its end |
 | Device register window | 16 MB at `DEVICE_WINDOW_BASE`, allocated by a bump pointer with no free. A driver's registers are mapped once at boot and held for the life of the system; the AHCI driver uses 12 KB of it and the XHCI driver 76 KB — 64 KB of registers and three 4 KB pages of rings and tables. Scratchpad buffers, where a controller asks for any, spend a page of window each even though the mapping is dropped once they are zeroed, because the bump pointer does not rewind |
@@ -1892,16 +1893,16 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   transfers are the hardware's to give and the block interface's to ask for:
   `blockdev_t` reads and writes a sector at a time, and changing that is a
   decision about every driver rather than about this one.
-- **The USB bus is brought up and nothing is on it yet.** The xHCI driver resets
-  the controller, installs the device context array and both rings, powers the
-  ports and proves the rings work with a No Op command — and then stops. No slot
-  is enabled, nothing is addressed, no descriptor is fetched, so `lsusb` reports
-  ports and speeds rather than vendors and products. A port's speed is only
-  defined after a port reset, which this release does not perform, so a device
-  can render as "unknown speed". The port list is a snapshot taken at boot, with
-  the same absence of hotplug the PCI inventory has. It polls, for the reasons
-  the SATA driver polls, and uses one controller, one interrupter and one event
-  ring segment.
+- **The USB bus carries devices that cannot be talked to.** The xHCI driver
+  resets each connected port, gives its device a slot and an address, and reads
+  the device and configuration descriptors — so `lsusb` names what is attached.
+  It stops there. No interface is selected, no configuration is set, and no
+  endpoint other than the control one is ever opened, so nothing on this bus can
+  send or receive anything. The keyboard is the first thing that needs that and
+  it is the next release. The device list is a snapshot taken at boot, with the
+  same absence of hotplug the PCI inventory has, and the driver polls for the
+  reasons the SATA driver polls, using one controller, one interrupter and one
+  event ring segment.
 - **A PCI device the firmware places above 4 GB cannot be used at all.** There
   is no PAE, so a physical address in this kernel is 32 bits wide. The xHCI
   driver refuses such a controller and says so in the log rather than mapping
@@ -1913,14 +1914,22 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   the kernel would need BAR sizing — a write to configuration space this tree
   has never made — and a search for a free range, so it waits for a machine
   that actually needs it.
-- **Two paths in the xHCI driver cannot be exercised on any machine available to
-  this project.** QEMU's controller publishes no USB Legacy Support capability,
-  so the handoff that takes the controller away from firmware finds nothing and
-  returns — on a UEFI machine that firmware has been driving the controller to
-  read its own boot keyboard, which is exactly the machine the code exists for.
-  And QEMU asks for no scratchpad buffers, so the allocation that hands a
-  controller its private pages never runs. Both are written from the
-  specification and both say so where they are written.
+- **Three paths in the xHCI driver cannot be exercised on any machine available
+  to this project.** QEMU's controller publishes no USB Legacy Support
+  capability, so the handoff that takes the controller away from firmware finds
+  nothing and returns — on a UEFI machine that firmware has been driving the
+  controller to read its own boot keyboard, which is exactly the machine the code
+  exists for. QEMU asks for no scratchpad buffers, so the allocation that hands a
+  controller its private pages never runs. And QEMU's keyboard and mouse are
+  full-speed devices whose endpoint zero takes 8-byte packets, which is the size
+  the driver opens it at, so the Evaluate Context that would correct a device
+  answering 16, 32 or 64 never issues. All three are written from the
+  specification and all three say so where they are written.
+- **The 64-byte context layout is arithmetic here, not experience.** How far
+  apart the controller places two context entries is a bit it publishes, and
+  QEMU's says 32. The driver reads the bit rather than assuming, and
+  `tests/kernel/test_xhci.c` checks the placement at both strides — but no
+  machine available to this project has ever laid a context out at 64 bytes.
 - **Device mappings are never reclaimed.** Registers and DMA buffers are mapped
   into a 16 MB window by a bump pointer with no free, because a driver in this
   kernel is loaded at boot and never unloaded. A free list would be a structure
@@ -2055,16 +2064,21 @@ device on it.
 | Release | What it removes |
 |---------|-----------------|
 | ~~v1.8.0~~ | **Done.** The bus underneath both of those. XHCI: the command and event rings, port enumeration, and `lsusb`, so it arrived with a reader rather than as a layer nothing calls |
-| v1.9.0 | **A keyboard on a machine with no PS/2 controller.** USB HID over the bus above: Enable Slot, Address Device and the control transfers v1.8.0 deliberately left out, then a second backend behind the keyboard driver in the same shape the console got in v1.6.0. This is also where the event ring gets polled from the timer tick — an interrupt endpoint is the first thing that has to be serviced while something else runs |
-| v1.10.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
-| v1.11.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
+| ~~v1.9.0~~ | **Done.** Talking to what is on the bus: port reset, Enable Slot, Address Device, control transfers, descriptors. `lsusb` names devices rather than ports |
+| v1.10.0 | **A keyboard on a machine with no PS/2 controller.** The HID boot protocol over the devices above, an interrupt endpoint, and the event ring polled from the timer tick — an interrupt endpoint is the first thing here that has to be serviced while something else runs. Then a second backend behind `drivers/keyboard.c`, which is smaller than it sounds: that file has exactly one line that touches hardware, and `keyboard_handle_scancode()` has been the seam since long before anything needed two |
+| v1.11.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
+| v1.12.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
 | v2.0.0 | The machine. Named, as only major versions are |
 
-XHCI was split from the drivers above it deliberately. It is the most complicated
-controller on the platform, it can only be developed against an emulator here,
-and v1.4.0 established what works: bring the bus up with a tool that reads it,
-then write the driver in the release after. PCI arrived with `lspci` and AHCI
-came next; USB arrived with `lsusb` and HID comes next.
+XHCI was split from the drivers above it deliberately, and then split again. It
+is the most complicated controller on the platform, it can only be developed
+against an emulator here, and v1.4.0 established what works: bring the bus up
+with a tool that reads it, then write the driver in the release after. PCI
+arrived with `lspci` and AHCI came next; USB arrived with `lsusb`, which then
+learned to name devices, and HID comes after that. The second split cost the
+roadmap a release and was taken on size: `drivers/xhci.c` was 944 lines after
+v1.8.0 with only the bus in it, and doing enumeration and HID together would have
+put two subsystems into one release in the file least able to afford it.
 
 The v1.8.0 row above used to say the release needed multi-page contiguous
 physical allocation, and it did not. A ring segment is 4096 bytes and the only

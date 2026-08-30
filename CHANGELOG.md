@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0-beta.1] - 2026-08-30
+
+v1.8.0 brought the USB bus up and proved it with a command that moved nothing. This talks
+to what is on it: every connected port is reset, its device is given a slot and an
+address, and it is asked to describe itself. `lsusb` stops being a list of ports and
+becomes a list of devices.
+
+### Added
+
+- **Port reset, and with it a speed that means something.** PORTSC's speed field is
+  undefined until a port has been reset, which is why v1.8.0's `lsusb` could print
+  "unknown speed" for a device that was plainly attached. It is also what a device needs
+  before it will answer to a slot. The reset carries a budget of its own, shorter than the
+  driver's general one: enumeration walks every connected port, and a dead one must not
+  spend the whole budget before the next is tried.
+
+- **Enable Slot, Address Device, and control transfers.** A real command ring enqueue
+  replaces v1.8.0's single-slot write, with the wrap that follows the Link TRB — which
+  cannot be reached at eight devices and three commands each, and is written anyway for
+  the reason the Link TRB was installed in the first place. Control transfers are three
+  stages on the device's own ring, and the third is where direction stops being obvious: a
+  status stage runs opposite to the data stage it follows, so a read ends with an OUT,
+  while a transfer with no data stage has no opposite and must be IN.
+
+- **The device and configuration descriptors.** Eight bytes first, because
+  `bMaxPacketSize0` cannot be read without a working endpoint zero and endpoint zero
+  cannot be sized without it — and eight bytes is what fits in one packet at every size
+  the field can hold. Then the whole device descriptor, then the configuration descriptor
+  twice: nine bytes to learn `wTotalLength`, then that many, clamped to the buffer rather
+  than believed.
+
+- **`xhci_parse_config()`, separated from the transfer that feeds it**, for the same
+  reason `keyboard_handle_scancode()` is separate from the port read above it: it can be
+  driven with a buffer of one's choosing, and a controller cannot be asked to produce a
+  malformed one. Every length it steps by came from the device, so a descriptor claiming
+  zero length is refused rather than skipped — that is not a malformed field to step over,
+  it is a walk that never ends. The same bound the extended capability chain got in
+  v1.8.0, reached from the other side of the machine.
+
+### Changed
+
+- **The context stride is read from the controller, not from `sizeof()`.** A context entry
+  is eight doublewords on every controller ever made; the distance between two of them is
+  32 or 64 bytes depending on a bit in HCCPARAMS1. Those are the same number on QEMU's
+  controller and different on a great many others, so a driver that indexed by the
+  structure would be correct on every machine this project can run on and wrong on the
+  machines it is aimed at. That is the exact shape of the defect `ata_identify()` carried
+  from v0.1.0 to v1.4.0, and it is the reason every context access in the driver goes
+  through one helper. The test module checks the placement at both strides, including the
+  one no machine here uses.
+
+- **A device context and an input context get a frame each**, and the arithmetic is why
+  rather than taste: at a 64-byte stride they are 2048 and 2112 bytes, and 4160 is
+  sixty-four more than a frame holds. `mm/pmm.c` is untouched for the third release
+  running.
+
+- **The roadmap gained a release.** Enumeration and HID were one row; `drivers/xhci.c` was
+  944 lines after v1.8.0 with only the bus in it, and putting both into one release would
+  have meant two subsystems at once in the file least able to afford it. The keyboard is
+  v1.10.0.
+
+### Found in passing
+
+- **`drivers/keyboard.c` already has the seam the roadmap said v1.9.0 would have to
+  build.** The file is 376 lines and exactly one of them touches hardware — `inb(0x60)`.
+  `keyboard_handle_scancode()` was split out for testability long before anything needed
+  two backends, and `tests/kernel/test_kbd.c` already drives it directly. So the USB
+  keyboard will translate HID usage codes into set-1 scancodes and call it, and the
+  Turkish layout, AltGr, the Ctrl fold, Ctrl-D and the escape sequences all keep working
+  without being touched. This is the fifth consecutive release in which a roadmap row
+  asked for more than its release needed.
+
+### Known issues
+
+- **Nothing on the bus can send or receive anything.** No interface is selected, no
+  configuration is set, and no endpoint but the control one is opened.
+
+- **Three paths cannot be exercised on any machine available to this project**, and all
+  three say so where they are written: the firmware handoff, the scratchpad allocation,
+  and now the Evaluate Context that re-opens endpoint zero when a full-speed device
+  answers with a packet size other than 8. QEMU's keyboard and mouse answer 8.
+
+- **The 64-byte context layout is arithmetic, not experience.** The driver reads the bit
+  and the tests check both strides; no machine here has ever used the wider one.
+
+- **Eight devices.** Each costs four frames. A ninth shows as a connected port with no
+  device line under it, and the report says the list stopped.
+
+- **Still a snapshot taken at boot**, with no hotplug, like the PCI inventory. Still no
+  ACPI, no Secure Boot, and Multiboot 1 still cannot simply become Multiboot 2.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status
+  v1.2.0 gave them. A device larger than about 1 GB is still used only up to that.
+
 ## [1.8.0-beta.1] - 2026-08-29
 
 esdumanOS has a USB bus. The keyboard on the machine this project is aimed at is on it,

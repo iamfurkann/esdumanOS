@@ -4,15 +4,15 @@
 
 | Version  | Supported          |
 | -------- | ------------------ |
-| 1.10.x   | :white_check_mark: |
-| 1.9.x    | :x:                |
-| ≤ 1.8.x  | :x:                |
+| 1.11.x   | :white_check_mark: |
+| 1.10.x   | :x:                |
+| ≤ 1.9.x  | :x:                |
 
 Only the current minor line is supported. This table said 0.4.x for five minor releases
 and then 0.9.x for two more, and then it said 1.2.x through the whole of 1.3 — the
 sentence warning about the habit was four lines long and did not stop it happening again,
 which is why the release checklist now names this file. The line that matters is the
-current one, and it is 1.10.x.
+current one, and it is 1.11.x.
 
 **Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
 release before it encrypted the file system under a key compiled into the kernel image,
@@ -179,6 +179,27 @@ described inaccurately is worse than one described plainly — in either directi
 - The block cache is write-back. Dirty sectors are bounded by volume (32 slots) and by
   time (5 seconds), and `sync()` flushes on demand — but an abrupt power loss inside
   that window still loses the sectors in it.
+- **`mount` opens a new trust boundary, and it is a bigger one than it looks.** Until
+  v1.11.0 the only disk this kernel read was the one it booted from. A mounted device's
+  directory table is attacker-supplied in the ordinary sense - somebody plugged it in -
+  and it is walked by code that was written when the disk was assumed to be the system's
+  own. What stands there is validate_directory_table(), which has checked the table's
+  invariants since v0.10.0 and is now doing a job it was not originally asked to do; the
+  file system also refuses to mount a partition it does not recognise rather than
+  formatting it, which is v1.2.0's decision and matters more with a stranger's disk in
+  the machine. `mount` is root only for that reason rather than for tidiness.
+- **The boot path will now mount a disk nobody asked it to.** If the disk the machine
+  started from holds no file system this kernel can read, the other registered devices
+  are tried in order and the first one that mounts becomes the root - which means
+  `/etc/shadow` and every account in it can come off a stick somebody plugged in. That is
+  a real widening and it is deliberate: without it a machine whose internal disk belongs
+  to another operating system has no `/bin`, so no shell, so no way to be told which disk
+  to use. What bounds it is that `init_fs()` accepts only a partition of this file
+  system's own type and refuses anything else untouched, so the device has to have been
+  formatted by esdumanOS on purpose - and that somebody with physical access to the USB
+  ports of a machine with no readable system disk is not a threat this kernel was ever
+  positioned to stop. The disk it falls to is named on the console and in the log, which
+  is the part that makes it noticeable rather than silent.
 - **A HID report is attacker-supplied too, and six of its eight bytes are used as table
   indices.** The translation table is 232 entries and a usage is a `uint8_t`, so every
   possible value indexes inside it - which is arithmetic rather than a bounds check, and

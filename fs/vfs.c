@@ -141,12 +141,12 @@ int fs_get_entry_idx(const char *name, fs_id_t parent_id);
  * through the cache directly, with a comment saying so at each of the two sites.
  */
 int fs_read_sector(uint32_t rel_sector, uint8_t *buffer) {
-    return bcache_read_sector(fs_part_start + rel_sector, buffer);
+    return bcache_read_sector(blockdev_root(), fs_part_start + rel_sector, buffer);
 }
 
 /** @brief Writes a sector named relative to the partition. See fs_read_sector(). */
 int fs_write_sector(uint32_t rel_sector, uint8_t *buffer) {
-    return bcache_write_sector(fs_part_start + rel_sector, buffer);
+    return bcache_write_sector(blockdev_root(), fs_part_start + rel_sector, buffer);
 }
 
 /**
@@ -386,7 +386,7 @@ static int disk_region_is_blank(uint32_t start, uint32_t count) {
     uint8_t sec_buf[512];
 
     for (uint32_t s = 0; s < count; s++) {
-        int res = bcache_read_sector(start + s, sec_buf);
+        int res = bcache_read_sector(blockdev_root(), start + s, sec_buf);
         if (res != E_OK) {
             klog_int(LOG_LEVEL_ERROR, "VFS",
                      "Could not read this sector while deciding whether the disk is blank",
@@ -424,7 +424,7 @@ static int write_mbr(uint32_t disk_sectors) {
 
     ft_memset(sec_buf, 0, 512);
     ft_memcpy(sec_buf, &mbr, sizeof(mbr));
-    return bcache_write_sector(0, sec_buf);
+    return bcache_write_sector(blockdev_root(), 0, sec_buf);
 }
 
 /**
@@ -630,7 +630,7 @@ static int load_partition(uint32_t disk_sectors) {
      * table. Both used to arrive here as a zeroed buffer and leave as "return 0",
      * which sends the caller down the path that decides whether to format.
      */
-    if (bcache_read_sector(0, sec_buf) != E_OK) return -1;
+    if (bcache_read_sector(blockdev_root(), 0, sec_buf) != E_OK) return -1;
 
     ft_memcpy(&mbr, sec_buf, sizeof(mbr));
 
@@ -862,7 +862,7 @@ void init_fs(void) {
          * shape of the defect this release exists to remove, and a guard that
          * costs a comparison is not worth reasoning about twice.
          */
-        if (bcache_read_sector(0, sec_buf) != E_OK) {
+        if (bcache_read_sector(blockdev_root(), 0, sec_buf) != E_OK) {
             klog(LOG_LEVEL_ERROR, "VFS", "Sector 0 could not be read; refusing to mount or format.");
             printk("\n[VFS] The first sector of this disk could not be read. That is not\n");
             printk("      the same as an empty disk, and this kernel will not format it\n");

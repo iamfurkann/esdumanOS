@@ -450,5 +450,5 @@ int ahci_init(void) {
 
     ahci_blockdev.sector_count = ahci_total_sectors;
 
-    return blockdev_set_root(&ahci_blockdev);
+    return blockdev_register(&ahci_blockdev);
 }

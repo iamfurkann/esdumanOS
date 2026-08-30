@@ -235,10 +235,10 @@ uint32_t ata_identify(void) {
         /*
          * Registering here rather than in a separate init step, because this is
          * the moment the capacity is known and a device whose capacity is
-         * unknown is one blockdev_set_root() refuses.
+         * unknown is one blockdev_register() refuses.
          */
         ata_blockdev.sector_count = total_sectors;
-        blockdev_set_root(&ata_blockdev);
+        blockdev_register(&ata_blockdev);
 
         return total_sectors;
     }

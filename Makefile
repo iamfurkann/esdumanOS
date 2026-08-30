@@ -95,6 +95,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_pci.c \
             tests/kernel/test_ahci.c \
             tests/kernel/test_xhci.c \
+            tests/kernel/test_usbkbd.c \
             tests/kernel/test_console.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
@@ -228,6 +229,7 @@ ifeq ($(ARCH), x86)
                 drivers/pci.c \
                 drivers/ahci.c \
                 drivers/xhci.c \
+                drivers/usbkbd.c \
                 drivers/console.c \
                 drivers/console_font.c \
                 drivers/rtc.c \

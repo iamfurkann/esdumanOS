@@ -102,6 +102,13 @@ static void run_syscall_number_assertions(void) {
      */
     KTEST_ASSERT(SYSCALL_PCIINFO == 69,      "[STRICT] [ABI] PCIINFO is 69, continuing from SETKEY");
 
+    /*
+     * And the third. Three numbers assigned since the freeze, each one higher
+     * than the last and none of them in a hole; at this point the rule has more
+     * evidence behind it than the paragraph in syscall.h that states it.
+     */
+    KTEST_ASSERT(SYSCALL_USBINFO == 70,      "[STRICT] [ABI] USBINFO is 70, continuing from PCIINFO");
+
     /* Descriptors and I/O. */
     KTEST_ASSERT(SYSCALL_READ == 3,          "[STRICT] [ABI] READ is 3");
     KTEST_ASSERT(SYSCALL_WRITE == 4,         "[STRICT] [ABI] WRITE is 4");
@@ -202,14 +209,15 @@ static void run_retired_number_assertions(void) {
                  "[STRICT] [ABI] 99 stays retired - YIELD left it for 67 at the freeze");
 
     /*
-     * 70 is where the next call goes, and it must be free until one is written.
+     * 71 is where the next call goes, and it must be free until one is written.
      * This is the assertion that catches a number being taken quietly. It said
-     * 68 until v1.1.0 assigned that one and 69 until v1.4.0 assigned that, which
-     * is what this line is for: the frontier moves by somebody editing it
-     * deliberately, not by drifting. Both times it moved by failing first.
+     * 68 until v1.1.0 assigned that one, 69 until v1.4.0 assigned that, and 70
+     * until v1.8.0 assigned that - which is what this line is for: the frontier
+     * moves by somebody editing it deliberately, not by drifting. All three
+     * times it moved by failing first.
      */
-    KTEST_ASSERT(dispatch_retired(70) == E_NOSYS,
-                 "[STRICT] [ABI] 70 is unassigned, and is where the next call continues from");
+    KTEST_ASSERT(dispatch_retired(71) == E_NOSYS,
+                 "[STRICT] [ABI] 71 is unassigned, and is where the next call continues from");
 }
 
 /**

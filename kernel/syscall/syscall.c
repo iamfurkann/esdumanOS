@@ -73,6 +73,7 @@ void syscall_handler(arch_regs_t *regs) {
         case SYSCALL_TEST_MALLOC:  sys_test_malloc(regs); break;
         case SYSCALL_HEXDUMP:      sys_hexdump(regs); break;
         case SYSCALL_PCIINFO:      sys_pciinfo(regs); break;
+        case SYSCALL_USBINFO:      sys_usbinfo(regs); break;
 
         //sys_fs.c
         case SYSCALL_READ:         sys_read(regs); break;

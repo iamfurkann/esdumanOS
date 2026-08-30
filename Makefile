@@ -67,6 +67,7 @@ CORE_SRCS = kernel/core/kernel.c \
 			src/resources/chmod_elf_data.c \
 			src/resources/chown_elf_data.c \
 			src/resources/lspci_elf_data.c \
+			src/resources/lsusb_elf_data.c \
 			drivers/blockdev.c \
 			fs/bcache.c \
             fs/vfs.c \
@@ -93,6 +94,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_blockdev.c \
             tests/kernel/test_pci.c \
             tests/kernel/test_ahci.c \
+            tests/kernel/test_xhci.c \
             tests/kernel/test_console.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
@@ -188,10 +190,27 @@ ifeq ($(ARCH), x86)
     # and without a keymap QEMU guesses - which is how a passphrase typed into
     # the unlock prompt arrives as something else.
     QEMU_DISPLAY ?= -display vnc=127.0.0.1:1 -k en-us
-    QEMU_FLAGS = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk $(QEMU_DISPLAY)
+
+    # The USB hardware the interactive runs get, and it is deliberately not the
+    # list the test targets get.
+    #
+    # A controller, so that `lsusb` at the shell has something to report and the
+    # boot log has a controller to bring up. A mouse, so that at least one port
+    # comes up connected and the port lines are not all "no device".
+    #
+    # No usb-kbd, and that is the whole reason this is a second variable rather
+    # than QEMU_TEST_USB reused. QEMU delivers key events to the most recently
+    # added keyboard, so attaching a USB one here would route every keystroke to
+    # a device this kernel cannot read yet - the PS/2 driver would go quiet and
+    # the machine would look hung at the login prompt. It belongs here in v1.9.0,
+    # which is the release that can read it. The test targets have it because
+    # nothing types at them: they run with -display none.
+    QEMU_USB = -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0
+
+    QEMU_FLAGS = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk $(QEMU_USB) $(QEMU_DISPLAY)
 
     # What `make run_text` uses. Same image, terminal front end.
-    QEMU_FLAGS_TEXT = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
+    QEMU_FLAGS_TEXT = -cdrom $(ISO) -boot d -serial file:kernel_log.txt -drive format=raw,file=disk.img,if=ide,index=0,media=disk $(QEMU_USB) -display curses
     
     ARCH_ASM_SRCS = arch/x86/boot/boot.asm \
                 arch/x86/cpu/gdt_s.asm \
@@ -208,6 +227,7 @@ ifeq ($(ARCH), x86)
                 drivers/ata.c \
                 drivers/pci.c \
                 drivers/ahci.c \
+                drivers/xhci.c \
                 drivers/console.c \
                 drivers/console_font.c \
                 drivers/rtc.c \
@@ -342,6 +362,32 @@ PBKDF2_TEST_ITERATIONS ?= 100000
 # this purpose.
 QEMU_TEST_CPU ?=
 
+# The USB hardware every kernel test target runs against.
+#
+# Written once and used by all four, because the constraint the suite lives under
+# is that test_kernel, test_kernel_q35 and test_kernel_uefi report the same number
+# of assertions - and a machine list that is copied four times is a machine list
+# that will eventually differ in one of them. test_smap runs the same suite and
+# therefore needs the same hardware, even though it is not part of that
+# comparison.
+#
+# Neither i440fx nor q35 provides a USB controller by default, so before this
+# there was no controller for the driver to find on any target and nothing for
+# test_xhci.c to assert against.
+#
+# The bus is named rather than left to default. A USB device with no bus= goes to
+# whichever controller QEMU picked first, and on a machine that grows a second
+# one - an EHCI from -usb, or a chipset default in a future QEMU - that is
+# silently not this one. This is the same lesson the q35 target's drive line
+# carries: name the thing you mean.
+#
+# A keyboard and a mouse, and no usb-storage. Two devices are enough to prove two
+# ports come up connected, and they need no backing image; usb-storage would need
+# a drive built per target for a driver that does not exist until v1.10.0.
+QEMU_TEST_USB ?= -device qemu-xhci,id=xhci \
+                 -device usb-kbd,bus=xhci.0 \
+                 -device usb-mouse,bus=xhci.0
+
 # Run a single test module instead of all of them: make test_kernel MODULE=fork
 #
 # A full run boots the OS and executes every module, which under nested emulation
@@ -469,6 +515,9 @@ apps/bin/chown.elf: apps/bin/chown.c
 
 apps/bin/lspci.elf: apps/bin/lspci.c
 	$(CC) $(USER_CFLAGS) apps/bin/lspci.c -o apps/bin/lspci.elf
+
+apps/bin/lsusb.elf: apps/bin/lsusb.c
+	$(CC) $(USER_CFLAGS) apps/bin/lsusb.c -o apps/bin/lsusb.elf
 
 
 # Ring 3 half of the kernel self-test suite. Built, encrypted and embedded the
@@ -630,6 +679,12 @@ src/resources/lspci_elf_data.c: apps/bin/lspci.elf tools/encrypt_tool
 	@xxd -i apps/bin/lspci_encrypted.elf | \
 	sed 's/apps_bin_lspci_encrypted_elf/lspci_elf/g' > src/resources/lspci_elf_data.c
 
+src/resources/lsusb_elf_data.c: apps/bin/lsusb.elf tools/encrypt_tool
+	@mkdir -p src/resources
+	@./tools/encrypt_tool apps/bin/lsusb.elf apps/bin/lsusb_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
+	@xxd -i apps/bin/lsusb_encrypted.elf | \
+	sed 's/apps_bin_lsusb_encrypted_elf/lsusb_elf/g' > src/resources/lsusb_elf_data.c
+
 src/resources/edit_elf_data.c: apps/bin/edit.elf tools/encrypt_tool
 	@mkdir -p src/resources
 	@./tools/encrypt_tool apps/bin/edit.elf apps/bin/edit_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
@@ -669,6 +724,7 @@ test_kernel: hello.elf
 	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) $(QEMU_TEST_CPU) -append "kernel_pass=$(KERNEL_PASS)" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-d int,cpu_reset -D qemu.log \
 		-serial stdio -display none -no-reboot; then \
@@ -720,6 +776,7 @@ test_kernel_q35:
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -M q35 -kernel $(TEST_BIN) $(QEMU_TEST_CPU) \
 		-append "kernel_pass=$(KERNEL_PASS)" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-d int,cpu_reset -D qemu_q35.log \
 		-serial stdio -display none -no-reboot; then \
@@ -754,6 +811,27 @@ test_kernel_q35:
 # unattended run hang until the outer timeout kills it, and the evidence it
 # leaves behind is a screenshot of the menu. That happened during the work that
 # produced this target.
+#
+# X-PciMmio64Mb=0, and that is not a detail either.
+#
+# OVMF gives itself a very large MMIO aperture above 4 GB and puts 64-bit BARs in
+# it. qemu-xhci's BAR0 is 64-bit capable, so under this firmware - and under no
+# other target here, because SeaBIOS has no such aperture - the controller ends
+# up at an address a 32-bit kernel cannot form, let alone map. There is no PAE in
+# this kernel; the device is not slow to reach, it is unreachable.
+#
+# This fw_cfg key is OVMF's own knob for the size of that aperture, and zero
+# turns it off, so every BAR lands in the low hole where a 32-bit operating
+# system can use it. That is the same accommodation firmware makes for any 32-bit
+# OS, and it is a statement about this kernel rather than a workaround for the
+# test: the driver already refuses a controller above 4 GB and says so in the
+# log, which is how this was found.
+#
+# The alternative is for the kernel to relocate the BAR itself, which means BAR
+# sizing - a write to configuration space this tree has deliberately never made -
+# and a free-range search. That is a release of its own, and it is only worth
+# doing if a real machine turns out to place this controller high, which the
+# fixed-function xHCI in a PCH does not.
 UEFI_TEST_ISO = esdumanOS-uefi-test.iso
 
 # Where the firmware lives, as a variable because distributions disagree. Debian
@@ -787,10 +865,12 @@ test_kernel_uefi:
 	@cp $(OVMF_VARS) /tmp/esdumanos_ovmf_vars.fd
 	@chmod u+w /tmp/esdumanos_ovmf_vars.fd
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) qemu-system-x86_64 -M q35 \
+		-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=/tmp/esdumanos_ovmf_vars.fd \
 		-cdrom $(UEFI_TEST_ISO) -boot d \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none -no-reboot; then \
 		echo "ERROR: QEMU exited unexpectedly!"; exit 1; \
@@ -818,6 +898,7 @@ test_smap:
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=$(KERNEL_PASS)" \
 		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none -no-reboot; then \
 		echo "[SMAP TEST] ERROR: QEMU exited unexpectedly!"; exit 1; \

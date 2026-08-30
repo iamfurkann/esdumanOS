@@ -13,6 +13,7 @@
  * only the boot path has any business asking. */
 #include "pci.h"
 #include "ahci.h"
+#include "xhci.h"
 /* And this is where it is decided what the terminal draws into, which depends
  * entirely on how the machine was booted. */
 #include "console.h"
@@ -1039,6 +1040,25 @@ static int init_filesystem_and_vfs(void) {
         ahci_init();
     }
 
+    /*
+     * The USB bus, brought up after the disk and gated on nothing.
+     *
+     * After, because the disk is what the next hundred lines need and this is
+     * not: a controller that takes its full timeout budget to fail should do it
+     * behind the thing that has to work, not in front of it.
+     *
+     * Gated on nothing, for the reason written above the PCI enumeration. It
+     * would be easy to skip this where the bus reported no USB controller, and
+     * xhci_init() already asks that question itself and answers it in one line -
+     * a second copy of the test here would be a link between two subsystems that
+     * nothing watches, which is the v1.2.0 mistake in miniature.
+     *
+     * Nothing below reads the result. There is no keyboard on this bus yet and
+     * no disk behind it; what this release delivers is a controller that is
+     * running and a way to look at it. v1.9.0 is the first caller.
+     */
+    xhci_init();
+
     init_fs();
 
     /*
@@ -1158,6 +1178,7 @@ static int init_filesystem_and_vfs(void) {
                 fs_install_image_asset("chmod", chmod_elf, chmod_elf_len, bin_id);
                 fs_install_image_asset("chown", chown_elf, chown_elf_len, bin_id);
                 fs_install_image_asset("lspci", lspci_elf, lspci_elf_len, bin_id);
+                fs_install_image_asset("lsusb", lsusb_elf, lsusb_elf_len, bin_id);
                 fs_install_image_asset("hello", hello_elf, hello_elf_len, bin_id);
                 fs_install_image_asset("clear", clear_elf, clear_elf_len, bin_id);
                 fs_install_image_asset("echo", echo_elf, echo_elf_len, bin_id);

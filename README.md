@@ -24,7 +24,8 @@
 > **What 1.0 means here:** the system call interface is frozen. No number already
 > assigned changes its value or its meaning, the retired numbers are never reused, and
 > new calls continue from the highest assigned number — `SETKEY` took 68 in v1.1.0,
-> `PCIINFO` took 69 in v1.4.0, and the next one takes 70. Enforced by
+> `PCIINFO` took 69 in v1.4.0, `USBINFO` took 70 in v1.8.0, and the next one takes 71.
+> Enforced by
 > `tests/kernel/test_abi.c`, which asserts every
 > number, errno, flag and security level by literal value. It is a promise about the
 > interface, not a claim about the system underneath it: the
@@ -426,8 +427,8 @@ the format, so a v2 disk is refused by name the way v0.9.x disks have been since
 
 `SETKEY` is 68 — the first number assigned since the freeze, and the freeze working
 rather than an exception to it: new calls continue from the highest assigned number, so
-the next one takes 69. `PCIINFO` took it three releases later, which is what turns that
-sentence from a claim into a habit.
+the next one takes 69. `PCIINFO` took it three releases later and `USBINFO` four after
+that, which is what turns that sentence from a claim into a habit.
 
 v1.2.0 stops a failed disk read from looking like an empty disk. Until now the ATA driver
 zeroed its buffer on every failure path and reported the outcome through a return value
@@ -503,7 +504,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **Boot** | Multiboot-compliant entry, 16 KB kernel stack, identity-mapped first 16 MB |
 | **GDT / IDT / TSS** | 9-entry GDT with Ring 0 and Ring 3 segments, 256-vector IDT with PIC remapping, one TSS for privilege transitions and a second for the double-fault task gate |
-| **Syscall Interface** | 64 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
+| **Syscall Interface** | 65 system calls via INT 0x80, covering process control, job control, file I/O, IPC, security, and device access |
 | **Terminal (ANSI)** | Cursor positioning and relative motion, erase display and line, colour and attributes, saved cursor, scroll region, line insert and delete. Rows are counted in the 24 the screen shows; row 0 is the status bar |
 | **Kernel Logging** | 512-record ring; each record carries its own level, module, monotonic timestamp and sequence number. Readable through the `dmesg` syscall and `/dev/kmsg`, controlled through `KLOG_CTL`, written to `/var/log/kern.log` at `sync`, `halt` and `reboot`. Records only — the screen transcript is not part of it |
 | **Spinlocks** | Interrupt-safe kernel spinlock primitives |
@@ -546,6 +547,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | **ATA/IDE** | PIO-mode disk I/O with IRQ-based waiting, 28-bit LBA, single-sector read/write, cache flush. Every wait is bounded, including the one after `IDENTIFY` that was not until v1.4.0 |
 | **PCI** | Configuration space through ports 0xCF8/0xCFC, read and written; the buses behind bridges walked from a worklist; up to 32 functions recorded with their class, IDs and base address registers. Memory decoding and bus mastering are enabled for a device a driver claims |
 | **AHCI (SATA)** | The disk on a machine with no IDE controller. One controller, one port, one command slot, one sector per command, polled rather than interrupt-driven. Registers as a block device exactly as the IDE driver does, so nothing in the file system knows which of the two it is on |
+| **XHCI (USB)** | The bus a machine with no PS/2 controller puts its keyboard on. One controller, one interrupter, one event ring segment, polled. Resets the controller, takes it from the firmware where the firmware is holding it, installs the device context array and both rings, powers the ports and proves the rings work with a No Op command before believing any of it. Nothing is addressed and no device is spoken to — that is v1.9.0 |
 | **PS/2 Keyboard** | IRQ1 handler, US and Turkish layouts, Shift/CapsLock/AltGr, 256-byte ring buffer |
 | **Console** | Two backends behind one seam. VGA text mode writes cells to `0xB8000` and drives the hardware cursor; the framebuffer backend draws each cell as an 8x16 glyph into the linear pixel buffer the bootloader hands over, with a software cursor and a shadow so an unchanged cell is not blitted again. The terminal above them knows about neither |
 | **VGA Text** | 3 virtual terminals (F1-F3 switching), 80x100 scrollback buffer, status bar, cursor management. 80x25 whichever backend is drawing it |
@@ -567,7 +569,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 | Component | Description |
 |-----------|-------------|
 | **Shell** | Login screen, 34 builtins (cat, ls, cd, pwd, mkdir, rm, mv, write, env, export, exec, kill, su, sleep, dmesg, hexdump, help and more; four are deliberately absent from Tab completion and `help`, `panic` among them), four-stage pipelines, output redirection, `&&`/`\|\|` chaining, `$VAR`/`$?`/`~` expansion, line editing with history, and Tab completion that walks its candidates |
-| **Programs** | 20 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown`, `lspci` |
+| **Programs** | 21 standalone ELF binaries: `sh`, `edit`, `hello`, `echo`, `clear`, `touch`, `rm`, `mv`, `cp`, `free`, `whoami`, `kill`, `grep`, `head`, `wc`, `date`, `stat`, `chmod`, `chown`, `lspci`, `lsusb` |
 | **FHS Layout** | `/bin`, `/dev`, `/etc`, `/home`, `/root`, `/tmp`, `/var` created at boot |
 | **Authentication** | Password-protected login, `/etc/shadow` database, `su` for user switching |
 
@@ -575,7 +577,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 
 | Layer | Description |
 |-------|-------------|
-| **Kernel Self-Tests** | 40 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, console, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
+| **Kernel Self-Tests** | 41 kernel-mode modules: abi, keyslot, blockdev, pci, ahci, xhci, console, string, memory, pipe, VFS, devfs, passwd, security, stress, adversarial, integration, regression, concurrency, paging, PMM, lifecycle, fork, COW, umem, fault, syscall, klog, tty, pgroup, jobctl, kbd, edit, process, signal, reap, ELF, crypto, entropy, bcache, time — plus a Ring 3 payload that exercises the privilege boundary from the unprivileged side. `make test_kernel MODULE=<name>` runs one of them alone |
 | **Host Tests** | Crypto verification, ELF static analysis, ELF validation, hash validation |
 | **Fuzzing** | Parser fuzz testing with 58 corpus files |
 | **CI Pipeline** | GitHub Actions: host tests, fuzzing, OS build, QEMU kernel integration tests |
@@ -1224,8 +1226,13 @@ make test
 # Run parser fuzzing with 58 corpus files
 make fuzz
 
-# Boot kernel in self-test mode: 39 kernel-mode modules, then a Ring 3 payload.
+# Boot kernel in self-test mode: 41 kernel-mode modules, then a Ring 3 payload.
 # The machine is i440fx, so the disk is reached through the IDE driver.
+#
+# Every kernel target below also gets an xHCI controller with a USB keyboard and
+# a USB mouse on it, from one variable in the Makefile. Neither i440fx nor q35
+# provides a USB controller by default, so before v1.8.0 there was none on any of
+# them; they are given the same devices so that the totals stay comparable.
 make test_kernel
 
 # The same suite with one flag changed, on a machine with no IDE controller,
@@ -1267,9 +1274,10 @@ filtered run proves one module, not the tree.
 
 | Module | Coverage |
 |--------|----------|
-| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 64 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
+| `test_abi.c` | The frozen v1.0.0 interface, asserted by literal value: all 65 syscall numbers, the 34 error codes, the `exec`/`wait`/`lseek`/`klog_ctl` constants, the signal numbers and the security levels — plus that each retired number (11, 28, 30, 31, 32, 99) is still answered with `E_NOSYS`. This row said "all 62 numbers ... and that 68 is still free" for three releases after `SETKEY` took 68 |
 | `test_console.c` | Both console backends, against an array in RAM rather than a screen: that the framebuffer info sits where the Multiboot specification puts it, that a glyph is drawn pixel for pixel from the font, that foreground and background come out of the attribute byte, that a byte outside the font is drawn as a fallback box, that a cell the buffer does not have is not drawn at all, that a cell redrawn with what it already holds is skipped and one whose contents changed is not, that the cursor is painted over its cell and taken away again, and that a pixel format the backend cannot draw is refused without changing which backend is current |
 | `test_ahci.c` | Device memory and the SATA driver, asserted so that the same assertions reach the same verdict on a machine that has an AHCI controller and one that does not: the four structures the controller reads out of memory are the sizes it indexes them by and fit one page with every alignment satisfied, a device mapping preserves its offset within the page and carries the cache-disable bit (read back out of the page table, because nothing else can see it), `pci_enable_device()` sets the two bits it is asked for and leaves the rest of the command register alone, and exactly one of the two storage drivers owns the disk — the one the bus says this machine has |
+| `test_xhci.c` | The USB controller and the arithmetic that decided how it is fed: a TRB and a segment table entry are the sixteen bytes the hardware indexes them by, a ring segment is exactly one page rather than merely smaller than one, the three structures sharing a frame fit it without overlapping and each sits on the 64-byte boundary its register wants, and a frame the allocator actually handed out holds a segment without crossing the 64 KB boundary that is the only placement rule a segment has — which is the whole of why `mm/pmm.c` was not touched this release. Then the two register fields that are not where they look: the scratchpad count, whose halves are at 25:21 and 31:27 and are not adjacent, and the PORTSC write mask, which is what stands between a read-modify-write and switching off every working port. Then the hardware: a controller found by its programming interface rather than by class, the controller running, and the rendered inventory naming a port with a device on it |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
 | `test_keyslot.c` | The passphrase key slot, against the slot alone — no disk, no prompt: round trip, a wrong passphrase refused with the caller's buffer left untouched, every field of the slot edited in turn to confirm the tag covers the salt and IV as well as the ciphertext, iteration counts above and below what the build accepts, and the same data key wrapped under a second passphrase to prove a passphrase change preserves it |
@@ -1360,6 +1368,7 @@ esdumanOS/
 |   |-- ata.c                        ATA/IDE PIO disk driver
 |   |-- pci.c                        PCI bus enumeration and configuration access
 |   |-- ahci.c                       SATA disk driver (polled, one port)
+|   |-- xhci.c                       USB controller: rings, ports, no devices yet
 |   |-- console.c                    Console backends: VGA text and framebuffer
 |   |-- console_font.c               8x16 glyphs, ASCII 32-126
 |   |-- keyboard.c                   PS/2 keyboard (US + Turkish)
@@ -1399,12 +1408,13 @@ esdumanOS/
 |       |-- chmod.c                  Change permission bits
 |       |-- chown.c                  Change owner and group
 |       |-- lspci.c                  List the PCI devices found at boot
+|       |-- lsusb.c                  List the USB controller and its ports
 |       +-- stat.c                   Show a file's size, type, owner, mode and times
 |
-|-- include/                         44 header files
+|-- include/                         50 header files
 |   |-- kernel.h                     Master header, and where the version lives
 |   |-- types.h                      Integer type definitions
-|   |-- syscall.h                    62 syscall number definitions
+|   |-- syscall.h                    65 syscall number definitions
 |   |-- process.h                    Process control block, scheduler API
 |   |-- fs.h                         VFS structures, file operations
 |   |-- stat.h                       esd_stat_t and the lseek origins
@@ -1413,7 +1423,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      40 kernel-mode test modules + framework
+|   |-- kernel/                      41 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -1432,13 +1442,14 @@ esdumanOS/
 
 ## System Call Reference
 
-The kernel exposes 64 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
+The kernel exposes 65 system calls through `INT 0x80`. The syscall number is passed in `EAX`.
 
 **These numbers are frozen as of v1.0.0.** None of them will change value or meaning. The
 numbers 11, 28, 30, 31, 32 and 99 are retired and will never be reused — they held calls
 that were removed, a reservation for a crypto API that was never designed, and `YIELD`
 before it moved to 67 — and new calls continue from the highest assigned number, which is
-why `SETKEY` took 68 in v1.1.0, `PCIINFO` took 69 in v1.4.0, and the next call takes 70.
+why `SETKEY` took 68 in v1.1.0, `PCIINFO` took 69 in v1.4.0, `USBINFO` took 70 in v1.8.0,
+and the next call takes 71.
 Everything from 200 up is
 reserved for calls that exist only in test builds. `tests/kernel/test_abi.c` asserts all
 of it by literal value, because a number written in a header, in freestanding programs,
@@ -1651,6 +1662,7 @@ for future crypto API" for one release after that stopped being true.*
 | 39 | `DMESG` | Copy a slice of the kernel log into a user buffer (root only) |
 | 42 | `GET_ARGS` | Retrieve process command-line arguments |
 | 69 | `PCIINFO` | Render the PCI inventory the kernel took at boot into `ebx`, capacity in `ecx` (root only). Reports what the enumeration recorded; it does not re-read configuration space |
+| 70 | `USBINFO` | Render the USB controller and its ports into `ebx`, capacity in `ecx` (root only). A snapshot taken at boot, like `PCIINFO`: there is no hotplug behind it. A machine with no xHCI controller gets one line saying so and a successful return |
 
 ---
 
@@ -1746,7 +1758,10 @@ The following are known constraints of the current implementation. These are doc
 | Per-process kernel stack | 8 KB (`KERNEL_STACK_SIZE`) |
 | Block cache | 64 sectors, 32 KB (`BCACHE_SIZE`) |
 | PCI functions recorded | 32 (`PCI_MAX_DEVICES`). A machine with more gets the first 32 and a log line saying the list stops there |
-| Device register window | 16 MB at `DEVICE_WINDOW_BASE`, allocated by a bump pointer with no free. A driver's registers are mapped once at boot and held for the life of the system; the AHCI driver uses 12 KB of it |
+| USB ports recorded | 32 (`XHCI_MAX_PORTS`). A controller with more gets the first 32 and says so in `lsusb` as well as the log |
+| USB device slots enabled | 32 (`XHCI_MAX_SLOTS`). Nothing uses one yet; the number sizes the device context array, which is programmed before the controller runs |
+| USB scratchpad buffers | 64 (`XHCI_MAX_SCRATCHPAD`). A controller asking for more is refused rather than half-served, since an array the hardware believes is longer than it is gets read past its end |
+| Device register window | 16 MB at `DEVICE_WINDOW_BASE`, allocated by a bump pointer with no free. A driver's registers are mapped once at boot and held for the life of the system; the AHCI driver uses 12 KB of it and the XHCI driver 76 KB — 64 KB of registers and three 4 KB pages of rings and tables. Scratchpad buffers, where a controller asks for any, spend a page of window each even though the mapping is dropped once they are zeroed, because the bump pointer does not rewind |
 | Kernel log ring | 512 records, ~88 KB (`KLOG_RECORDS`) |
 | Longest `alarm()` interval | ~249 days (half a 32-bit tick counter at `TIMER_HZ`) |
 | Latest representable timestamp | 2106 (`uint32_t` seconds since the Unix epoch) |
@@ -1866,8 +1881,8 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   and uses a little of it pays for all of it.
 - **PIO disk access.** ATA driver uses Programmed I/O, not DMA. Single-sector transfers only.
 - **The PCI enumeration is a snapshot taken once, on the boot path.** Nothing
-  rescans and there is no hotplug. Of everything it finds, one class is driven:
-  a SATA controller, as of v1.5.0.
+  rescans and there is no hotplug. Of everything it finds, two classes are
+  driven: a SATA controller, as of v1.5.0, and an xHCI controller, as of v1.8.0.
 - **The SATA driver is the smallest one that reads and writes a disk.** It polls
   rather than taking interrupts — the controller's interrupt travels the PCI
   interrupt line to an IOAPIC, and there is no IOAPIC here, no ACPI to describe
@@ -1877,6 +1892,35 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
   transfers are the hardware's to give and the block interface's to ask for:
   `blockdev_t` reads and writes a sector at a time, and changing that is a
   decision about every driver rather than about this one.
+- **The USB bus is brought up and nothing is on it yet.** The xHCI driver resets
+  the controller, installs the device context array and both rings, powers the
+  ports and proves the rings work with a No Op command — and then stops. No slot
+  is enabled, nothing is addressed, no descriptor is fetched, so `lsusb` reports
+  ports and speeds rather than vendors and products. A port's speed is only
+  defined after a port reset, which this release does not perform, so a device
+  can render as "unknown speed". The port list is a snapshot taken at boot, with
+  the same absence of hotplug the PCI inventory has. It polls, for the reasons
+  the SATA driver polls, and uses one controller, one interrupter and one event
+  ring segment.
+- **A PCI device the firmware places above 4 GB cannot be used at all.** There
+  is no PAE, so a physical address in this kernel is 32 bits wide. The xHCI
+  driver refuses such a controller and says so in the log rather than mapping
+  the low half of an address that means something else — which is a case that
+  only appears under UEFI, because OVMF has an aperture above 4 GB to put
+  64-bit BARs in and SeaBIOS has none. `make test_kernel_uefi` turns that
+  aperture off with OVMF's own `X-PciMmio64Mb=0`, the same accommodation
+  firmware makes for any 32-bit operating system. Relocating a BAR from inside
+  the kernel would need BAR sizing — a write to configuration space this tree
+  has never made — and a search for a free range, so it waits for a machine
+  that actually needs it.
+- **Two paths in the xHCI driver cannot be exercised on any machine available to
+  this project.** QEMU's controller publishes no USB Legacy Support capability,
+  so the handoff that takes the controller away from firmware finds nothing and
+  returns — on a UEFI machine that firmware has been driving the controller to
+  read its own boot keyboard, which is exactly the machine the code exists for.
+  And QEMU asks for no scratchpad buffers, so the allocation that hands a
+  controller its private pages never runs. Both are written from the
+  specification and both say so where they are written.
 - **Device mappings are never reclaimed.** Registers and DMA buffers are mapped
   into a 16 MB window by a bump pointer with no free, because a driver in this
   kernel is loaded at boot and never unloaded. A free list would be a structure
@@ -2004,21 +2048,37 @@ There were three, and two are gone. The screen was a framebuffer while
 The machine booted UEFI while this kernel was loaded by GRUB under BIOS; v1.7.0
 shipped an ISO that boots either way. What is left is the keyboard, which is on
 USB while `drivers/keyboard.c` reads port `0x60` — and the storage, since a
-machine booted from a stick has to be able to read the stick.
+machine booted from a stick has to be able to read the stick. Both of those are
+on a bus that v1.8.0 brought up; what they still need is somebody to talk to a
+device on it.
 
 | Release | What it removes |
 |---------|-----------------|
-| v1.8.0 | **The bus underneath both of those.** XHCI: multi-page contiguous physical allocation, the command and event rings, port enumeration — and `lsusb`, so it arrives with a reader rather than as a layer nothing calls. The event ring polled from the timer tick rather than through an IOAPIC that does not exist here |
-| v1.9.0 | **A keyboard on a machine with no PS/2 controller.** USB HID over the bus above, and a second backend behind the keyboard driver in the same shape the console got in v1.6.0 |
+| ~~v1.8.0~~ | **Done.** The bus underneath both of those. XHCI: the command and event rings, port enumeration, and `lsusb`, so it arrived with a reader rather than as a layer nothing calls |
+| v1.9.0 | **A keyboard on a machine with no PS/2 controller.** USB HID over the bus above: Enable Slot, Address Device and the control transfers v1.8.0 deliberately left out, then a second backend behind the keyboard driver in the same shape the console got in v1.6.0. This is also where the event ring gets polled from the timer tick — an interrupt endpoint is the first thing that has to be serviced while something else runs |
 | v1.10.0 | **The stick as a real disk.** USB mass storage, and `mount`/`umount` — which stop being a leftover the moment there are two disks at once, because that is the caller `include/blockdev.h` has been waiting for since v1.2.0 |
 | v1.11.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
 | v2.0.0 | The machine. Named, as only major versions are |
 
-XHCI is split from the drivers above it deliberately. It is the most complicated
+XHCI was split from the drivers above it deliberately. It is the most complicated
 controller on the platform, it can only be developed against an emulator here,
 and v1.4.0 established what works: bring the bus up with a tool that reads it,
 then write the driver in the release after. PCI arrived with `lspci` and AHCI
-came next; this is the same pair.
+came next; USB arrived with `lsusb` and HID comes next.
+
+The v1.8.0 row above used to say the release needed multi-page contiguous
+physical allocation, and it did not. A ring segment is 4096 bytes and the only
+placement rule it has is that it must not cross a 64 KB boundary, which a
+4 KB-aligned frame cannot do; the device context array, the segment table and the
+scratchpad array together use 3584 bytes of one more frame; and the scratchpad
+buffers, which are the case that looks like it needs contiguity, do not, because
+the array holds each buffer's address separately. `mm/pmm.c` was not touched.
+That is the third roadmap row in four releases to overstate what its release
+needed — v1.5.0's said the same thing about AHCI and v1.6.0's and v1.7.0's both
+called for Multiboot 2 — and the arithmetic is now asserted in
+`tests/kernel/test_xhci.c` rather than argued in a comment, so the next person to
+raise `XHCI_MAX_SLOTS` past the room there is for it finds out from a failing
+test.
 
 **2.0.0 ships as a beta too**, and that was decided along with the rest of this
 table rather than deferred again. Running on hardware is a claim about reach, and
@@ -2069,9 +2129,11 @@ bit on `/tmp`, which v0.9.4 added
 alongside the other half of the permission enforcement: the file's own mode. v1.0.0 froze
 the syscall ABI, which had been waiting on the disk format rather than on `mount` — a
 freeze stops numbers from changing meaning and says nothing about adding new ones, so
-`mount` and `umount` take 70 and 71 whenever they are written. That sentence said "68 and
+`mount` and `umount` take 71 and 72 whenever they are written. That sentence said "68 and
 69" until v1.4.0, having been written before `SETKEY` took 68 and left standing for three
-releases four lines below the paragraph that says `SETKEY` took 68.
+releases four lines below the paragraph that says `SETKEY` took 68; it said "70 and 71"
+until `USBINFO` took 70 in v1.8.0. It will keep moving, which is why the number that
+matters is the one `tests/kernel/test_abi.c` asserts rather than the one written here.
 
 UEFI boot left this list in v1.7.0, and it left for one line of configuration.
 The row said the release would need Multiboot2; it needed nothing of the sort.

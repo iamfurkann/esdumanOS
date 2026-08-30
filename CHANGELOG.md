@@ -5,6 +5,142 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta.1] - 2026-08-29
+
+esdumanOS has a USB bus. The keyboard on the machine this project is aimed at is on it,
+and so is the stick it is meant to boot from; neither is spoken to yet. What this release
+delivers is the controller underneath both of them, brought up far enough to prove it is
+working rather than far enough to assume it.
+
+### Added
+
+- **An xHCI driver.** It finds the controller, asks the firmware to release it, resets it,
+  installs the device context array and the command and event rings, powers the ports and
+  reads what is on them. One controller, one interrupter, one event ring segment, polled —
+  every one of those argued in `include/xhci.h` rather than left as a gap.
+
+- **A No Op command, issued once at bring-up, and it is the point of the release.** A
+  controller that has been reset and started reports itself as running with its rings
+  pointed anywhere at all; the doorbell, the two rings and the cycle-state agreement
+  between driver and hardware are only proven by putting a TRB on one ring and reading its
+  completion off the other. If it does not come back, the driver reports the controller as
+  not running rather than as ready, and the suite goes red.
+
+- **`lsusb`**, the twenty-first program in `/bin`, and `SYSCALL_USBINFO` at 70. Built the
+  way `lspci` was and `free` was rebuilt in v0.9.2: the kernel renders the text and the
+  program writes it through descriptor 1, so `lsusb > usb.txt` is a file with something in
+  it. Root only, through the same check every other rendered diagnostic uses. A machine
+  with no controller gets one line saying so and a successful return, because that is the
+  answer to the question rather than a failure to answer it.
+
+- **`pci_find_class_if()`**, which matches on the programming interface as well. UHCI,
+  OHCI, EHCI and xHCI all report class `0x0C` subclass `0x03` and are four unrelated
+  register files, so `pci_find_class()` would have found whichever the bus walk reached
+  first and then quietly done nothing on a machine with more than one. `pci_find_class()`
+  is now that search with the third field wildcarded rather than a second loop beside it.
+
+- **`test_xhci`**, the forty-first module, and USB hardware on every kernel test target.
+  Neither i440fx nor q35 provides a USB controller by default, so `test_kernel`,
+  `test_kernel_q35`, `test_kernel_uefi` and `test_smap` are now all given an xHCI
+  controller with a keyboard and a mouse on it, from one variable rather than four copies.
+  The three that are compared still report the same total.
+
+### Changed
+
+- **The roadmap said this release needed multi-page contiguous physical allocation. It did
+  not, and `mm/pmm.c` was not touched.** A ring segment is 4096 bytes and the only
+  placement rule it has is that it must not cross a 64 KB boundary, which a 4 KB-aligned
+  frame cannot do. The device context array, the segment table and the scratchpad array
+  together use 3584 bytes of one more frame. The scratchpad buffers look like the case
+  that needs contiguity and are not, because the array holds each address separately. The
+  same sentence was written about AHCI in v1.5.0 and was wrong then too; the arithmetic is
+  asserted in `tests/kernel/test_xhci.c` now rather than argued in a comment.
+
+- **The event ring is not polled from the timer tick, which the roadmap also called for.**
+  Nothing in this release has to be serviced while something else runs: the one command is
+  issued on the boot path and waited for inline, with a deadline, the way every AHCI
+  command is. A hook in `timer_interrupt_handler()` would have had no caller. It arrives
+  in v1.9.0 with the interrupt endpoint that needs it.
+
+- **`make run` and `make run_text` get a controller and a mouse, and deliberately no USB
+  keyboard.** QEMU delivers key events to the most recently attached keyboard, so a
+  `usb-kbd` on an interactive run would route every keystroke to a device this kernel
+  cannot read yet — the PS/2 driver would go silent and the machine would look hung at the
+  login prompt. The test targets have one because nothing types at them.
+
+### Found in passing
+
+- **The driver misnamed the one condition it was written to detect, and `make
+  test_kernel_uefi` is what found it.** An xHCI controller's first BAR is 64-bit
+  capable, so where firmware places it above 4 GB the whole address sits in the BAR
+  after it and the low half carries nothing but the type bits. The driver checked
+  "is the low half zero" first and reported a controller at a high address as a
+  controller with no address at all. Under SeaBIOS the question never comes up, because
+  it has no aperture above 4 GB to put anything in; under OVMF it does, and three
+  assertions failed on the one target that boots the way a real machine boots. The high
+  half is asked about first now, and the BAR's width is read rather than assumed — a
+  32-bit BAR's neighbour is an unrelated region, and treating it as the top of an
+  address would refuse a perfectly reachable controller on the strength of a number
+  that means something else.
+
+- **The driver's one success message did not reach `dmesg`.** `printk()` writes to the
+  terminal and the serial port and deliberately not to the log ring, because a log is a
+  record of events rather than a transcript of the screen. Every failure path in the
+  driver was already recorded; the path that goes right was a `printk` and nothing else,
+  so once the screen scrolled there was no evidence anywhere that the controller had come
+  up - not in `dmesg`, not in `/var/log/kern.log`. That matters more here than it usually
+  would, because "the controller came up" is the whole of what this release claims. It
+  now records a line the way `pci_init()` has since v1.4.0. The AHCI driver has the same
+  gap and keeps it for now; it is a different file and a different release.
+
+- **`SECURITY.md` had no entry for bus-mastering DMA**, which became true in v1.5.0 when
+  the AHCI driver started handing a controller physical addresses. There is no IOMMU here,
+  so a bus-mastering device is not constrained by the page tables. It is recorded now,
+  covering both drivers, rather than at the release that would have made it look new.
+
+- **Three stale counts in the README**: the file tree said 44 headers and 62 syscall
+  numbers, and the test-target block said 39 kernel-mode modules. All three were correct
+  when written and none is anywhere near a section anybody re-reads.
+
+### Known issues
+
+- **The firmware handoff is written from the specification and never executes here.**
+  QEMU's controller publishes no USB Legacy Support capability, so on every machine this
+  project can run on the walk finds nothing and returns. On a UEFI machine the firmware
+  has been driving the controller to read its own boot keyboard and does not stop until it
+  is asked — which is exactly the machine this code exists for and exactly the machine
+  nobody here has.
+
+- **The scratchpad path does not execute here either.** QEMU's controller asks for no
+  scratchpad buffers. Real controllers ask for a handful and one that asks for more than
+  this driver allocates is refused with its number in the log rather than half-served.
+
+- **No device is enumerated.** No slot is enabled, nothing is addressed, no descriptor is
+  fetched, and `lsusb` therefore reports ports and speeds rather than vendors and
+  products. A port's speed field is only defined after a port reset, which this release
+  does not perform, so a device attached before one may render as "unknown speed".
+
+- **The port list is a snapshot taken at boot**, with the same shape and the same
+  limitation as the PCI inventory: there is no hotplug behind it.
+
+- **A controller the firmware places above 4 GB is unreachable, and that is the kernel
+  rather than the driver.** There is no PAE here, so a physical address is 32 bits wide;
+  such a controller is not slow to reach or partially reachable, it cannot be addressed
+  at all. The driver refuses it and names it in the log. `make test_kernel_uefi` passes
+  OVMF's own `X-PciMmio64Mb=0` so that every BAR lands in the low aperture, which is the
+  accommodation firmware makes for any 32-bit operating system. Relocating a BAR from
+  inside the kernel is the real answer and is a release of its own: it needs BAR sizing,
+  which is a write to configuration space this tree has never made, and a free-range
+  search. It is only worth doing if a physical machine turns out to place this controller
+  high, which a fixed-function xHCI in a chipset does not.
+
+- **Still no ACPI**, and on a UEFI machine that remains the real limit it became in
+  v1.7.0. Still no Secure Boot. Multiboot 1 still cannot simply become Multiboot 2.
+
+- `test_time`'s clock round trip is still not deterministic. There is still no
+  `mount`/`umount`. The runtime read and write paths still do not check the status
+  v1.2.0 gave them. A device larger than about 1 GB is still used only up to that.
+
 ## [1.7.0-beta.1] - 2026-08-29
 
 esdumanOS boots on a machine whose firmware has no BIOS. That is the second of the three

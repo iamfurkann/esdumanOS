@@ -86,9 +86,49 @@
 /* The class codes this kernel names or looks for. */
 #define PCI_CLASS_MASS_STORAGE 0x01
 #define PCI_CLASS_BRIDGE       0x06
+#define PCI_CLASS_SERIAL_BUS   0x0C
 #define PCI_SUBCLASS_IDE       0x01
 #define PCI_SUBCLASS_SATA      0x06
 #define PCI_SUBCLASS_PCI_BRIDGE 0x04
+#define PCI_SUBCLASS_USB       0x03
+
+/**
+ * @brief The programming interface byte that separates the USB controllers.
+ *
+ * Class and subclass are enough to find a disk controller and not enough to find
+ * a USB one: UHCI, OHCI, EHCI and xHCI all report 0x0C/0x03 and are four
+ * completely different register files. The generation is in prog_if - 0x00,
+ * 0x10, 0x20 and 0x30 respectively - which is why pci_find_class_if() exists and
+ * why a driver that used pci_find_class() here would map whichever controller
+ * the walk happened to reach first and then quietly do nothing.
+ */
+#define PCI_PROGIF_XHCI        0x30
+
+/** @brief Passed as a prog_if or subclass to mean "any". */
+#define PCI_MATCH_ANY          0xFF
+
+/*
+ * The low bits of a base address register, which describe the register rather
+ * than the address.
+ *
+ * This header records BARs without decoding them and says so, because deciding
+ * what one means belongs to whoever maps it. These are the vocabulary that
+ * decision is made in, not the decision: bit 0 separates memory from I/O, and
+ * bits 2:1 say whether the address is 32 bits or spills into the next BAR.
+ *
+ * The width matters more than it looks. A 64-bit BAR whose address is above
+ * 4 GB carries nothing but these bits in its low half - the whole address is in
+ * the BAR after it - so a driver that masks the low half and tests it against
+ * zero concludes the device has no address at all. That is not hypothetical:
+ * OVMF places 64-bit BARs in its above-4 GB aperture, and it is what the XHCI
+ * driver was reporting as a missing register base until it learned to read the
+ * pair.
+ */
+#define PCI_BAR_IO             0x00000001  /**< Set for an I/O BAR.         */
+#define PCI_BAR_TYPE_MASK      0x00000006  /**< Bits 2:1: the address width.*/
+#define PCI_BAR_TYPE_64        0x00000004  /**< 64-bit; the next BAR is the
+                                                upper half of this address.  */
+#define PCI_BAR_MEM_MASK       0xFFFFFFF0  /**< Address bits of a memory BAR.*/
 
 /**
  * @brief One function found on the bus.
@@ -194,6 +234,22 @@ const pci_device_t *pci_find(uint8_t bus, uint8_t device, uint8_t function);
  * @return The entry, or 0 when nothing of that class was found.
  */
 const pci_device_t *pci_find_class(uint8_t class_code, uint8_t subclass);
+
+/**
+ * @brief Finds the first recorded function of a class, subclass and interface.
+ *
+ * The same search pci_find_class() does with one more field, added rather than
+ * folded into it: pci_find_class() has two callers that are correct as they
+ * stand - the AHCI driver and the boot log - and changing a signature to serve a
+ * third is how a call site that was right becomes a call site nobody re-read.
+ *
+ * @param class_code The class to look for.
+ * @param subclass The subclass, or PCI_MATCH_ANY for any subclass.
+ * @param prog_if The programming interface, or PCI_MATCH_ANY for any.
+ * @return The entry, or 0 when nothing matching was found.
+ */
+const pci_device_t *pci_find_class_if(uint8_t class_code, uint8_t subclass,
+                                      uint8_t prog_if);
 
 /**
  * @brief A short human name for a class and subclass pair.

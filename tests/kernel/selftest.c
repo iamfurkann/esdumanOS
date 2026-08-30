@@ -55,6 +55,7 @@ static const ktest_module_t kernel_modules[] = {
     { "blockdev",    run_blockdev_tests },
     { "pci",         run_pci_tests },
     { "ahci",        run_ahci_tests },
+    { "xhci",        run_xhci_tests },
     { "console",     run_console_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },

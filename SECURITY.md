@@ -4,15 +4,15 @@
 
 | Version  | Supported          |
 | -------- | ------------------ |
-| 1.7.x    | :white_check_mark: |
-| 1.6.x    | :x:                |
-| ≤ 1.5.x  | :x:                |
+| 1.8.x    | :white_check_mark: |
+| 1.7.x    | :x:                |
+| ≤ 1.6.x  | :x:                |
 
 Only the current minor line is supported. This table said 0.4.x for five minor releases
 and then 0.9.x for two more, and then it said 1.2.x through the whole of 1.3 — the
 sentence warning about the habit was four lines long and did not stop it happening again,
 which is why the release checklist now names this file. The line that matters is the
-current one, and it is 1.7.x.
+current one, and it is 1.8.x.
 
 **Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
 release before it encrypted the file system under a key compiled into the kernel image,
@@ -179,6 +179,14 @@ described inaccurately is worse than one described plainly — in either directi
 - The block cache is write-back. Dirty sectors are bounded by volume (32 slots) and by
   time (5 seconds), and `sync()` flushes on demand — but an abrupt power loss inside
   that window still loses the sectors in it.
+- Two drivers now enable PCI bus mastering and hand a controller physical addresses to
+  read and write: AHCI since 1.5.0, and XHCI since 1.8.0. A bus-mastering device is not
+  constrained by the page tables — there is no IOMMU here and no plan for one — so a
+  controller that misbehaves, or firmware that is still driving one, can reach any
+  physical memory. This is inherent to doing DMA on this platform and is recorded here
+  because it was not recorded when it first became true. The XHCI driver asks the
+  firmware to release the controller before programming it, which is the part of the
+  problem that is addressable.
 
 ### Corrected in 0.2.0
 

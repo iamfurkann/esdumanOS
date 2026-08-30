@@ -16,6 +16,10 @@ Thank you for your interest in contributing to esdumanOS! This document provides
    the only target that does not pass `-kernel`, so it is the only one in which a
    bootloader runs at all.
 
+   All four targets are given the same USB hardware — an xHCI controller with a keyboard
+   and a mouse on it — because neither machine type provides a USB controller by default
+   and `test_xhci` has to find the same thing on each of them.
+
    All three must report the same assertion total; a different one means an assertion has
    learned which machine it is running on.
 

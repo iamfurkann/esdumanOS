@@ -83,7 +83,7 @@ void init_pmm(multiboot_info_t *mboot_info) {
     int memory_map_found = 0;
 
     if (mboot_info != 0) {
-        if (mboot_info->flags & (1 << 6)) {
+        if (mboot_info->flags & MULTIBOOT_FLAG_MMAP) {
             multiboot_memory_map_t *mmap = (multiboot_memory_map_t *)mboot_info->mmap_addr;
             uint32_t highest_addr = 0;
             while ((uint32_t)mmap < mboot_info->mmap_addr + mboot_info->mmap_length) {
@@ -127,7 +127,7 @@ void init_pmm(multiboot_info_t *mboot_info) {
         pmm_refcount[i] = 0;
     }
 
-    if (memory_map_found && (mboot_info->flags & (1 << 6))) {
+    if (memory_map_found && (mboot_info->flags & MULTIBOOT_FLAG_MMAP)) {
         multiboot_memory_map_t *mmap = (multiboot_memory_map_t *)mboot_info->mmap_addr;
         while ((uint32_t)mmap < mboot_info->mmap_addr + mboot_info->mmap_length) {
             if (mmap->type == 1) {

@@ -4,9 +4,20 @@ SECTIONS
 {
     . = 1M;
     
-    /* Multiboot header must be located early in the binary */
+    /*
+     * Both multiboot headers must be located early in the binary.
+     *
+     * Multiboot 1 wants its header inside the first 8 KB and 4-byte aligned;
+     * Multiboot 2 wants its own inside the first 32 KB and 8-byte aligned. Both
+     * are satisfied by putting them in the section this script places first,
+     * with the alignment stated rather than assumed - the assembler's `align 8`
+     * only aligns within its own section, and it is the linker that decides
+     * where that section begins.
+     */
     .multiboot.data : {
         *(.multiboot)
+        . = ALIGN(8);
+        *(.multiboot2)
     }
     
     . += 0xC0000000;

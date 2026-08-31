@@ -162,6 +162,15 @@ void run_usbkbd_tests(void);
 void run_usbmsc_tests(void);
 /** @brief Two disks, and the cache that has to tell them apart. */
 void run_mount_tests(void);
+
+/**
+ * @brief ACPI: the tables, the sleep values, and the offsets into the FADT.
+ *
+ * Almost all of it runs against tables built in the module rather than against
+ * the machine, because the cases worth asserting are the ones no machine this
+ * project can reach produces.
+ */
+void run_acpi_tests(void);
 /** @brief Where the terminal's cells land, in text mode and in pixels. */
 void run_console_tests(void);
 void run_string_tests(void);

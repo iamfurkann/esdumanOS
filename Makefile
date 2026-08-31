@@ -101,6 +101,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_usbkbd.c \
             tests/kernel/test_usbmsc.c \
             tests/kernel/test_mount.c \
+            tests/kernel/test_acpi.c \
             tests/kernel/test_console.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
@@ -240,7 +241,8 @@ ifeq ($(ARCH), x86)
                 arch/x86/cpu/idt_s.asm \
                 mm/paging_s.asm
 
-    ARCH_C_SRCS = arch/x86/cpu/gdt.c \
+    ARCH_C_SRCS = arch/x86/boot/multiboot2.c \
+                arch/x86/cpu/gdt.c \
                 arch/x86/cpu/idt.c \
                 arch/x86/cpu/isr.c \
                 arch/x86/cpu/timer.c \
@@ -249,6 +251,7 @@ ifeq ($(ARCH), x86)
                 drivers/keyboard.c \
                 drivers/ata.c \
                 drivers/pci.c \
+                drivers/acpi.c \
                 drivers/ahci.c \
                 drivers/xhci.c \
                 drivers/usbkbd.c \
@@ -911,6 +914,17 @@ UEFI_TEST_ISO = esdumanOS-uefi-test.iso
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 
+# This target boots with multiboot2 as of v1.12.0, and it is the only one that
+# does. The other three start with QEMU's -kernel, which reads a Multiboot 1
+# header and no other - so between them the two boot paths are both covered by
+# targets that already exist. No fourth target, and no second OVMF run, which is
+# the slowest thing in the suite.
+#
+# There is no Multiboot 1 fallback entry in the generated grub.cfg, and that is
+# deliberate. The release ISO has one, because the first real machine this
+# project meets is one nobody has tried yet; a test target that quietly fell back
+# would report a pass for a boot path that is broken, which is the opposite of
+# what it is for.
 test_kernel_uefi:
 	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
 	@test -f $(OVMF_CODE) || { \
@@ -928,7 +942,7 @@ test_kernel_uefi:
 	@rm -rf isodir_uefi
 	@mkdir -p isodir_uefi/boot/grub
 	@cp $(TEST_BIN) isodir_uefi/boot/myos.bin
-	@printf 'set default=0\nset timeout=0\ninsmod all_video\n\nmenuentry "esdumanOS self-test" {\n    multiboot /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > isodir_uefi/boot/grub/grub.cfg
+	@printf 'set default=0\nset timeout=0\ninsmod all_video\ninsmod multiboot2\n\nmenuentry "esdumanOS self-test" {\n    multiboot2 /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > isodir_uefi/boot/grub/grub.cfg
 	@grub-mkrescue -o $(UEFI_TEST_ISO) isodir_uefi > /dev/null 2>&1
 	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1

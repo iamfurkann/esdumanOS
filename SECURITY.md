@@ -200,6 +200,20 @@ described inaccurately is worse than one described plainly — in either directi
   ports of a machine with no readable system disk is not a threat this kernel was ever
   positioned to stop. The disk it falls to is named on the console and in the log, which
   is the part that makes it noticeable rather than silent.
+- **The firmware's own tables are parsed now, and the firmware is not this kernel's
+  code.** ACPI arrived in v1.12.0 and with it a walk over structures nothing here wrote:
+  an RSDP, a root table, a FADT, and the DSDT's AML. Every length in every one of them
+  comes from the firmware, which makes each a walk condition rather than a fact - the
+  same discipline the USB descriptor walk carries below. Both RSDP checksums are verified
+  rather than only the first, because the second covers the half holding the XSDT address;
+  every table's checksum is verified before a field is read from it; a declared length
+  below the header or past the copy the kernel keeps is refused rather than summed; and
+  the `\_S5_` search will not act on a match that is not introduced by a NameOp, because
+  the four characters occur inside ordinary strings and acting on one would send an
+  arbitrary value to a hardware register. A table above 4 GB is skipped rather than
+  truncated. This is a smaller boundary than a mounted disk - firmware that wanted to
+  subvert this kernel does not need a malformed table to do it - but it is a new one, and
+  the bound on it is that only S5 is ever entered and only through ports the FADT named.
 - **A HID report is attacker-supplied too, and six of its eight bytes are used as table
   indices.** The translation table is 232 entries and a usage is a `uint8_t`, so every
   possible value indexes inside it - which is arithmetic rather than a bounds check, and

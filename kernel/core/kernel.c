@@ -15,6 +15,7 @@
 #include "ahci.h"
 #include "xhci.h"
 #include "usbmsc.h"
+#include "acpi.h"
 /* Not for reading or writing - the file system does that through the cache -
  * but for the one decision the boot path owns: which of the registered disks
  * the file system is put on. */
@@ -38,6 +39,16 @@ uint32_t kernel_stack_ring0[1024];
 multiboot_info_t global_mboot_info;
 char global_cmdline[256];
 int is_test_mode = 0;
+
+/**
+ * @brief Which specification the bootloader used: 1 or 2.
+ *
+ * Recorded rather than inferred later. By the time anything wants to know, the
+ * magic is gone and global_mboot_info looks identical either way - which is the
+ * whole design of the translation and also the reason the answer has to be kept
+ * here, at the one moment it is known.
+ */
+int boot_protocol = 0;
 
 /**
  * @brief early_get_kbd_char
@@ -338,7 +349,7 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
      */
     init_image_asset_key();
 
-    if (mboot_info->flags & 0x00000004) {
+    if (mboot_info->flags & MULTIBOOT_FLAG_CMDLINE) {
         char *cmd = (char *)mboot_info->cmdline;
         int i = 0;
         while (cmd[i] && i < 255) { global_cmdline[i] = cmd[i]; i++; }
@@ -1013,6 +1024,24 @@ static int init_filesystem_and_vfs(void) {
      * removes the disk. What stops the probe hanging is its own timeout. This
      * only reports.
      */
+    /*
+     * The platform's own description of itself, read before the buses on it.
+     *
+     * Before, because ACPI is what the firmware says exists and PCI is what the
+     * hardware answers to - and the order in a boot log should be the order in
+     * which a machine is learned about. Nothing below is gated on the result,
+     * for the reason written under the PCI enumeration: a link between two
+     * subsystems that nothing watches is the v1.2.0 mistake, and a machine with
+     * no ACPI is a machine that boots exactly as it did before this release and
+     * cannot be powered off at the end of it.
+     *
+     * The RSDP comes from the bootloader where one handed it over, which on a
+     * UEFI machine is the only place it can come from. mb2_acpi_rsdp() answers 0
+     * under Multiboot 1, and acpi_init() falls back to scanning the legacy areas
+     * - which is what the three -kernel test targets do.
+     */
+    acpi_init(mb2_acpi_rsdp());
+
     pci_init();
     boot_ok("PCI Bus Enumerated");
     report_storage_controllers();
@@ -1408,15 +1437,47 @@ static int init_userspace(void) {
 }
 
 void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
-    if (magic != 0x2BADB002) kernel_panic("Multiboot Error: Invalid magic number!");
-    global_mboot_info = *mboot_info;
-    
+    /*
+     * Two specifications, one entry point. Both leave the magic in eax and the
+     * information structure in ebx, so _start does not have to know which
+     * bootloader it was and neither does anything below this: Multiboot 2 is
+     * translated into the structure Multiboot 1 hands over, and the rest of the
+     * kernel reads the one shape it has always read.
+     *
+     * Multiboot 1 is not the legacy path being tolerated here. Three of the four
+     * kernel test targets boot with QEMU's -kernel, which reads that header and
+     * no other, so it is the path most of this project's evidence comes from.
+     * Multiboot 2 exists for the one thing Multiboot 1 cannot carry: the ACPI
+     * RSDP, which on a UEFI machine has no other source.
+     */
+    if (magic == MULTIBOOT1_BOOTLOADER_MAGIC) {
+        global_mboot_info = *mboot_info;
+        boot_protocol = 1;
+    } else if (magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
+        if (mb2_translate((uint32_t)mboot_info, &global_mboot_info) != E_OK) {
+            kernel_panic("Multiboot2 information structure could not be read!");
+        }
+        boot_protocol = 2;
+    } else {
+        kernel_panic("Multiboot Error: Invalid magic number!");
+    }
+
     if (init_boot_verify(&global_mboot_info) != 0) {
         kernel_panic("Boot verification failed!");
     }
 
+    /*
+     * The first line either path leaves behind, and it is here rather than above
+     * because above there is nowhere for a line to go: the serial port and the
+     * console are brought up inside init_boot_verify().
+     */
+    klog_int(LOG_LEVEL_INFO, "BOOT", "Booted by a bootloader speaking Multiboot",
+             boot_protocol);
+
+    if (boot_protocol == 2) mb2_report();
+
     // Parse kernel command line early (before filesystem init needs is_test_mode)
-    if (global_mboot_info.flags & 0x00000004) {
+    if (global_mboot_info.flags & MULTIBOOT_FLAG_CMDLINE) {
         char *cmdline = (char *)global_mboot_info.cmdline;
         if (ft_strstr(cmdline, "selftest") != NULL) {
             is_test_mode = 1;

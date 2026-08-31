@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.11.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.12.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -68,7 +68,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 1.11.0-beta.1
+**Version:** 1.12.0-beta.1
 
 esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -595,6 +595,34 @@ and a write-back cache would have eventually flushed it to whichever device the
 code believed it belonged to. A plumbing fault is loud; that one is not, and it
 is what the middle of `tests/kernel/test_mount.c` exists to catch.
 
+v1.12.0 turns the machine off. `halt` ran `cli; hlt`, which stops the processor
+and leaves the fans running, and `reboot` wrote to a keyboard controller that a
+modern UEFI laptop need not contain - so on the hardware this project is aimed
+at, the only way to end a session was the power button.
+
+ACPI is the answer and it needs one thing to begin: the Root System Description
+Pointer. On a BIOS machine that can be found by scanning the two legacy areas
+below a megabyte. On a UEFI machine it cannot - those areas need not exist, and
+the firmware publishes the pointer in the EFI configuration table, which only the
+bootloader ever sees. Multiboot 1 has no field to carry it, and that is why
+`arch/x86/boot/boot.asm` grew a second header rather than a replacement: three of
+the four kernel test targets boot through QEMU's `-kernel`, which reads MB1 and
+nothing else. Both specifications enter the same way - the magic in `eax`, the
+information structure in `ebx` - so there is one entry point and one branch, and
+`mb2_translate()` fills in the MB1 structure the rest of the kernel has always
+read. `init_pmm()`, the framebuffer console and the command line parser were not
+touched.
+
+What is deliberately absent is the rest of ACPI. There is no AML interpreter; the
+one place AML is touched is a byte search for `\_S5_`, and `acpi_parse_s5()` says
+so in its own name. No MADT, no IOAPIC, no HPET, no PCI routing - AHCI and xHCI
+go on polling exactly as they did. `halt` cuts power and falls back to the old
+`cli; hlt` where it cannot, and `reboot` became a ladder: the FADT's reset
+register, then port `0xCF9`, then the i8042, then a triple fault. No syscall
+number was spent on any of it. 21 and 20 keep their numbers, their parameters and
+their names, and the shell's `halt` builtin is unchanged - it simply reaches a
+machine that switches off.
+
 The other decision worth recording is how a synchronous read reaches an event
 ring whose only reader runs in the timer interrupt. Waiting for a tick to drain
 it would have worked and cost ten milliseconds a transfer - three transfers to a
@@ -611,7 +639,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 23 user-space programs and 34 shell builtins
-- 44 kernel self-test modules and CI pipeline
+- 45 kernel self-test modules and CI pipeline
 - Boots on UEFI as well as BIOS, draws to a framebuffer, and types on a USB keyboard
 
 **What to expect:**
@@ -975,7 +1003,7 @@ serves the display over VNC on `:1` — connect to `vnc://<host>:5901` from a ma
 a screen, tunnelling the port over ssh if it is not directly reachable. macOS has a
 client built in, under Finder's *Connect to Server*.
 
-Two alternatives, both real. Copy `esdumanOS-v1.11.0-beta.1.iso` and a disk image to a
+Two alternatives, both real. Copy `esdumanOS-v1.12.0-beta.1.iso` and a disk image to a
 machine with a display and run them there — the build has to happen on the development
 machine but looking at the result does not. Or run `make run_text` and choose the second
 entry in the GRUB menu, which sets `gfxpayload=text`: the kernel finds no framebuffer,
@@ -995,7 +1023,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.11.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.12.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display vnc=:1 -k en-us
 ```
 
@@ -1030,7 +1058,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.11.0-beta.1.iso \
+    -cdrom esdumanOS-v1.12.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -1060,7 +1088,7 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/ovmf_vars.fd
 qemu-system-x86_64 -M q35 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/tmp/ovmf_vars.fd \
-    -cdrom esdumanOS-v1.11.0-beta.1.iso \
+    -cdrom esdumanOS-v1.12.0-beta.1.iso \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk \
     -serial file:kernel_log_uefi.txt
 ```
@@ -1083,7 +1111,7 @@ undecoded port answers with all ones, which has that bit set — and until v1.5.
 it was a system that could say what was holding its disk and not read it.
 
 ```
-qemu-system-i386 -M q35 -cdrom esdumanOS-v1.11.0-beta.1.iso -boot d \
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.12.0-beta.1.iso -boot d \
     -serial file:kernel_log_q35.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
@@ -1409,6 +1437,7 @@ filtered run proves one module, not the tree.
 | `test_xhci.c` | The USB controller, the arithmetic that decided how it is fed, and the bytes the devices on it chose. A TRB and a segment table entry are the sixteen bytes the hardware indexes them by; a ring segment is exactly one page rather than merely smaller than one; the three structures sharing a frame fit it without overlapping and each sits on the 64-byte boundary its register wants; and a frame the allocator actually handed out holds a segment without crossing the 64 KB boundary that is the only placement rule a segment has — which is why `mm/pmm.c` has never been touched for this driver. The context stride is asserted to come from the controller's CSZ bit rather than from `sizeof()`, and the placement is checked at both 32 and 64 bytes, including the one no machine here uses: a device context and an input context each fit a frame at either stride and together do not at 64, which is the whole reason they get a frame each. Then the two register fields that are not where they look — the scratchpad count, whose halves are at 25:21 and 31:27 and are not adjacent, and the PORTSC write mask, which is what stands between a read-modify-write and switching off every working port. Then the walk over a configuration descriptor, driven with buffers made up on the spot: one that parses, one whose descriptor claims zero length and is refused rather than stepped over, one that does not begin with a configuration, and one cut short by the transfer. Then the hardware: a controller found by its programming interface rather than by class, the controller running, a device given a slot and an address and answering with a vendor and a product, and its speed being a named one — which it only is after the port reset this release added |
 | `test_usbmsc.c` | Bulk-Only Transport, and the disk it presents. Half of it is arithmetic about two structures and that half matters more than it looks: a command wrapper is 31 bytes and a status wrapper 13, and those are fields of the protocol rather than properties of the C - a device handed 32 bytes where it expects 31 stalls the endpoint, and the recovery for that is a reset this driver does not implement. So the sizes are asserted, the command block is asserted to start at byte 15, and the two signatures are asserted as the ASCII they are rather than against the constants they are defined as. Then the hardware: a stick was found and registered under the name `mount` uses, it reports a capacity and 512-byte sectors, it is **not** the root - the boot order decides that - a sector reads back through the whole transport, and a sector past the end is refused before the device ever sees it. Then the second stick, which is why this driver has a table at all: both were brought up rather than only the first, each registered under a name and a `ctx` of its own, and **their capacities differ** - the test bench gives the two images deliberately different sizes, because a driver keeping the capacity in a single static would register the second stick with the first one's size and produce a disk that mounts and lies about where it ends |
 | `test_mount.c` | Two disks, and the cache that has to tell them apart. The registry first: a device is findable by the name it published, a name nothing answers to finds nothing, a second device may not take a name already in use, registering the same device twice is simply nothing to do, and one that cannot read is refused at the table rather than at the first mount. Then the assertion this release turns on - the same sector number written on two devices holds two different things, and each reads back what was written to it rather than to the other, which before the cache carried a device would have been one slot and a silent corruption. Then the root moved to another disk, detached entirely as `umount` leaves it, and put back where the suite found it. Before any of the writes, one assertion that the sector they use exists on *both* disks - it did not, once, and a sector past the end of a device leaves a dirty slot the cache can never place, which is not a failed assertion here but an eviction path that stops working for every module after this one |
+| `test_acpi.c` | The tables, the sleep values, and the offsets into the FADT - almost all of it against tables built in the module rather than against the machine, because the cases worth asserting are the ones QEMU never produces. A checksum that does not hold is refused, and so is the *second* one, which only an ACPI 2.0 pointer has and which covers the half carrying the XSDT address. A declared length past the thirty-six byte copy the kernel keeps is refused rather than summed. `\_S5_` introduced by NameOp yields both sleep types shifted into place, the same four characters inside a string yield nothing - acting on that match would send an arbitrary value to a hardware register - and the walk is cut short at *every* offset in the block, not one, because every step is taken over bytes the firmware chose. Then the layout: four of the FADT offsets were wrong on the first attempt, each reading a neighbouring field and each returning a number that looked like an answer, so they are checked against the specification's own arithmetic - Flags is a doubleword, the reset register a twelve-byte generic address, and the fields from Flags to X_DSDT tile without a gap. One assertion asks the machine, and it has no branch in it, because an assertion with two arms reports a different count on different targets |
 | `test_usbkbd.c` | HID boot reports and the scancodes they turn into, almost all of it without a controller, a device or a register read: `usbkbd_report()` is handed eight bytes and told nothing about where they came from, so eight made up here are indistinguishable from eight a keyboard sent. The table is asked directly for a letter, for a navigation key that must carry its prefix or arrive as its keypad twin, for right alt which has to become AltGr or the Turkish layout loses a third of its characters, and for a usage set 1 cannot express — which must translate to nothing rather than to something wrong. Then the diff, which is where the shape of this protocol sets its trap: a report says what is held rather than what changed, so a key present in two reports must be pressed once, and a driver that emitted what it saw would repeat every held key a hundred times a second. A release types nothing and is therefore invisible at the ring, so it is proved through a modifier instead — a shift whose break code went missing would leave every letter after it capitalised. A rollover report is dropped whole and, the assertion that matters, leaves the previous report undisturbed. And one key end to end: Up arrives as the escape sequence xterm sends, through a driver that was never told about USB |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
@@ -1499,6 +1528,7 @@ esdumanOS/
 |-- drivers/
 |   |-- ata.c                        ATA/IDE PIO disk driver
 |   |-- pci.c                        PCI bus enumeration and configuration access
+|   |-- acpi.c                       ACPI tables, and the one transition: power off
 |   |-- ahci.c                       SATA disk driver (polled, one port)
 |   |-- xhci.c                       USB controller: rings, ports, devices, endpoints
 |   |-- usbkbd.c                     HID boot reports into set-1 scancodes
@@ -1547,7 +1577,7 @@ esdumanOS/
 |       |-- umount.c                 Unmount the file system
 |       +-- stat.c                   Show a file's size, type, owner, mode and times
 |
-|-- include/                         52 header files
+|-- include/                         53 header files
 |   |-- kernel.h                     Master header, and where the version lives
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    67 syscall number definitions
@@ -1559,7 +1589,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      44 kernel-mode test modules + framework
+|   |-- kernel/                      45 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -2128,20 +2158,30 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 - **`/dev/kmsg` keeps one cursor per process, not per open descriptor.** The
   device interface has no per-descriptor state to hang one on, so two descriptors
   in the same program share a read position. Linux keeps one per open.
-- **No ACPI, and on a UEFI machine that is a real limit rather than a tidy one.**
-  Shutdown and reboot go through the legacy keyboard controller. QEMU's q35
-  provides one under UEFI firmware, so both work there; a physical machine of the
-  class this is aimed at may not have an i8042 at all, and there is no second way
-  to power it down.
+- **ACPI is read for one purpose and no other.** Enough of it to find the FADT,
+  read the PM1 control ports, and pull `SLP_TYP` for S5 out of the DSDT — which
+  is what `halt` needs and the whole of what this kernel understands. There is no
+  AML interpreter: the DSDT is searched for `\_S5_` as bytes, and a firmware that
+  describes it any other way is one this kernel cannot power off. It says so in
+  the log at boot rather than at the moment somebody types `halt`. No MADT, no
+  IOAPIC, no HPET, no PCI interrupt routing, and no sleep state other than S5.
+- **A firmware that hands over no RSDP leaves the machine unable to power off.**
+  Multiboot 2 carries the pointer and Multiboot 1 does not, so a machine booted
+  through the MB1 menu entry — or by any loader that does not pass the tag — falls
+  back to scanning the legacy areas, which works on a BIOS machine and cannot on a
+  UEFI one. `halt` then does what it did before this release: stops the processor
+  with the power still on, and says which of the two it is doing.
 - **No Secure Boot.** The EFI image in the ISO is unsigned, so a machine with
   Secure Boot enabled refuses it. Turning it off in firmware setup is the only
   answer this release has.
-- **Multiboot 1, and it cannot simply become Multiboot 2.** MB1 carries
-  everything needed so far — the memory map and the framebuffer — and MB2 would
-  add the EFI system table and the ACPI pointer if something ever needs them. It
-  would have to be added *alongside*: the entire test suite except the UEFI target
-  boots with QEMU's `-kernel`, which reads an MB1 header, so the binary would need
-  both.
+- **Both multiboot headers, and both stay.** The binary carries an MB1 header and
+  an MB2 header, and the bootloader reads whichever it understands. MB1 is not a
+  compatibility shim being tolerated: three of the four kernel test targets boot
+  with QEMU's `-kernel`, which reads MB1 and nothing else, so it is the path most
+  of this project's evidence comes from. MB2 exists for the one thing MB1 cannot
+  carry, the ACPI pointer. What MB2 also brings and nothing yet reads is the EFI
+  system table and the EFI memory map; the memory map the kernel uses is still
+  the translated MB1 one.
 - **The console is 80x25 whatever the screen is.** What the framebuffer backend
   decides is how large those cells are drawn: the largest whole-number scale that
   still leaves all of them on the display, centred, with black around it. At
@@ -2245,9 +2285,16 @@ to talk to what is on it, and v1.10.0 opened the endpoint the keys come out of �
 without changing one line of the PS/2 driver.
 
 And the requirement behind them - that a machine booted from a stick be able to
-read the stick - is met as of v1.11.0. What stands between here and 2.0.0 is no
-longer a missing capability but the packaging: one stick that carries both the
-EFI boot path and a file system this kernel can mount. Two sticks work today.
+read the stick - is met as of v1.11.0. v1.12.0 added the other half of a usable
+session: a machine that can be switched off at the end of one.
+
+What stands between here and 2.0.0 is no longer a missing capability but the
+packaging: one stick that carries both the EFI boot path and a file system this
+kernel can mount. Two sticks work today, and one is closer than it looks -
+`load_partition()` already walks all four MBR entries looking for a partition of
+its own type and steps over the ones it does not own, so an EFI system partition
+and an esdumanOS partition can sit on the same stick. What is missing is the
+recipe and the build step that produce one, not a capability in the kernel.
 
 | Release | What it removes |
 |---------|-----------------|
@@ -2255,8 +2302,8 @@ EFI boot path and a file system this kernel can mount. Two sticks work today.
 | ~~v1.9.0~~ | **Done.** Talking to what is on the bus: port reset, Enable Slot, Address Device, control transfers, descriptors. `lsusb` names devices rather than ports |
 | ~~v1.10.0~~ | **Done.** A keyboard on a machine with no PS/2 controller. HID boot protocol, an interrupt endpoint, and the event ring polled from the timer tick. `drivers/keyboard.c` did not change: it has one line that touches hardware and `keyboard_handle_scancode()` had been the seam for nine releases |
 | ~~v1.11.0~~ | **Done.** The stick as a real disk. USB mass storage, and `mount`/`umount` — the caller `include/blockdev.h` has been waiting for since v1.2.0, in the sense that header actually used: one that *chooses between* devices |
-| v1.12.0 | **Two file systems at once.** The mount above changes which disk carries the one file system; holding two means every directory id needs a file system to belong to, and every one of them is a bare `int` that crosses the frozen syscall boundary. Measured while v1.11.0 was being written: 466 references across `fs/`, `kernel/` and the tests. It is a release of its own and gets one |
-| v1.13.0 | **A way to turn the machine off.** ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because every test target but one boots through QEMU's `-kernel`, which reads an MB1 header |
+| ~~v1.12.0~~ | **Done.** A way to turn the machine off. ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because three of the four test targets boot through QEMU's `-kernel`, which reads an MB1 header. No syscall number was spent: `halt` keeps its number and finally means what people mean by it |
+| v1.13.0 | **Two file systems at once.** The mount in v1.11.0 changes which disk carries the one file system; holding two means every directory id needs a file system to belong to, and every one of them is a bare `int` that crosses the frozen syscall boundary. Measured while v1.11.0 was being written: 466 references across `fs/`, `kernel/` and the tests. It is a release of its own and gets one. It moved behind ACPI because auditing `load_partition()` showed it is not what 2.0.0 is waiting on — shutting the machine down is |
 | v2.0.0 | The machine. Named, as only major versions are |
 
 XHCI was split from the drivers above it deliberately, and then split again. It

@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0-beta.1] - 2026-08-31
+
+esdumanOS can turn the machine off. `halt` stopped the processor and left the power on,
+and `reboot` wrote to a keyboard controller a modern UEFI laptop need not contain - so on
+the hardware this project is aimed at, the only way to end a session was the power button.
+
+### Added
+
+- **A second multiboot header, beside the first rather than instead of it.** Both
+  specifications enter the same way - the magic in `eax`, the information structure in
+  `ebx` - so `_start` is unchanged and there is one branch, in `kernel_main`. Multiboot 1
+  stays because three of the four kernel test targets boot through QEMU's `-kernel`, which
+  reads that header and no other; it is the path most of this project's evidence comes
+  from. `grub.cfg` gains a Multiboot 1 entry as a way back for the first real machine,
+  which nobody has tried yet.
+
+- **`mb2_translate()`, which fills in the structure the kernel already reads.** The memory
+  map is copied into Multiboot 1's arrangement - the two layouts differ, one carrying the
+  entry length once in the tag and the other in every entry - and the entry stride is taken
+  from the tag rather than from `sizeof()`, for the reason the xHCI context stride is. So
+  `init_pmm()`, the framebuffer console and the command line parser were not opened.
+
+- **ACPI, for one purpose.** The RSDP from the bootloader where one handed it over and by
+  scanning the legacy areas where it did not, then the RSDT or XSDT, the FADT, and a byte
+  search of the DSDT for `\_S5_`. That is what `halt` needs and the whole of what this
+  kernel understands: no AML interpreter, no MADT, no IOAPIC, no HPET, no PCI routing, and
+  no sleep state but S5. AHCI and xHCI go on polling exactly as they did.
+
+- **A reboot ladder.** The FADT's reset register, then port `0xCF9`, then the i8042 pulse
+  that used to be the whole of it, then a triple fault. Each rung is tried in turn and none
+  is expected to return; one that does has failed, whatever it wrote.
+
+### Changed
+
+- **`halt` cuts power, and keeps its syscall number.** 21 keeps its number, its parameters
+  and its name, the shell builtin is untouched, and 73 is still unassigned - it simply
+  reaches a machine that switches off. Where ACPI is unavailable it falls back to `cli;
+  hlt` and says which of the two it did, at boot, while there is still somewhere to say it.
+
+### Found in passing
+
+- **A boot-time artifact is reachable at boot time, and the tree already said so.** The
+  first version of the translator kept the *address* of the RSDP inside the bootloader's
+  structure. That is readable only while boot.asm's identity mapping of the low sixteen
+  megabytes is in force, and `init_paging()` drops it - the comment at the end of that
+  function says so in as many words. `acpi_init()` runs afterwards, so the pointer was
+  dangling and the machine hung on the one boot path this release exists to add. The
+  command line has been copied out into `global_cmdline` for exactly this reason since long
+  before any of this existed: the precedent was there and the new code did not follow it.
+
+- **Naming a constant does not make it right.** Four of the ten FADT offsets were wrong.
+  `FLAGS` read the first word of `RESET_REG`, `RESET_REG` read four bytes into itself,
+  `RESET_VALUE` read the first byte of `X_FIRMWARE_CTRL`, and `X_DSDT` read the head of
+  `X_PM1a_EVT_BLK` - and the comment sitting over them already said that an off-by-four
+  here reads a different register than the one intended. Every one of them returned a
+  plausible number, because an offset has no failure mode that shows. What caught it was a
+  warning added for something else entirely: X_DSDT's high word came back non-zero and the
+  DSDT was reported as living above 4 GB on a machine whose tables are nowhere near it. The
+  release only kept working because that refusal fell back to the 32-bit `DSDT` field,
+  which was one of the six that were right.
+
+### Known issues
+
+- **No AML interpreter.** `\_S5_` is found by searching the DSDT for the four characters
+  behind a NameOp and reading the small package that follows. A firmware that describes it
+  any other way is one this kernel cannot power off, and `acpi_init()` says so in the log
+  at boot rather than leaving it to be discovered when somebody types `halt`.
+
+- **A machine that hands over no RSDP cannot be powered off.** Multiboot 1 has no field for
+  it and the legacy scan cannot work on a UEFI machine, so booting through the Multiboot 1
+  menu entry on such a machine gives up ACPI. Everything else about that boot is identical.
+
+- **The reset register is used only in its I/O port form.** A memory-space reset would need
+  a mapping made at the moment the machine is being torn down, which is the worst time to
+  ask for one; `0xCF9` is the rung below it and answers on essentially every modern
+  chipset.
+
 ## [1.11.0-beta.1] - 2026-08-31
 
 esdumanOS can read the stick it booted from. That was the requirement standing behind the

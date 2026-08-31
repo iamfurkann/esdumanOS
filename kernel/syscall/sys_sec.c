@@ -15,6 +15,7 @@
 #include "klog.h"
 #include "keyboard.h"
 #include "entropy.h"
+#include "acpi.h"
 #include "bcache.h"
 #include "kernel.h"
 #include "rtc.h"
@@ -296,7 +297,47 @@ void sys_reboot(arch_regs_t *regs) {
     entropy_persist_seed();
     bcache_flush();
 
+    /*
+     * A ladder, and every rung answers a machine the one above it does not.
+     *
+     * This was one line - the i8042 pulse below - and that line assumed a
+     * keyboard controller. A modern UEFI laptop need not have one at all, which
+     * made `reboot` a command that returned successfully and did nothing on
+     * exactly the hardware this project is aimed at.
+     *
+     * Each rung is tried in turn and none of them is expected to return. A rung
+     * that does return has failed, whatever it wrote, so the next one is taken.
+     * The order runs from the most specific description of this machine to the
+     * least: the FADT's own reset register, then the port every modern chipset
+     * answers on, then the keyboard controller, and finally a triple fault -
+     * which is not a reset method so much as the absence of one, and is here
+     * because a machine that will not restart politely still has to restart.
+     */
+    acpi_reset();
+
+    /*
+     * The PCI reset control register. Not ACPI and not firmware-described: it is
+     * a fixed port that Intel and AMD chipsets have answered on for twenty
+     * years, and it is what makes this ladder work on a machine whose FADT has
+     * no reset register - which is most of them.
+     */
+    outb(0xCF9, 0x02);   /* select a hard reset */
+    outb(0xCF9, 0x06);   /* and request it */
+
     outb(0x64, 0xFE);
+
+    /*
+     * A null interrupt descriptor table and an interrupt into it. There is no
+     * handler, no double fault handler to catch that, and the processor gives up
+     * - which is a reset. Reached only when every described method has been
+     * tried and the machine is still here.
+     */
+    {
+        struct { uint16_t limit; uint32_t base; } __attribute__((packed)) null_idt = { 0, 0 };
+
+        asm volatile("lidt %0; int $3" : : "m"(null_idt));
+    }
+
     regs->eax = 0;
 }
 
@@ -313,8 +354,33 @@ void sys_halt(arch_regs_t *regs) {
     entropy_persist_seed();
     bcache_flush();
 
-    printk("System halted safely.\n");
-    asm volatile("cli; hlt");
+    /*
+     * `halt` means what people expect it to mean now, and that is the whole of
+     * what this release is for.
+     *
+     * It stopped the processor and left the machine powered, which is what the
+     * word meant on hardware that had no other option and is not what anybody
+     * has meant by it since. The fans went on running, the battery went on
+     * draining, and the only way to finish was the power button - on the one
+     * machine class this project is aiming at.
+     *
+     * No new syscall number was spent on this. 21 keeps its number, its
+     * parameters and its name; the shell's `halt` builtin is unchanged and
+     * simply reaches a machine that switches off. The frozen ABI promised the
+     * numbers would not move and they have not.
+     */
+    if (acpi_poweroff() != E_OK) {
+        /*
+         * The fallback, and it is the old behaviour rather than a new failure.
+         * A machine with no ACPI, or whose _S5_ this kernel could not read, ends
+         * where it always ended - and acpi_init() has already said in the log
+         * which of those it was, at boot, while there was still somewhere to
+         * say it.
+         */
+        printk("System halted safely. Power is still on; this machine has no ACPI.\n");
+        asm volatile("cli; hlt");
+    }
+
     regs->eax = 0;
 }
 

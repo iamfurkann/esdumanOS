@@ -59,6 +59,7 @@ static const ktest_module_t kernel_modules[] = {
     { "usbkbd",      run_usbkbd_tests },
     { "usbmsc",      run_usbmsc_tests },
     { "mount",       run_mount_tests },
+    { "acpi",        run_acpi_tests },
     { "console",     run_console_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },

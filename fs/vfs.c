@@ -382,6 +382,22 @@ static void save_superblock(void) {
  *         errno when the disk could not be read - which is not blankness and
  *         must never be treated as it.
  */
+/**
+ * @brief Where the last blank check stopped, so the refusal can cite it.
+ *
+ * A verdict without its evidence is what this function used to give, and on the
+ * first machine where the answer was surprising that cost a boot to work around
+ * and could not be argued with: a disk measured as zeroed on one machine was
+ * called "not blank" on another, and there was no way to tell a disk that really
+ * had something on it from a read path returning something that was never there.
+ *
+ * One of those is the user's mistake and the other is this kernel's, and the
+ * three numbers below are the whole of the difference.
+ */
+static uint32_t blank_stop_sector;
+static uint32_t blank_stop_offset;
+static uint8_t  blank_stop_byte;
+
 static int disk_region_is_blank(uint32_t start, uint32_t count) {
     uint8_t sec_buf[512];
 
@@ -394,7 +410,12 @@ static int disk_region_is_blank(uint32_t start, uint32_t count) {
             return res;
         }
         for (int i = 0; i < 512; i++) {
-            if (sec_buf[i] != 0) return 0;
+            if (sec_buf[i] != 0) {
+                blank_stop_sector = start + s;
+                blank_stop_offset = (uint32_t)i;
+                blank_stop_byte   = sec_buf[i];
+                return 0;
+            }
         }
     }
     return 1;
@@ -897,7 +918,45 @@ void init_fs(void) {
             klog(LOG_LEVEL_ERROR, "VFS", "Unrecognised disk; refusing to mount it or write to it.");
             printk("\n[VFS] This disk was not written by this version of esdumanOS, and\n");
             printk("      carries no partition table this kernel recognises. Nothing has\n");
-            printk("      been written to it.\n\n");
+            printk("      been written to it.\n");
+            /*
+             * And how to offer it, which the refusal did not say for three
+             * releases. Saying only "no" is right about the disk and useless
+             * about the machine: the rule is that a disk is formatted when its
+             * head is blank, the number is not guessable from outside, and a
+             * reader with a disk they are willing to lose had no way to find it
+             * except in this file.
+             */
+            printk("      To offer this disk to esdumanOS, zero its first %d sectors\n",
+                   FS_PART_START_LBA + FS_LEGACY_DIR_SECTORS);
+            printk("      on another machine. That erases what is on it.\n");
+
+            /*
+             * And what was actually found, which is the half that lets somebody
+             * disagree with this refusal. Which disk it is, how big it says it
+             * is, where the first byte that is not zero lives, and the head of
+             * sector 0 - enough to tell a partition table from an ISO header
+             * from a read path handing back a buffer nobody filled.
+             */
+            {
+                blockdev_t *d = blockdev_root();
+                uint8_t head[512];
+
+                printk("      %s: %d sectors of %d bytes. First non-zero byte at\n",
+                       (d && d->name) ? d->name : "(no device)",
+                       d ? (int)d->sector_count : 0,
+                       d ? (int)d->sector_size : 0);
+                printk("      sector %d offset %d, value %02x. Sector 0 begins",
+                       (int)blank_stop_sector, (int)blank_stop_offset,
+                       blank_stop_byte);
+
+                if (bcache_read_sector(blockdev_root(), 0, head) == E_OK) {
+                    for (int i = 0; i < 16; i++) printk(" %02x", head[i]);
+                    printk("\n\n");
+                } else {
+                    printk(" - unreadable on the second try.\n\n");
+                }
+            }
             return;
         }
 

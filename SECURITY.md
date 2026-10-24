@@ -176,9 +176,17 @@ described inaccurately is worse than one described plainly — in either directi
 - LOCKDOWN blocks new programs and destroys the in-RAM master key, after which
   encrypted VFS access is refused rather than attempted with a zeroed key. It does not
   terminate an already-running shell.
-- The block cache is write-back. Dirty sectors are bounded by volume (32 slots) and by
-  time (5 seconds), and `sync()` flushes on demand — but an abrupt power loss inside
-  that window still loses the sectors in it.
+- The block cache is write-back. It attempts write-back at 32 dirty slots, on a
+  yield-driven 5-second deadline, and on `sync()`. These are scheduling policies,
+  not durability bounds when I/O fails or the kernel does not yield. Invalid
+  requests are rejected before cache admission; all accepted data stays dirty on
+  write failure, regardless of errno. A completely unwritable cache rejects new
+  misses with `E_IO` after one attempt per slot. `sync()` reports that failure;
+  reboot, halt and mount changes refuse to discard the remaining dirty data.
+  Successfully submitted sectors are not a transaction or proof of persistence
+  through a device's volatile write cache. Abrupt power loss can still lose data
+  or leave filesystem metadata inconsistent. See
+  [the reliability audit](docs/engineering/RELIABILITY_AUDIT.md).
 - **`mount` opens a new trust boundary, and it is a bigger one than it looks.** Until
   v1.11.0 the only disk this kernel read was the one it booted from. A mounted device's
   directory table is attacker-supplied in the ordinary sense - somebody plugged it in -

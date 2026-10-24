@@ -13,6 +13,7 @@
 #include "isr.h"     /* timer_interrupt_handler                          */
 #include "signal.h"  /* kernel_timer_tick_handler                        */
 #include "xhci.h"    /* xhci_poll                                        */
+#include "keyboard.h" /* keyboard_drain                                  */
 
 #define PIT_CMD_PORT 0x43
 #define PIT_CH0_PORT 0x40
@@ -67,6 +68,29 @@ void timer_interrupt_handler(void) {
      * time this line is reached.
      */
     xhci_poll();
+
+    /*
+     * And the wired keyboard, for a reason that is not the same one.
+     *
+     * IRQ1 delivers keystrokes and this does not replace it. What this covers is
+     * the buffer going quiet with a byte still in it: the i8042 has one output
+     * buffer shared with the pointing device, and until a byte is taken out of
+     * it the controller has nowhere to put the next scancode. On a machine with
+     * a PS/2 touchpad and nothing reading IRQ12 - which is a laptop - that
+     * happens whenever a finger touches the pad, and the keyboard then waits for
+     * some unrelated interrupt to come along and shift things.
+     *
+     * keyboard_drain() takes everything on each pass, so IRQ1 alone would be
+     * enough if IRQ1 always arrived. This is the guarantee that it does not have
+     * to: whatever is in the buffer is out of it within one tick, at any
+     * privilege level, including the Ring 0 passphrase prompt on the boot path.
+     * Ten milliseconds is not felt; one keypress behind is felt immediately.
+     *
+     * Costs one port read on a tick where nothing is waiting, which is almost
+     * all of them. And no entropy is credited from here, for the reason given
+     * above the xhci_poll() call: this tick has already spent its sample.
+     */
+    keyboard_drain(0);
 }
 
 /**

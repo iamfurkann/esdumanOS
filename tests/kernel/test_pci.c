@@ -96,6 +96,70 @@ static void run_lookup_assertions(void) {
 }
 
 /**
+ * @brief The walk that visits every match rather than only the first.
+ *
+ * pci_nth_class_if() exists because a driver that can run one of something still
+ * has to be able to look at the others before it picks, and the xHCI driver now
+ * does exactly that. The properties asserted are the ones its scan loop relies
+ * on: that the count and the walk agree about where the list ends, that the
+ * zeroth match is the first-match search's answer, and that consecutive indices
+ * name different functions in a stable order.
+ *
+ * That last one is what makes the scan repeatable. If two indices could return
+ * the same function, the scan would bring one controller up twice and never
+ * reach the one behind it - which on the machine that prompted this release is
+ * the difference between finding the disk and not.
+ */
+static void run_nth_assertions(void) {
+    int n = pci_count_class_if(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB,
+                               PCI_PROGIF_XHCI);
+    int distinct = 1;
+    int ordered  = 1;
+    const pci_device_t *prev = 0;
+
+    KTEST_ASSERT(pci_nth_class_if(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB,
+                                  PCI_PROGIF_XHCI, 0) ==
+                 pci_find_class_if(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB,
+                                   PCI_PROGIF_XHCI),
+                 "[STRICT] [PCI] the zeroth match is the one the first-match search returns");
+    KTEST_ASSERT(pci_nth_class_if(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB,
+                                  PCI_PROGIF_XHCI, -1) == 0,
+                 "[STRICT] [PCI] a negative index finds nothing rather than counting from the end");
+    KTEST_ASSERT(pci_nth_class_if(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB,
+                                  PCI_PROGIF_XHCI, n) == 0,
+                 "[STRICT] [PCI] and the walk ends exactly where the count says it does");
+
+    for (int i = 0; i < n; i++) {
+        const pci_device_t *d = pci_nth_class_if(PCI_CLASS_SERIAL_BUS,
+                                                 PCI_SUBCLASS_USB,
+                                                 PCI_PROGIF_XHCI, i);
+
+        if (d == 0) {
+            distinct = 0;
+            ordered  = 0;
+            break;
+        }
+
+        if (prev != 0) {
+            uint32_t before = ((uint32_t)prev->bus << 8) |
+                              ((uint32_t)prev->device << 3) | prev->function;
+            uint32_t here   = ((uint32_t)d->bus << 8) |
+                              ((uint32_t)d->device << 3) | d->function;
+
+            if (d == prev)      distinct = 0;
+            if (here <= before) ordered  = 0;
+        }
+
+        prev = d;
+    }
+
+    KTEST_ASSERT(n > 0 && distinct,
+                 "[STRICT] [PCI] every index below the count answers, and with a different function each time");
+    KTEST_ASSERT(ordered,
+                 "[STRICT] [PCI] and they arrive in bus order, which is what makes a scan over them repeatable");
+}
+
+/**
  * @brief Every entry is a device, and every entry was allowed to be scanned.
  *
  * The second of these is the correctness property of the walk itself. A device
@@ -164,6 +228,7 @@ void run_pci_tests(void) {
     run_presence_assertions();
     run_fidelity_assertions();
     run_lookup_assertions();
+    run_nth_assertions();
     run_walk_assertions();
     run_naming_assertions();
     run_reentry_assertions();

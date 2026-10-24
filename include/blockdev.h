@@ -135,6 +135,18 @@ blockdev_t *blockdev_get(int index);
 int blockdev_count(void);
 
 /**
+ * @brief Validate a request without calling the driver or modifying the buffer.
+ *
+ * Shared by direct I/O and cache admission, so a deferred write cannot accept a
+ * request that direct I/O would reject. Success only validates the current
+ * descriptor, LBA, buffer and handler; it does not predict the device's result.
+ * Callers must provide at least sector_size bytes and keep the descriptor alive
+ * and its identity/geometry stable while cached sectors refer to it.
+ */
+int blockdev_check_read(const blockdev_t *dev, uint32_t lba, const uint8_t *buf);
+int blockdev_check_write(const blockdev_t *dev, uint32_t lba, const uint8_t *buf);
+
+/**
  * @brief Reads one sector from a device.
  *
  * The device is named rather than assumed, which is the whole of what changed in

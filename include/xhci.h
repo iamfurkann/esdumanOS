@@ -69,12 +69,53 @@
  * @brief How long the ports are given to settle after they are powered.
  *
  * The specification asks for 20 ms between raising port power and believing the
- * connect status. The PIT runs at TIMER_HZ, which is 100, so a tick is 10 ms and
- * three of them is 30 - rounded up rather than down, because the cost of waiting
- * one tick too long is a third of a frame and the cost of one tick too few is a
- * device that is attached and reported as absent.
+ * connect status, and for 100 ms of debounce before a connection is acted on.
+ * The PIT runs at TIMER_HZ, which is 100, so a tick is 10 ms and this is the
+ * longer of the two.
+ *
+ * It was the shorter one until v1.13.0, and the reason it changed is that the
+ * consequence of being early changed. A port read too soon used to mean one
+ * device missing from lsusb on a machine that had nothing else to offer. Now
+ * this same read is what ranks a controller, so a SuperSpeed link that has not
+ * finished training reads as an empty controller, and an empty controller is one
+ * the scan walks past for good - taking the disk on it with it.
+ *
+ * The cost is 100 ms per controller, and only on controllers whose ports were
+ * not already powered. QEMU's reports every port as powered and never runs this
+ * wait at all, so the whole of it is paid on hardware, once, at boot.
  */
-#define XHCI_PORT_SETTLE_TICKS 3
+#define XHCI_PORT_SETTLE_TICKS 10
+
+/**
+ * @brief How long a controller with nothing on it is given to prove it.
+ *
+ * The settle above is what the specification asks for, and it is enough for a
+ * device that is only waiting to be looked at. It is not enough for a device
+ * that has to come back: a SATA bridge in a USB enclosure re-runs its own link
+ * training when the port it is on is reset, and that is measured in seconds, not
+ * in the hundred milliseconds a hub debounce takes.
+ *
+ * Which never mattered while the answer was one line in lsusb. It matters now
+ * because an empty controller is one the scan walks past for good, so a disk
+ * that had not finished coming back when its port was read is a disk this kernel
+ * decides does not exist - and then reports, accurately, that there is no
+ * filesystem to mount.
+ *
+ * So a controller that looks empty is asked again until it stops looking empty
+ * or this runs out. Only controllers that really are empty pay it, and they pay
+ * it once each at boot; the first port to report a connection ends the wait.
+ */
+#define XHCI_PORT_DISCOVER_TICKS 200
+
+/*
+ * There was an XHCI_PORT_QUIET_TICKS here for one build, and it is worth saying
+ * why there is not now. It waited for the connected count to stop growing rather
+ * than to become non-zero, so that a slow SATA bridge sharing a controller with
+ * a fast flash drive would not be missed. On hardware it turned a controller
+ * reporting two devices into one reporting three, and the third cost one of the
+ * other two its address. Looking later did not find more of the machine; it
+ * found the machine mid-transition. See xhci_bring_up_ports().
+ */
 
 /**
  * @brief The most ports this driver will record and report.
@@ -635,11 +676,51 @@ typedef struct {
  * decisions with an unwatched link between them is how a working disk
  * disappears, and this release adds no such link.
  *
+ * Where a machine has several controllers this brings them up in turn and keeps
+ * the one with the most useful devices on it; see xhci_rank(). Only one is
+ * driven either way.
+ *
  * @return E_OK when the controller is running and its command ring answered,
  *         E_NODEV when there is no xHCI controller on the bus, or a negative
  *         errno for one that would not come up.
  */
 int xhci_init(void);
+
+/**
+ * @brief How good a candidate one controller is, as one comparable number.
+ *
+ * The order is the boot's own order of need. A disk is what the boot cannot
+ * continue without - no filesystem, no /bin, no shell - so a controller with one
+ * ends the search. A keyboard is next, because a machine that can be typed at
+ * can be diagnosed. An addressed device of any other kind comes after that: it
+ * is nothing this kernel uses, but it proves the controller enumerates, which is
+ * more than an empty one proves. Empty ranks last among controllers that work,
+ * and anything that would not come up ranks below all of them.
+ *
+ * Split out and exported because it is the whole policy and it is pure - and
+ * because the case that matters is the one no machine here produces. Every
+ * target in this tree has a single controller with a disk on it, so the ordering
+ * between "keyboard" and "empty" will not be exercised by any of them, and would
+ * otherwise ship on the strength of having been read once.
+ *
+ * @param came_up Non-zero when the controller reached a running state.
+ * @param devices How many devices were addressed on it.
+ * @param keyboard Non-zero when one of them is a configured keyboard.
+ * @param storage Non-zero when one of them is Bulk-Only mass storage.
+ * @return A rank; higher is better, and XHCI_RANK_UNUSABLE is never chosen.
+ */
+int xhci_rank(int came_up, int devices, int keyboard, int storage);
+
+/** @brief The controller would not come up. Ranked below every other answer. */
+#define XHCI_RANK_UNUSABLE (-1)
+/** @brief It runs, and nothing is plugged into it. */
+#define XHCI_RANK_EMPTY      0
+/** @brief It has devices, none of a kind this kernel drives. */
+#define XHCI_RANK_DEVICES    1
+/** @brief It has a keyboard. */
+#define XHCI_RANK_KEYBOARD   2
+/** @brief It has a disk, which ends the search. */
+#define XHCI_RANK_STORAGE    3
 
 /** @brief Ports the controller reported, capped at XHCI_MAX_PORTS. 0 if none. */
 int xhci_port_count(void);

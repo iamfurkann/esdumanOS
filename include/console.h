@@ -95,6 +95,35 @@ void console_use_vga(void);
  * @return E_OK, or E_INVAL for a buffer this backend cannot draw into - in which
  *         case the active backend is left exactly as it was.
  */
+/**
+ * @brief Where the console's cells land on a screen of a given size.
+ *
+ * Split out of console_use_framebuffer() so that it can be asserted without a
+ * screen. That function clears the whole buffer before it returns, so checking
+ * the arithmetic for a 4K panel through it would mean finding 31 MB to clear -
+ * and a 4K panel is exactly the case no machine this project can boot will ever
+ * demonstrate.
+ *
+ * The same reason the xHCI context stride, the endpoint zero packet size and the
+ * ACPI table walk were each pulled into a function of their own. Four times now.
+ */
+typedef struct {
+    uint32_t scale;      /**< Whole-number glyph magnification, at least 1.   */
+    uint32_t cols;       /**< Cells across; never above CONSOLE_COLS.         */
+    uint32_t rows;       /**< Cells down; never above CONSOLE_ROWS.           */
+    uint32_t origin_x;   /**< Left edge of the console within the screen.     */
+    uint32_t origin_y;   /**< Top edge, so what is left over is a border.     */
+} console_layout_t;
+
+/**
+ * @brief Computes the layout for a screen of @p width by @p height pixels.
+ *
+ * Total rather than partial: a screen too small for one cell yields a scale of
+ * one and zero columns, which is a console with nothing on it rather than an
+ * error - the caller has already refused sizes below one glyph.
+ */
+void console_layout(uint32_t width, uint32_t height, console_layout_t *out);
+
 int console_use_framebuffer(void *base, uint32_t pitch, uint32_t width,
                             uint32_t height, uint8_t bpp);
 

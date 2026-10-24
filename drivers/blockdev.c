@@ -150,21 +150,36 @@ static int blockdev_check(const blockdev_t *dev, uint32_t lba) {
     return E_OK;
 }
 
-int blockdev_read(blockdev_t *dev, uint32_t lba, uint8_t *buf) {
+int blockdev_check_read(const blockdev_t *dev, uint32_t lba, const uint8_t *buf) {
     int res = blockdev_check(dev, lba);
 
     if (res != E_OK) return res;
     if (buf == 0) return E_INVAL;
+    if (dev->read == 0) return E_NODEV;
+
+    return E_OK;
+}
+
+int blockdev_read(blockdev_t *dev, uint32_t lba, uint8_t *buf) {
+    int res = blockdev_check_read(dev, lba, buf);
+    if (res != E_OK) return res;
 
     return dev->read(dev->ctx, lba, buf);
 }
 
-int blockdev_write(blockdev_t *dev, uint32_t lba, const uint8_t *buf) {
+int blockdev_check_write(const blockdev_t *dev, uint32_t lba, const uint8_t *buf) {
     int res = blockdev_check(dev, lba);
 
     if (res != E_OK) return res;
     if (buf == 0) return E_INVAL;
     if (dev->write == 0) return E_ROFS;
+
+    return E_OK;
+}
+
+int blockdev_write(blockdev_t *dev, uint32_t lba, const uint8_t *buf) {
+    int res = blockdev_check_write(dev, lba, buf);
+    if (res != E_OK) return res;
 
     return dev->write(dev->ctx, lba, buf);
 }

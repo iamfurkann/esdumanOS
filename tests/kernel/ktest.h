@@ -171,6 +171,12 @@ void run_mount_tests(void);
  * project can reach produces.
  */
 void run_acpi_tests(void);
+
+/**
+ * @brief The early framebuffer: the arithmetic that decides whether there is a
+ *        screen at all, asserted without one.
+ */
+void run_earlyfb_tests(void);
 /** @brief Where the terminal's cells land, in text mode and in pixels. */
 void run_console_tests(void);
 void run_string_tests(void);

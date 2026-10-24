@@ -1689,6 +1689,29 @@ static void xhci_enumerate(void) {
  * so writing back what was read would acknowledge every event and switch off
  * every working port in the same instruction.
  */
+/**
+ * @brief Reads every port's state, and says how many have something on them.
+ *
+ * Split out of xhci_bring_up_ports() so that it can be asked more than once.
+ * PORTSC is a live register, and the whole of the discovery wait below is the
+ * difference between reading it once and reading it until it settles.
+ */
+static int xhci_read_ports(void) {
+    int connected = 0;
+
+    for (int i = 0; i < xhci_ports; i++) {
+        uint32_t portsc = mmio_read(portsc_off(i));
+
+        port_state[i].connected = (portsc & XHCI_PORTSC_CCS) ? 1 : 0;
+        port_state[i].enabled   = (portsc & XHCI_PORTSC_PED) ? 1 : 0;
+        port_state[i].speed     = (uint8_t)XHCI_PORTSC_SPEED(portsc);
+
+        if (port_state[i].connected) connected++;
+    }
+
+    return connected;
+}
+
 static void xhci_bring_up_ports(void) {
     int powered = 0;
 
@@ -1721,12 +1744,42 @@ static void xhci_bring_up_ports(void) {
         }
     }
 
-    for (int i = 0; i < xhci_ports; i++) {
-        uint32_t portsc = mmio_read(portsc_off(i));
+    /*
+     * And then asked, rather than asked once. A controller that answers with a
+     * connection on the first read is believed immediately; one that answers
+     * with nothing is given XHCI_PORT_DISCOVER_TICKS to change its mind, because
+     * "nothing" is now a verdict on the controller rather than a line in a list.
+     *
+     * The wait is only ever paid by a controller that is genuinely empty. On a
+     * machine with one controller and a stick in it, the first read ends it.
+     */
+    /*
+     * Asked again only when the answer was nothing.
+     *
+     * This waited for arrivals to stop rather than to start for one build, on
+     * the reasoning that a flash drive comes back from a reset long before a
+     * SATA bridge does, so stopping at the first connection stops at the wrong
+     * device. The reasoning is sound and the change was a regression: looking
+     * half a second later at a controller that had already answered turned two
+     * connected devices into three, and one of the three then failed to address.
+     * A port that is only visible if you look late is a port in the middle of
+     * something, and enumerating it costs the device that was already there.
+     *
+     * So the extra look is spent only where there is nothing to lose by it - a
+     * controller reporting no devices at all, which is the case the wait was
+     * added for. A controller that has answered is believed the first time.
+     *
+     * What that gives up is a slow disk sharing a controller with a fast one,
+     * and that case has a way through: `xhci=N` names the controller directly,
+     * and on the machine this was found on it is what works.
+     */
+    if (xhci_read_ports() == 0) {
+        uint32_t start = timer_get_ticks();
 
-        port_state[i].connected = (portsc & XHCI_PORTSC_CCS) ? 1 : 0;
-        port_state[i].enabled   = (portsc & XHCI_PORTSC_PED) ? 1 : 0;
-        port_state[i].speed     = (uint8_t)XHCI_PORTSC_SPEED(portsc);
+        while ((timer_get_ticks() - start) < XHCI_PORT_DISCOVER_TICKS) {
+            asm volatile("pause");
+            if (xhci_read_ports() > 0) break;
+        }
     }
 }
 
@@ -1870,16 +1923,20 @@ int xhci_format_inventory(char *out, int cap) {
 
 /* ── Bring-up ───────────────────────────────────────────────────────── */
 
-int xhci_init(void) {
-    const pci_device_t *dev = pci_find_class_if(PCI_CLASS_SERIAL_BUS,
-                                                PCI_SUBCLASS_USB,
-                                                PCI_PROGIF_XHCI);
-
-    if (dev == 0) {
-        klog(LOG_LEVEL_INFO, "XHCI", "No xHCI controller on the bus.");
-        return E_NODEV;
-    }
-
+/**
+ * @brief Brings one controller up, from PCI function to enumerated devices.
+ *
+ * Everything in this file below the register helpers is one controller's worth
+ * of static state - the rings, the device context array, the device table - so
+ * this runs against whichever controller the state currently describes, and the
+ * caller is responsible for it describing nothing else. xhci_forget() is how
+ * that is arranged between attempts.
+ *
+ * @param dev The PCI function to drive. Not checked for class; xhci_init() is
+ *            the only caller and it searched by class to find this.
+ * @return E_OK when the controller runs and its command ring answered.
+ */
+static int xhci_bring_up(const pci_device_t *dev) {
     pci_enable_device(dev);
 
     /*
@@ -2196,16 +2253,6 @@ int xhci_init(void) {
      */
     xhci_poll_armed = 1;
 
-    int connected = 0;
-
-    for (int i = 0; i < xhci_ports; i++) {
-        if (port_state[i].connected) connected++;
-    }
-
-    printk("[XHCI] USB controller %02x:%02x.%d: %d ports, %d connected, %d addressed, keyboard %s [Polled]\n",
-           dev->bus, dev->device, dev->function, xhci_ports, connected, device_count,
-           usbkbd_attached() ? "yes" : "no");
-
     /*
      * And a record as well as a line on the screen, which is not the same thing.
      * printk() writes to the terminal and the serial port and deliberately not
@@ -2219,9 +2266,330 @@ int xhci_init(void) {
      * has recorded its own success since v1.4.0 for the same reason and this
      * follows it. The failure paths above were already recorded; it was only the
      * one that goes right that was invisible.
+     *
+     * The line on the screen is xhci_announce()'s, and it is separate because
+     * this function now runs several times on a machine with several
+     * controllers. A record per attempt is what a log is for; a line per attempt
+     * would be the scan shouting over itself.
      */
     klog_int(LOG_LEVEL_INFO, "XHCI",
              "Controller running; devices addressed and described", device_count);
 
     return E_OK;
+}
+
+/* ── Choosing among several controllers ─────────────────────────────── */
+
+/** @brief How many of this controller's ports have something on them. */
+static int xhci_connected_count(void) {
+    int n = 0;
+
+    for (int i = 0; i < xhci_ports; i++) {
+        if (port_state[i].connected) n++;
+    }
+    return n;
+}
+
+/**
+ * @brief The one line on the screen about the controller that was kept.
+ */
+static void xhci_announce(void) {
+    if (xhci_dev == 0) return;
+
+    printk("[XHCI] USB controller %02x:%02x.%d: %d ports, %d connected, %d addressed, keyboard %s [Polled]\n",
+           xhci_dev->bus, xhci_dev->device, xhci_dev->function,
+           xhci_ports, xhci_connected_count(), device_count,
+           usbkbd_attached() ? "yes" : "no");
+}
+
+int xhci_rank(int came_up, int devices, int keyboard, int storage) {
+    if (!came_up) return XHCI_RANK_UNUSABLE;
+    if (storage)  return XHCI_RANK_STORAGE;
+    if (keyboard) return XHCI_RANK_KEYBOARD;
+    if (devices > 0) return XHCI_RANK_DEVICES;
+    return XHCI_RANK_EMPTY;
+}
+
+/**
+ * @brief Ranks whatever controller the driver's state currently describes.
+ */
+static int xhci_rank_current(void) {
+    return xhci_rank(xhci_ready,
+                     device_count,
+                     usbkbd_attached(),
+                     xhci_storage_device_next(-1) >= 0);
+}
+
+/**
+ * @brief Stops a controller this driver has decided not to keep.
+ *
+ * Halting it is the point. The rings it was given are in frames that are never
+ * handed back - this file has leaked rather than freed since v1.8.0, and says
+ * why where alloc_dma_page() is used - so a controller left running would go on
+ * writing into memory nobody else can be given, which is untidy rather than
+ * dangerous. What would be dangerous is the other order: freeing the frames and
+ * leaving it running.
+ *
+ * The poll flag is cleared before the register write rather than after, because
+ * between those two instructions the timer can fire, and a tick that walks the
+ * event ring of a controller mid-halt is a race that exists for no reason.
+ */
+static void xhci_stand_down(void) {
+    xhci_poll_armed = 0;
+    xhci_ready = 0;
+
+    if (mmio == 0 || op_base == 0) return;
+
+    op_write(XHCI_OP_USBCMD,
+             op_read(XHCI_OP_USBCMD) & ~(uint32_t)(XHCI_CMD_RS | XHCI_CMD_INTE));
+
+    xhci_wait(op_base + XHCI_OP_USBSTS, XHCI_STS_HCH, XHCI_STS_HCH,
+              "A controller being passed over would not halt.");
+}
+
+/**
+ * @brief Clears every trace of the last controller so the next starts clean.
+ *
+ * Every static below the register helpers is one controller's worth of state,
+ * which is why this exists at all: the scan reuses the same variables for each
+ * candidate, so anything left behind would be read back as though it belonged to
+ * the controller now being brought up. A stale ctx_stride is the worst of them -
+ * it is the number every context access is indexed by, and a wrong one is not a
+ * failure but plausible garbage.
+ *
+ * The keyboard is detached here rather than in xhci_stand_down() because the two
+ * questions differ: standing down is about the hardware, and this is about what
+ * the rest of the kernel has been told. A keyboard opened on a controller that
+ * is no longer being driven is a claim that has to be withdrawn.
+ */
+static void xhci_forget(void) {
+    mmio     = 0;
+    op_base  = 0;
+    rt_base  = 0;
+    db_base  = 0;
+    xhci_dev = 0;
+
+    xhci_version     = 0;
+    xhci_ports       = 0;
+    xhci_slots       = 0;
+    xhci_truncated   = 0;
+    xhci_scratchpads = 0;
+    xhci_ready       = 0;
+    xhci_poll_armed  = 0;
+
+    dma_virt = 0;
+    dma_phys = 0;
+
+    cmd_ring        = 0;
+    cmd_ring_phys   = 0;
+    event_ring      = 0;
+    event_ring_phys = 0;
+
+    /* The cycle bits start at one, not at zero. A ring is empty when its
+     * producer and consumer agree, and both sides begin by calling the first
+     * pass round the segment cycle one. */
+    event_dequeue = 0;
+    event_ccs     = 1;
+    cmd_enqueue   = 0;
+    cmd_pcs       = 1;
+
+    ctx_stride = 0;
+
+    device_count     = 0;
+    device_truncated = 0;
+
+    ft_memset(port_state, 0, sizeof(port_state));
+    ft_memset(devices,    0, sizeof(devices));
+    ft_memset(devres,     0, sizeof(devres));
+
+    usbkbd_detach();
+}
+
+/**
+ * @brief Finds a controller worth driving, and drives it.
+ *
+ * One controller is driven and a machine may have several - that was true from
+ * v1.8.0, and until v1.13.0 the one driven was whichever the PCI walk found
+ * first. On every machine this project could be tested on there was exactly one,
+ * so "the first" and "the only" were the same sentence and nothing distinguished
+ * them.
+ *
+ * The first real machine had five. The internal devices were on the one the walk
+ * found first and both USB ports the user could reach were not, so the driver
+ * brought up a controller with a webcam on it, reported one device, and every
+ * layer above it was correct in turn: no mass storage on the bus, no filesystem
+ * to mount, no /bin to run. The disk was three feet of PCI away.
+ *
+ * So the choice is made on what is attached rather than on enumeration order.
+ * Each controller is brought up, looked at, and either kept or halted, and the
+ * search stops at the first one with a disk on it because that is the thing the
+ * boot cannot continue without. A keyboard is the next best answer and an
+ * addressed device of any kind after that; a controller with nothing on it is
+ * ranked last but still ahead of one that would not come up at all.
+ *
+ * What this is not is multi-controller support. Only one is driven at the end of
+ * it, and devices on the other four remain invisible - the rings, the device
+ * context array and the device table here are still singular. It is the choice
+ * that stopped being arbitrary, not the limit that lifted.
+ */
+/**
+ * @brief The controller the command line named, counted from one, or 0.
+ *
+ * `xhci=3` drives the third controller and makes no choice of its own. It exists
+ * because the scan below can only keep one controller, and on a machine with a
+ * disk on two of them - a boot stick and the disk somebody actually wants - the
+ * scan keeps the one it reaches first, which is not a preference anybody
+ * expressed. The census tells the reader which is which; this is how they say
+ * so.
+ *
+ * Read the way boot_stop_parse() reads bootstop=, off the same command line, and
+ * counted from one because it is quoted against a numbered list on a screen.
+ */
+static int xhci_requested(void) {
+    extern char global_cmdline[];
+
+    const char *at = ft_strstr(global_cmdline, "xhci=");
+    int v = 0;
+
+    if (at == 0) return 0;
+    at += 5;
+
+    if (*at < '0' || *at > '9') return 0;
+    while (*at >= '0' && *at <= '9') v = v * 10 + (*at++ - '0');
+
+    return v;
+}
+
+int xhci_init(void) {
+    int controllers = pci_count_class_if(PCI_CLASS_SERIAL_BUS,
+                                         PCI_SUBCLASS_USB,
+                                         PCI_PROGIF_XHCI);
+    int wanted = xhci_requested();
+
+    if (controllers == 0) {
+        klog(LOG_LEVEL_INFO, "XHCI", "No xHCI controller on the bus.");
+        return E_NODEV;
+    }
+
+    if (wanted > 0 && wanted <= controllers) {
+        int rc;
+
+        printk("[XHCI] Command line asked for controller %d of %d.\n",
+               wanted, controllers);
+        xhci_forget();
+        rc = xhci_bring_up(pci_nth_class_if(PCI_CLASS_SERIAL_BUS,
+                                            PCI_SUBCLASS_USB,
+                                            PCI_PROGIF_XHCI, wanted - 1));
+        if (rc == E_OK) xhci_announce();
+        return rc;
+    }
+
+    if (wanted > 0) {
+        printk("[XHCI] Command line asked for controller %d and this machine has %d; choosing instead.\n",
+               wanted, controllers);
+    }
+
+    /*
+     * One controller means no choice to make, and the scan below is skipped
+     * rather than run over a list of one. Not for the cycles: a scan halts and
+     * re-starts what it looked at, and doing that to the only controller on the
+     * machine would put a reset cycle in the boot path of every machine that
+     * never had this problem in order to arrive where it already was.
+     */
+    if (controllers == 1) {
+        int rc;
+
+        xhci_forget();
+        rc = xhci_bring_up(pci_nth_class_if(PCI_CLASS_SERIAL_BUS,
+                                            PCI_SUBCLASS_USB,
+                                            PCI_PROGIF_XHCI, 0));
+        if (rc == E_OK) xhci_announce();
+        return rc;
+    }
+
+    klog_int(LOG_LEVEL_INFO, "XHCI",
+             "More than one xHCI controller; looking for the one with a disk on it",
+             controllers);
+    printk("[XHCI] %d controllers; bringing each up to see what is on it.\n",
+           controllers);
+
+    int best      = -1;
+    int best_rank = XHCI_RANK_UNUSABLE;
+    int last_err  = E_NODEV;
+
+    for (int i = 0; i < controllers; i++) {
+        const pci_device_t *dev = pci_nth_class_if(PCI_CLASS_SERIAL_BUS,
+                                                   PCI_SUBCLASS_USB,
+                                                   PCI_PROGIF_XHCI, i);
+        int rank;
+
+        /* The count and the walk read the same table and cannot disagree, so
+         * this is a guard against a future edit rather than against the bus. */
+        if (dev == 0) break;
+
+        xhci_forget();
+        last_err = xhci_bring_up(dev);
+        rank     = xhci_rank_current();
+
+        if (rank > best_rank) {
+            best_rank = rank;
+            best      = i;
+        }
+
+        /*
+         * One line per controller, and the whole machine's USB in as many lines
+         * as it has controllers. The BAR is in it because the commonest way for
+         * a controller to be refused outright is to decode above 4 GB, where a
+         * kernel without PAE cannot reach it, and that is visible in the address
+         * before anything is tried. The number at the front is what `xhci=` takes.
+         *
+         * This is the release's own lesson applied one level up: on a machine
+         * that will not boot, what the kernel can say about itself is the whole
+         * of what anybody has to work with, and five identical failures are
+         * worth less than one census.
+         */
+        printk("[XHCI] %d/%d %02x:%02x.%d %04x:%04x bar %x:%08x -> ",
+               i + 1, controllers, dev->bus, dev->device, dev->function,
+               dev->vendor_id, dev->device_id, dev->bar[1], dev->bar[0]);
+
+        if (rank == XHCI_RANK_UNUSABLE) {
+            printk("refused, errno %d\n", last_err);
+        } else {
+            printk("%d ports, %d conn, %d addr%s%s\n",
+                   xhci_ports, xhci_connected_count(), device_count,
+                   usbkbd_attached() ? ", kbd" : "",
+                   rank == XHCI_RANK_STORAGE ? ", DISK" : "");
+        }
+
+        xhci_stand_down();
+    }
+
+    if (best < 0) {
+        klog(LOG_LEVEL_ERROR, "XHCI",
+             "Every xHCI controller on this machine refused to come up.");
+        printk("[XHCI] No controller on this machine came up.\n");
+        return last_err;
+    }
+
+    /*
+     * And back to the best of them, which was halted on the way past like every
+     * other - the scan does not know which one it will want until it has seen
+     * them all, so it treats them alike and returns.
+     *
+     * Every controller is visited rather than stopping at the first disk, and
+     * that is a deliberate trade of boot time for the census above. A machine
+     * where this matters is one that is not booting, and there the complete
+     * picture is worth more than the second it costs.
+     */
+    klog_int(LOG_LEVEL_INFO, "XHCI", "Returning to the best controller, rank",
+             best_rank);
+    printk("[XHCI] Driving controller %d of %d.\n", best + 1, controllers);
+
+    xhci_forget();
+
+    int rc = xhci_bring_up(pci_nth_class_if(PCI_CLASS_SERIAL_BUS,
+                                            PCI_SUBCLASS_USB,
+                                            PCI_PROGIF_XHCI, best));
+    if (rc == E_OK) xhci_announce();
+    return rc;
 }

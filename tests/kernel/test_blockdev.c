@@ -152,6 +152,17 @@ static void run_bounds_assertions(void) {
 
     KTEST_ASSERT(blockdev_read(blockdev_root(), 0, 0) == E_INVAL,
                  "[BLOCK] a null buffer is refused");
+    KTEST_ASSERT(blockdev_write(blockdev_root(), 0, 0) == E_INVAL,
+                 "[BLOCK] a null write buffer is refused too");
+
+    blockdev_t broken = fake_dev;
+    broken.read = 0;
+    KTEST_ASSERT(blockdev_read(&broken, 0, buf) == E_NODEV,
+                 "[STRICT] [BLOCK] direct reads validate the handler even without registration");
+    KTEST_ASSERT(blockdev_check_read(&fake_dev, 0, buf) == E_OK &&
+                 blockdev_check_write(&fake_dev, 0, buf) == E_OK &&
+                 fake_reads == 0 && fake_writes == 0,
+                 "[STRICT] [BLOCK] admission checks perform no device I/O");
 }
 
 /**

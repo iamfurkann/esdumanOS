@@ -5,7 +5,7 @@
 **A 32-bit x86 operating system kernel written from scratch in C and assembly.**
 
 [![CI](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml/badge.svg)](https://github.com/iamfurkann/esdumanOS/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.12.0--beta.1-blue)
+![Version](https://img.shields.io/badge/version-1.13.0--beta.1-blue)
 ![Architecture](https://img.shields.io/badge/arch-x86__32-orange)
 ![Language](https://img.shields.io/badge/language-C%20%7C%20x86%20ASM-green)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
@@ -68,7 +68,7 @@ A central design goal is treating security as a first-class concern rather than 
 
 ## Current Status
 
-**Version:** 1.12.0-beta.1
+**Version:** 1.13.0-beta.1
 
 esdumanOS is in the **Beta** stage. The core kernel subsystems are functional and the
 OS boots in QEMU. The privilege boundary is genuinely tested rather than merely
@@ -623,6 +623,34 @@ number was spent on any of it. 21 and 20 keep their numbers, their parameters an
 their names, and the shell's `halt` builtin is unchanged - it simply reaches a
 machine that switches off.
 
+v1.13.0 is the release the first real machine asked for. v1.12.0 was carried to a
+laptop — the machine this project has been aiming at for seven releases — and the
+screen never came on. GRUB's menu drew, the kernel loaded, and from the moment it
+took over there was nothing: not an error, not a panic message, nothing.
+
+The reason was not one bug. `install_framebuffer_console()` was called in the
+middle of the boot, because mapping a framebuffer needs the page tables and the
+page tables need the allocator, and the five stages before it drew into text-mode
+video memory. On a machine the bootloader left in a graphics mode that is nowhere
+at all — and a UEFI laptop has no text-mode hardware to fall back to. The first
+half of the boot was silent, so a panic in it, a hang in it, and a working kernel
+with no screen were the same black rectangle. Diagnosing it took one bit per
+boot: a temporary hack that reset the machine at a numbered checkpoint, and
+"did it restart?" as the only channel.
+
+So the framebuffer is mapped in the first line of `kernel_main` now. It needs no
+allocator and no page tables, which is the whole trick: a 4 MB page needs neither,
+and the page directory `boot.asm` built is still the one in CR3. It is mapped
+again after `init_paging()` at the same address, so the console never learns its
+screen moved — a handover arranged not to be one. And when there is no usable
+framebuffer at all, the two refusals that can still reach the screen paint it a
+colour, because a colour is the last thing a machine with no console can say.
+
+The window that holds it grew from 16 MB to 64, with 176 more behind it for
+drivers. The old comment called 16 MB "far more than anything this kernel will
+map" and was written before v1.6.0 put a framebuffer through the same window: a
+1920x1080 panel is half of it and a 4K panel did not fit at all.
+
 The other decision worth recording is how a synchronous read reaches an event
 ring whose only reader runs in the timer interrupt. Waiting for a tick to drain
 it would have worked and cost ten milliseconds a transfer - three transfers to a
@@ -639,7 +667,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 - Encrypted file system with AES-256-CBC
 - User authentication and security levels
 - 23 user-space programs and 34 shell builtins
-- 45 kernel self-test modules and CI pipeline
+- 46 kernel self-test modules and CI pipeline
 - Boots on UEFI as well as BIOS, draws to a framebuffer, and types on a USB keyboard
 
 **What to expect:**
@@ -691,7 +719,7 @@ anyone curious about kernel internals — not for storing anything you care abou
 |-----------|-------------|
 | **VFS** | Custom FAT-based file system with flat directory table, CRUD operations, atomic file updates. Sector 0 is an MBR partition table; the file system lives in a partition and its superblock carries a magic number, a format version and the partition-relative geometry it was laid out with. The allocation table counts 4 KB clusters. An unrecognised disk is refused rather than read, a disk that cannot be read is refused rather than formatted, and the directory table is checked against its own invariants before it is believed. The directory table and the allocation table are sized from the device at mount, up to 8192 entries and ~1 GB; entries are 96 bytes each, with an owner, a group, permission bits and creation and modification times |
 | **CryptoFS** | Transparent AES-256-CBC encryption layer. Per-file IVs are derived as `HMAC-SHA256(file key, label ‖ counter ‖ pool bytes)`, so they stay distinct even when the entropy pool has nothing to offer; HMAC-SHA256 over the plaintext for integrity |
-| **Block Cache** | 64-slot LRU sector cache, write-back, keyed on the device as well as the sector — without which the same sector number on two disks would be one cached slot, and a write-back cache would eventually flush it to whichever device it thought it belonged to. Dirty sectors are written out when 32 slots are outstanding, when any has waited 5 seconds, or on explicit `sync()`. A read the device refuses is not cached, and a sector the device will not take stays dirty so a later flush tries it again |
+| **Block Cache** | 64 slots keyed by device and sector, with write-back at 32 dirty slots, on the yield-driven 5-second deadline, or on explicit `sync()`. Admission rejects invalid requests and non-512-byte sectors. Every accepted sector remains dirty on write failure; clean slots and other writable victims remain usable. A full cache returns `E_IO` after one attempt per dirty slot. `sync`, reboot, halt and mount changes report flush failures instead of discarding pending data. These policies are not power-loss atomicity or a hardware cache flush |
 | **Block Device Layer** | A table of up to four registered devices under the cache, with the sector bounds check in one place rather than in each driver — which matters more with two disks than it did with one, because there are two sector counts to check against and two chances to forget. Devices are found by the name they publish, which is how `mount` is told which one to use, and two may not share one. A driver's errno reaches the file system unchanged, which is what lets the mount path tell a disk it cannot read from a disk with nothing on it |
 | **DevFS** | `/dev/null`, `/dev/random`, `/dev/urandom` and `/dev/kmsg` device nodes; the random devices are ChaCha20 keyed from the kernel entropy pool and re-keyed periodically, and `/dev/kmsg` streams log records with a per-process cursor |
 
@@ -1003,7 +1031,7 @@ serves the display over VNC on `:1` — connect to `vnc://<host>:5901` from a ma
 a screen, tunnelling the port over ssh if it is not directly reachable. macOS has a
 client built in, under Finder's *Connect to Server*.
 
-Two alternatives, both real. Copy `esdumanOS-v1.12.0-beta.1.iso` and a disk image to a
+Two alternatives, both real. Copy `esdumanOS-v1.13.0-beta.1.iso` and a disk image to a
 machine with a display and run them there — the build has to happen on the development
 machine but looking at the result does not. Or run `make run_text` and choose the second
 entry in the GRUB menu, which sets `gfxpayload=text`: the kernel finds no framebuffer,
@@ -1023,7 +1051,7 @@ QEMU. To keep a disk across sessions, boot the ISO by hand with a disk image of 
 This executes QEMU as:
 
 ```
-qemu-system-i386 -cdrom esdumanOS-v1.12.0-beta.1.iso -boot d -serial file:kernel_log.txt \
+qemu-system-i386 -cdrom esdumanOS-v1.13.0-beta.1.iso -boot d -serial file:kernel_log.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display vnc=:1 -k en-us
 ```
 
@@ -1058,7 +1086,7 @@ defaults above:
 ```bash
 qemu-system-i386 \
     -m 128 \
-    -cdrom esdumanOS-v1.12.0-beta.1.iso \
+    -cdrom esdumanOS-v1.13.0-beta.1.iso \
     -boot d \
     -drive file=disk.img,format=raw,if=ide \
     -serial stdio
@@ -1088,7 +1116,7 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/ovmf_vars.fd
 qemu-system-x86_64 -M q35 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/tmp/ovmf_vars.fd \
-    -cdrom esdumanOS-v1.12.0-beta.1.iso \
+    -cdrom esdumanOS-v1.13.0-beta.1.iso \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk \
     -serial file:kernel_log_uefi.txt
 ```
@@ -1111,7 +1139,7 @@ undecoded port answers with all ones, which has that bit set — and until v1.5.
 it was a system that could say what was holding its disk and not read it.
 
 ```
-qemu-system-i386 -M q35 -cdrom esdumanOS-v1.12.0-beta.1.iso -boot d \
+qemu-system-i386 -M q35 -cdrom esdumanOS-v1.13.0-beta.1.iso -boot d \
     -serial file:kernel_log_q35.txt \
     -drive format=raw,file=disk.img,if=ide,index=0,media=disk -display curses
 ```
@@ -1438,6 +1466,7 @@ filtered run proves one module, not the tree.
 | `test_usbmsc.c` | Bulk-Only Transport, and the disk it presents. Half of it is arithmetic about two structures and that half matters more than it looks: a command wrapper is 31 bytes and a status wrapper 13, and those are fields of the protocol rather than properties of the C - a device handed 32 bytes where it expects 31 stalls the endpoint, and the recovery for that is a reset this driver does not implement. So the sizes are asserted, the command block is asserted to start at byte 15, and the two signatures are asserted as the ASCII they are rather than against the constants they are defined as. Then the hardware: a stick was found and registered under the name `mount` uses, it reports a capacity and 512-byte sectors, it is **not** the root - the boot order decides that - a sector reads back through the whole transport, and a sector past the end is refused before the device ever sees it. Then the second stick, which is why this driver has a table at all: both were brought up rather than only the first, each registered under a name and a `ctx` of its own, and **their capacities differ** - the test bench gives the two images deliberately different sizes, because a driver keeping the capacity in a single static would register the second stick with the first one's size and produce a disk that mounts and lies about where it ends |
 | `test_mount.c` | Two disks, and the cache that has to tell them apart. The registry first: a device is findable by the name it published, a name nothing answers to finds nothing, a second device may not take a name already in use, registering the same device twice is simply nothing to do, and one that cannot read is refused at the table rather than at the first mount. Then the assertion this release turns on - the same sector number written on two devices holds two different things, and each reads back what was written to it rather than to the other, which before the cache carried a device would have been one slot and a silent corruption. Then the root moved to another disk, detached entirely as `umount` leaves it, and put back where the suite found it. Before any of the writes, one assertion that the sector they use exists on *both* disks - it did not, once, and a sector past the end of a device leaves a dirty slot the cache can never place, which is not a failed assertion here but an eviction path that stops working for every module after this one |
 | `test_acpi.c` | The tables, the sleep values, and the offsets into the FADT - almost all of it against tables built in the module rather than against the machine, because the cases worth asserting are the ones QEMU never produces. A checksum that does not hold is refused, and so is the *second* one, which only an ACPI 2.0 pointer has and which covers the half carrying the XSDT address. A declared length past the thirty-six byte copy the kernel keeps is refused rather than summed. `\_S5_` introduced by NameOp yields both sleep types shifted into place, the same four characters inside a string yield nothing - acting on that match would send an arbitrary value to a hardware register - and the walk is cut short at *every* offset in the block, not one, because every step is taken over bytes the firmware chose. Then the layout: four of the FADT offsets were wrong on the first attempt, each reading a neighbouring field and each returning a number that looked like an answer, so they are checked against the specification's own arithmetic - Flags is a doubleword, the reset register a twelve-byte generic address, and the fields from Flags to X_DSDT tile without a gap. One assertion asks the machine, and it has no branch in it, because an assertion with two arms reports a different count on different targets |
+| `test_earlyfb.c` | The screen that has to exist before anything can complain about it, asserted without one. How many 4 MB entries cover a framebuffer - which is not a division: two megabytes starting three megabytes into a region straddles two entries, and a 1920x1080 panel is two entries aligned and three when it is not, a case no machine here will ever produce. Then every refusal in the order the boot meets them: no framebuffer reported told apart from a broken report, a text mode refused by name rather than drawn into, an address above 4 GB refused rather than truncated to a different one, and a depth, a pitch and a height the drawing code cannot use each rejected. Then a 4K panel fitting the window - which it did not before this release - and an 8K one refused rather than mapped short. Finally the two windows, which must meet exactly and not overlap, and the two colours a failed console can show, which must differ and must not be black |
 | `test_usbkbd.c` | HID boot reports and the scancodes they turn into, almost all of it without a controller, a device or a register read: `usbkbd_report()` is handed eight bytes and told nothing about where they came from, so eight made up here are indistinguishable from eight a keyboard sent. The table is asked directly for a letter, for a navigation key that must carry its prefix or arrive as its keypad twin, for right alt which has to become AltGr or the Turkish layout loses a third of its characters, and for a usage set 1 cannot express — which must translate to nothing rather than to something wrong. Then the diff, which is where the shape of this protocol sets its trap: a report says what is held rather than what changed, so a key present in two reports must be pressed once, and a driver that emitted what it saw would repeat every held key a hundred times a second. A release types nothing and is therefore invisible at the ring, so it is proved through a modifier instead — a shift whose break code went missing would leave every letter after it capitalised. A rollover report is dropped whole and, the assertion that matters, leaves the previous report undisturbed. And one key end to end: Up arrives as the escape sequence xterm sends, through a driver that was never told about USB |
 | `test_pci.c` | The bus walk and what it recorded: that something answered and that the count fits the table, that the host bridge reports a vendor while an address nothing decodes reads back all ones and is not stored as a device, that the stored vendor and class match a fresh read of the same registers rather than a consistent misreading of them, the lookups in both directions including one-past-the-end and a negative index, that no function above zero was recorded unless function zero announced itself as multifunction, and that enumerating twice describes the machine once |
 | `test_blockdev.c` | The seam between the file system and its storage, against a device made up for the occasion: reads and writes reach the registered device at the sector asked for, a sector past its capacity is refused without the driver being called, a driver's errno arrives unchanged rather than flattened, a read-only device answers `E_ROFS` instead of calling a null handler, and with nothing registered both entry points answer `E_NODEV` |
@@ -1467,7 +1496,7 @@ filtered run proves one module, not the tree.
 | `test_elf.c` | Loader validation: bad sizes, overflowing offsets, kernel load addresses |
 | `test_crypto.c` | SHA-256 / HMAC / PBKDF2 against published vectors; CryptoFS round trip |
 | `test_entropy.c` | Extraction uniqueness, per-source entropy budgets, IV and salt distinctness |
-| `test_bcache.c` | Cache hits, and the write-back policy: volume bound, time bound, `sync()`. Then what the cache does when the device underneath says no, in both of the two ways it can. A device having a bad moment: the read is reported rather than swallowed, the failed read is not cached so the next one asks again, the write is taken and the failure surfaces at the flush, the sector stays dirty - and then the device relents and the sector it was holding is finally written, which is what keeping it was for. A device that could never have taken it: a sector past the end of the disk is accepted by the cache, reported by the flush, and **dropped**, because no later attempt could answer differently. The last of those is asserted by the cache still handing out slots afterwards, which is the assertion that fails if the slot was pinned - a slot nothing can write is a slot nothing touches, so it sinks to the bottom of the LRU order and takes every later eviction with it |
+| `test_bcache.c` | Two RAM-backed devices: complete cache-hit and persisted contents; high-water and timed write-back; invalid requests on hits and misses; failed reads; retention and recovery after `E_IO`, `E_NODEV`, `E_ROFS`, `E_NXIO` and `E_INVAL`; same-LBA device isolation; clean-victim progress, complete cache exhaustion and later-victim recovery; syscall error propagation through sync, reboot, halt, mount and unmount. The module restores fake-device state and preserves the root device |
 | `test_time.c` | Calendar carry both ways, leap years including the century rule, the `TIME` syscall, and the conversions to and from the Unix epoch — checked against each other across sixty years, with the leap rules asserted as rules rather than as dates worked out by hand. Setting the clock too: that a time set reads back as itself, that a leap day is accepted in a leap year and refused otherwise, and that a refused date leaves the clock where it was |
 
 The Ring 3 payload (`tests/user/ktest_user.c`) runs after these and reports its
@@ -1485,7 +1514,9 @@ esdumanOS/
 |-- arch/
 |   +-- x86/
 |       |-- boot/
-|       |   +-- boot.asm             Multiboot entry, page table setup, stack init
+|       |   |-- boot.asm             Multiboot 1 and 2 headers, page tables, stack
+|       |   |-- multiboot2.c         The newer structure, translated into the older
+|       |   +-- earlyfb.c            A screen before there is an allocator to make one
 |       |-- cpu/
 |       |   |-- gdt.c                Global Descriptor Table (9 entries)
 |       |   |-- idt.c                Interrupt Descriptor Table, PIC remapping
@@ -1577,7 +1608,7 @@ esdumanOS/
 |       |-- umount.c                 Unmount the file system
 |       +-- stat.c                   Show a file's size, type, owner, mode and times
 |
-|-- include/                         53 header files
+|-- include/                         54 header files
 |   |-- kernel.h                     Master header, and where the version lives
 |   |-- types.h                      Integer type definitions
 |   |-- syscall.h                    67 syscall number definitions
@@ -1589,7 +1620,7 @@ esdumanOS/
 |   +-- security.h                   Security level enumeration
 |
 |-- tests/
-|   |-- kernel/                      45 kernel-mode test modules + framework
+|   |-- kernel/                      46 kernel-mode test modules + framework
 |   |-- user/                        Ring 3 test payload
 |   +-- host/                        Host-side tests, fuzzing (58 corpus files)
 |
@@ -2158,6 +2189,18 @@ sometimes mistaken for it: its `year` is a `uint16_t`, good to 65535.
 - **`/dev/kmsg` keeps one cursor per process, not per open descriptor.** The
   device interface has no per-descriptor state to hang one on, so two descriptors
   in the same program share a read position. Linux keeps one per open.
+- **A framebuffer above 4 GB is unreachable, and it is the one failure that stays
+  dark.** There is no PAE here, so a physical address needing more than 32 bits
+  cannot be formed — and refusing it means there is no mapping to paint a colour
+  through either. `bootstop=N` is what is left for that case: it resets the
+  machine at a numbered checkpoint, and "did it restart" is a bit of information
+  per boot on a machine that has no other channel. PSE-36 would reach such a
+  framebuffer with the same 4 MB pages this release already uses, and that is a
+  release of its own.
+- **The console is 80x25 whatever the panel is**, and the early framebuffer does
+  not change that — what the scale decides is how large the cells are drawn. A
+  4K panel draws them at four times size and centres the result; the leftover is
+  border.
 - **ACPI is read for one purpose and no other.** Enough of it to find the FADT,
   read the PM1 control ports, and pull `SLP_TYP` for S5 out of the DSDT — which
   is what `halt` needs and the whole of what this kernel understands. There is no
@@ -2303,7 +2346,8 @@ recipe and the build step that produce one, not a capability in the kernel.
 | ~~v1.10.0~~ | **Done.** A keyboard on a machine with no PS/2 controller. HID boot protocol, an interrupt endpoint, and the event ring polled from the timer tick. `drivers/keyboard.c` did not change: it has one line that touches hardware and `keyboard_handle_scancode()` had been the seam for nine releases |
 | ~~v1.11.0~~ | **Done.** The stick as a real disk. USB mass storage, and `mount`/`umount` — the caller `include/blockdev.h` has been waiting for since v1.2.0, in the sense that header actually used: one that *chooses between* devices |
 | ~~v1.12.0~~ | **Done.** A way to turn the machine off. ACPI, and the Multiboot 2 header it needs: the ACPI pointer is not reliably findable by scanning on a UEFI machine, and MB1 does not carry it. Added *alongside* MB1 rather than replacing it, because three of the four test targets boot through QEMU's `-kernel`, which reads an MB1 header. No syscall number was spent: `halt` keeps its number and finally means what people mean by it |
-| v1.13.0 | **Two file systems at once.** The mount in v1.11.0 changes which disk carries the one file system; holding two means every directory id needs a file system to belong to, and every one of them is a bare `int` that crosses the frozen syscall boundary. Measured while v1.11.0 was being written: 466 references across `fs/`, `kernel/` and the tests. It is a release of its own and gets one. It moved behind ACPI because auditing `load_partition()` showed it is not what 2.0.0 is waiting on — shutting the machine down is |
+| ~~v1.13.0~~ | **Done.** A boot that can be watched. The framebuffer is mapped in the first line of `kernel_main` — before the allocator, before the page tables, using a 4 MB page that needs neither — so the five stages that used to run blind now report. When there is no usable framebuffer the screen is painted a colour, because that is the last thing a machine with no console can say. Written because the first real machine showed nothing and every failure in it looked identical |
+| v1.14.0 | **Two file systems at once.** The mount in v1.11.0 changes which disk carries the one file system; holding two means every directory id needs a file system to belong to, and every one of them is a bare `int` that crosses the frozen syscall boundary. Measured while v1.11.0 was being written: 466 references across `fs/`, `kernel/` and the tests. It is a release of its own and gets one. It has now moved twice, behind ACPI and behind the console, for the same reason both times: neither is what 2.0.0 is waiting on, and a machine that shows nothing cannot demonstrate a second file system |
 | v2.0.0 | The machine. Named, as only major versions are |
 
 XHCI was split from the drivers above it deliberately, and then split again. It

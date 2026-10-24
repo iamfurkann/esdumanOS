@@ -91,6 +91,15 @@ mb2_header_end:
 
 section .data
 align 4096
+
+; Visible to C, and only for one caller.
+;
+; earlyfb.c adds a mapping to this directory before init_paging() has built one
+; of its own, which is the whole of how a framebuffer becomes writable in the
+; first line of kernel_main. Nothing else may touch it: from init_paging()
+; onwards this directory is not the one in CR3, and a caller that reached in here
+; afterwards would be editing a page directory nobody is using.
+global boot_page_directory
 boot_page_directory:
         times 1024 dd 0      ; 4KB Directory filled with 0s
 boot_page_table_0:

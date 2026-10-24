@@ -189,9 +189,15 @@ void sys_mount(arch_regs_t *regs) {
      */
     blockdev_t *previous = blockdev_root();
 
-    if (previous != 0) {
-        bcache_flush();
-        bcache_flush_dev(previous);
+    /* init_fs() resets the entire cache, including slots on other devices. */
+    int flush_result = bcache_flush();
+    if (flush_result == E_OK && previous != 0) {
+        flush_result = bcache_flush_dev(previous);
+    }
+    if (flush_result != E_OK) {
+        klog(LOG_LEVEL_ERROR, "MOUNT", "Refusing to change disks: unwritten data remains in the cache.");
+        regs->eax = flush_result;
+        return;
     }
 
     blockdev_set_root(target);
@@ -235,9 +241,8 @@ void sys_umount(arch_regs_t *regs) {
      * may be unplugged, and a cached sector of a disk that is no longer there is
      * one nothing can ever reconcile.
      */
-    bcache_flush();
-
-    int res = bcache_flush_dev(dev);
+    int res = bcache_flush();
+    if (res == E_OK) res = bcache_flush_dev(dev);
 
     if (res != E_OK) {
         klog(LOG_LEVEL_ERROR, "MOUNT", "Refusing to unmount: the disk would not take its data.");

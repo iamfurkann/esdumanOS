@@ -1,3 +1,6 @@
+# Keep the archive as the goal after generated .d files have been included.
+.DEFAULT_GOAL := all
+
 SRCS := $(wildcard *.c)
 
 # Output tree, chosen by the caller. Defaults to building in place so that

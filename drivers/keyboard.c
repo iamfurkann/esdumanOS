@@ -195,25 +195,59 @@ static int e0_mode = 0;
 static int ctrl_pressed = 0;
 
 /**
+ * @brief Guards against a second drain starting inside the first.
+ *
+ * Interrupt gates clear IF, so IRQ0 and IRQ1 cannot preempt one another and this
+ * is very likely never true. It is here because "very likely" is the wrong basis
+ * for a shared hardware buffer, and because the cost of being wrong the other way
+ * is one dropped pass - ten milliseconds - rather than two readers taking
+ * alternate bytes out of one scancode sequence.
+ */
+static volatile int draining = 0;
+
+void keyboard_drain(int credit_entropy) {
+    if (draining) return;
+    draining = 1;
+
+    for (int taken = 0; taken < KBD_DRAIN_MAX; taken++) {
+        uint8_t status = inb(0x64);
+
+        if (!(status & KBD_STATUS_OBF)) break;
+
+        uint8_t byte = inb(0x60);
+
+        /* The touchpad's, on a machine that has one. Read to unblock the buffer
+         * and dropped because nothing in this kernel reads a PS/2 pointer; left
+         * in place it would be handed to the translation below and become a
+         * keystroke nobody typed. */
+        if (status & KBD_STATUS_AUX) continue;
+
+        /*
+         * Before the early returns inside the translation, deliberately. Most
+         * paths through it bail out - 0xE0 prefixes, modifiers, key releases,
+         * function keys - and the timing of those events is entropy just the
+         * same as a printable character's. Human keystroke intervals are the
+         * best source this machine has.
+         *
+         * Only the first byte of a pass is credited. The rest of a burst arrived
+         * in the same instant as the first by definition, so their intervals
+         * measure this loop rather than anybody's hands.
+         */
+        if (credit_entropy && taken == 0) {
+            entropy_add_event(ENTROPY_SRC_KBD, byte);
+        }
+
+        keyboard_handle_scancode(byte);
+    }
+
+    draining = 0;
+}
+
+/**
  * @brief Handles the keyboard interrupt request (IRQ1).
  */
 void keyboard_interrupt_handler(void) {
-    uint8_t scancode = inb(0x60);
-
-    /*
-     * Before the early returns, deliberately. Most paths through the handler
-     * bail out - 0xE0 prefixes, modifiers, key releases, function keys - and the
-     * timing of those events is entropy just the same as a printable character's.
-     * Human keystroke intervals are the best source this machine has.
-     *
-     * It stays here rather than moving into the translation below, because what
-     * it measures is when the interrupt arrived. A synthetic scancode from a test
-     * carries no timing at all, and feeding the pool from one would be adding
-     * entropy that does not exist.
-     */
-    entropy_add_event(ENTROPY_SRC_KBD, scancode);
-
-    keyboard_handle_scancode(scancode);
+    keyboard_drain(1);
 }
 
 /**

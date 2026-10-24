@@ -31,7 +31,11 @@ void print(const char *str) {
  * @brief Main entry point for the application
  */
 void main(void) {
-    char report[1600];
+    /* PCIINFO_BUF on the kernel side: PCI_MAX_DEVICES * 48 + 64, and that ceiling
+     * went from 32 to 192 in v1.13.0 when a real machine turned out to publish
+     * more functions than an emulator does. Written out rather than included
+     * because nothing under apps/ includes a kernel header. */
+    char report[9280];
     int n;
 
     /*

@@ -147,4 +147,17 @@ int usbkbd_attached(void);
  */
 void usbkbd_attach(void);
 
+/**
+ * @brief Records that the keyboard is gone.
+ *
+ * The other half of usbkbd_attach(), and it exists because of what v1.13.0 does
+ * on a machine with more than one xHCI controller: the driver brings each one up
+ * in turn, looks at what is on it, and abandons the ones with nothing it can
+ * use. A keyboard opened on a controller that is then halted is not a keyboard
+ * any more, and leaving this flag set would do two things - claim one in the
+ * boot line, and make xhci_open_keyboard() decline the real one when a later
+ * controller turns out to have it.
+ */
+void usbkbd_detach(void);
+
 #endif // USBKBD_H

@@ -144,6 +144,11 @@ void usbkbd_attach(void) {
     attached = 1;
 }
 
+void usbkbd_detach(void) {
+    usbkbd_reset();
+    attached = 0;
+}
+
 /**
  * @brief Sends one key's make or break code down the PS/2 driver's own path.
  *

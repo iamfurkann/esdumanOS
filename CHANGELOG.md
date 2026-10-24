@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Keep `all` as the default goal in both Makefiles after generated dependency
+  files exist; otherwise a later plain `make` could build only one object and
+  the libc submake could skip rebuilding its archive.
+- Validate deferred block-cache requests before accepting or overwriting data,
+  sharing bounds and handler checks with direct block I/O. Reject unsupported
+  sector sizes before a driver can overrun a 512-byte cache slot.
+- Preserve every accepted dirty sector on device write failure, including
+  `E_NODEV`, `E_ROFS`, `E_NXIO` and `E_INVAL`. Prefer clean eviction victims and
+  try each dirty victim at most once instead of letting one failing sector stop
+  the entire cache. Recovery writes the retained bytes to their original device.
+- Return flush errors through `sync` and refuse reboot, halt or mount transitions
+  while data remains unwritten. Mount changes previously reset the entire cache
+  after ignoring the flush result.
+- Replace block-cache tests that wrote assumed-unused disk sectors with RAM-backed
+  fault-injection devices, covering admission, full-cache failure, recovery and
+  lifecycle error propagation. Runtime verification is recorded in
+  `docs/engineering/RELIABILITY_AUDIT.md`; no release assertion total is claimed.
+
+## [1.13.0-beta.1] - 2026-09-03
+
+The first machine this project was ever carried to showed nothing. GRUB drew its menu,
+the kernel loaded, and from the moment it took over the screen stayed black - no error,
+no panic, no output of any kind. This release is what that machine asked for: a boot that
+can be watched, and a kernel that can say what happened to it.
+
+### Added
+
+- **A framebuffer mapped in the first line of `kernel_main`.** It needs no allocator and
+  no page tables, which is the whole trick: a 4 MB page needs neither, and the page
+  directory `boot.asm` built is still the one in CR3. Everything from that line on -
+  `init_pmm()`, `init_paging()`, a panic in either - has somewhere to draw. Before it,
+  the framebuffer was mapped in the middle of `init_memory_subsystem()` and the five
+  stages ahead of it wrote into text-mode video memory, which on a machine the bootloader
+  left in a graphics mode is nowhere at all.
+
+- **A colour for the refusals that can still reach the screen.** A machine with no console
+  cannot report in words. Where the mapping exists and the console would not take it, the
+  screen is painted instead - one colour per reason. Three of the five refusals have no
+  mapping to paint through and stay dark; that is stated as a limit rather than hidden.
+
+- **`bootstop=N`, a debugging facility that earned its place.** It resets the machine at a
+  numbered checkpoint and does nothing otherwise, and "did it restart" is a bit of
+  information per boot - which is how this release was diagnosed on a machine with no
+  other channel. Kept because the next machine is also one nobody has tried.
+
+- **`console_layout()`.** The scale and centring arithmetic, lifted out of
+  `console_use_framebuffer()` so it can be asserted without a screen: that function clears
+  the whole buffer before returning, so checking a 4K panel through it would have meant
+  finding 31 MB to clear. The fourth time this project has pulled a decision into a
+  function of its own for exactly that reason.
+
+### Changed
+
+- **The device window is 64 MB for the framebuffer and 176 MB behind it**, where it was
+  16 MB for everything. The comment calling 16 MB "far more than anything this kernel will
+  map - an AHCI controller's register file is under 8 KB" was written before v1.6.0 put a
+  framebuffer through the same window: a 1920x1080 panel is 7.9 MB of it, a 2560x1440 one
+  is 14.1, and a 4K panel did not fit at all. Address space is the one thing this kernel
+  has plenty of.
+
+- **The framebuffer has a fixed address rather than whichever the bump allocator returns.**
+  It is mapped twice - once before `init_paging()` and once after - and both mappings land
+  on `FB_WINDOW_BASE`, so the console's pointer never changes. v1.10.0 learned to make a
+  handover visible in the code; this one is arranged not to be a handover.
+
+### Found in passing
+
+- **The first diagnostic could never have worked, and it took a boot to find out.** It
+  painted coloured bands into the framebuffer at its *physical* address, on the assumption
+  that `boot.asm`'s identity map covered it. That map is the first sixteen megabytes and a
+  real machine puts its framebuffer far above them, so every write went to an address with
+  no page behind it: the diagnostic died before the thing it was diagnosing, and produced
+  the same black screen as the fault it was looking for. `earlyfb.c` exists so that the
+  assumption is never made again - it maps the framebuffer, and then there is somewhere to
+  write.
+
+- **`ft_strstr()` does not take a `const char *`.** Reaching the command line through it
+  discards the qualifier, which is why `selftest.c` has always taken a non-const pointer to
+  it. Left alone here - it is a signature in `lib/` and a release about the console is not
+  where it should change - but it is written down now.
+
+### Known issues
+
+- **A framebuffer above 4 GB is unreachable and stays dark.** There is no PAE, so the
+  address cannot be formed, and refusing it means there is no mapping to paint a colour
+  through. `bootstop=` is what is left for that case. PSE-36 would reach it with the same
+  4 MB pages this release already uses, and is a release of its own.
+
+- **Three of the five refusals cannot be painted.** No framebuffer reported, a text mode,
+  and an address above 4 GB all lack a mapping. The first two are also the cases where the
+  text backend is the right answer and generally works.
+
 ## [1.12.0-beta.1] - 2026-08-31
 
 esdumanOS can turn the machine off. `halt` stopped the processor and left the power on,

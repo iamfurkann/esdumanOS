@@ -16,6 +16,7 @@
 #include "xhci.h"
 #include "usbmsc.h"
 #include "acpi.h"
+#include "earlyfb.h"
 /* Not for reading or writing - the file system does that through the cache -
  * but for the one decision the boot path owns: which of the registered disks
  * the file system is put on. */
@@ -49,6 +50,90 @@ int is_test_mode = 0;
  * here, at the one moment it is known.
  */
 int boot_protocol = 0;
+
+/*
+ * bootstop=N - stop the boot at checkpoint N by resetting the machine.
+ *
+ * A debugging facility, and it earned its place. The first physical machine this
+ * project ran on showed nothing at all, and on a machine with no console every
+ * failure looks identical: a panic, a hang, and a working kernel with nowhere to
+ * draw are the same black screen. Restarting is the one thing such a machine can
+ * still be made to say, and which checkpoint it restarts at is a bit of
+ * information per boot - which is how the v1.13.0 bring-up was diagnosed.
+ *
+ * The early framebuffer below should make this unnecessary: from now on the boot
+ * can talk. It is kept because the next machine is also one nobody has tried,
+ * and if the screen itself is what fails again, this is what is left.
+ *
+ * Costs nothing when it is not asked for: with no bootstop= on the command line
+ * every call is a comparison against -1.
+ */
+
+/*
+ * The channel is the one thing a machine with no usable display can still say:
+ * it restarts. boot_stop(n) resets the machine at checkpoint n and does nothing
+ * anywhere else, and which checkpoint is chosen on the kernel command line - so
+ * one image answers every question, edited from the GRUB menu with `e` rather
+ * than rebuilt and written to a stick each time.
+ *
+ * A machine that restarts reached the checkpoint. A machine that stays dark did
+ * not, and the fault is between the last checkpoint that restarted and this one.
+ *
+ * The checkpoints, and they are numbered in the order the boot reaches them:
+ *
+ *   1  kernel_main entered and the command line was read
+ *   2  init_boot_verify() - serial, terminal, SMEP and SMAP
+ *   3  init_pmm() - the bootloader's memory map was digested
+ *   4  init_paging() - the kernel's own page directory is in CR3
+ *   5  the console installer was reached after paging
+ *   6  the framebuffer was re-mapped and the console took it
+ *
+ * The first attempt at a channel painted coloured bands into the framebuffer at
+ * its *physical* address, and it could never have worked: boot.asm identity maps
+ * the first sixteen megabytes and a real machine puts its framebuffer far above
+ * that. Every one of those writes went to an address with no page behind it, so
+ * the diagnostic died before the thing it was diagnosing. That mistake is what
+ * earlyfb.c exists to make impossible - it maps the framebuffer first, and then
+ * there is somewhere to write.
+ */
+static int boot_stop_at = -1;
+
+static void boot_stop_parse(void) {
+    /* Not const, because ft_strstr() does not take one - the same shape
+     * selftest.c reads the command line through a few files over. */
+    char *cmd = (char *)global_mboot_info.cmdline;
+
+    if (!(global_mboot_info.flags & MULTIBOOT_FLAG_CMDLINE) || cmd == 0) return;
+
+    const char *at = ft_strstr(cmd, "bootstop=");
+    int v = 0;
+
+    if (at == 0) return;
+    at += 9;
+
+    if (*at < '0' || *at > '9') return;
+    while (*at >= '0' && *at <= '9') v = v * 10 + (*at++ - '0');
+
+    boot_stop_at = v;
+}
+
+void boot_stop(int n) {
+    if (boot_stop_at != n) return;
+
+    /* The same ladder sys_reboot() uses, and for the same reason: no single one
+     * of these works on every machine. */
+    outb(0xCF9, 0x02);
+    outb(0xCF9, 0x06);
+    outb(0x64, 0xFE);
+
+    {
+        struct { uint16_t limit; uint32_t base; } __attribute__((packed)) null_idt = { 0, 0 };
+
+        asm volatile("lidt %0; int $3" : : "m"(null_idt));
+    }
+
+    for (;;) asm volatile("hlt");
+}
 
 /**
  * @brief early_get_kbd_char
@@ -381,62 +466,47 @@ static int init_boot_verify(multiboot_info_t* mboot_info) {
 }
 
 /**
- * @brief Moves the console onto the framebuffer the bootloader set up, if it did.
+ * @brief Reports what the screen turned out to be, and repaints it.
  *
- * Everything here is a refusal except the last two lines, and each refusal is a
- * machine this kernel can still boot on rather than a case that cannot happen.
- * A bootloader that ignored the video request reports no framebuffer; one that
- * could not set a graphics mode reports a text mode; one on a 64-bit machine may
- * report an address above four gigabytes. In every one of those the console
- * stays where it is, which is text mode, and the machine comes up.
+ * This used to be where the framebuffer was mapped and the console moved onto
+ * it, in the middle of the boot, because mapping needed page tables and page
+ * tables needed the allocator. That is why the five stages before it were blind
+ * on a machine with no text mode - which is every machine that boots UEFI, and
+ * which cost this project a release to find out.
  *
- * The failure that is worth being loud about is the one in the middle: a
- * framebuffer that was reported and could not be mapped. The screen is in a
- * graphics mode by then, so text-mode writes go nowhere visible and the machine
- * boots to what looks like a blank display. The log line is the only evidence,
- * which is why there is one.
+ * earlyfb.c does the mapping now, in the first line of kernel_main, and
+ * init_paging() carries the entry across into the directory it builds rather
+ * than remaking it. So by the time this runs the console has been drawing for
+ * some time and there is nothing left to install. What is left is to say what
+ * happened, once there is a log to say it in.
  */
 static void install_framebuffer_console(void) {
     const multiboot_info_t *mb = &global_mboot_info;
 
-    if (!(mb->flags & MULTIBOOT_FLAG_FRAMEBUFFER)) {
-        klog(LOG_LEVEL_INFO, "CONSOLE", "No framebuffer from the bootloader; staying in text mode.");
+    boot_stop(5);
+
+    if (!early_fb_present()) {
+        /*
+         * Whatever refused the screen refused it an instant into the boot, and
+         * early_fb_init() painted the reason where it could. Three of the five
+         * refusals have no mapping to paint through, and on a machine with text
+         * mode two of those are the case where the text backend is right and
+         * this line is visible.
+         */
+        klog(LOG_LEVEL_WARN, "CONSOLE",
+             "No usable framebuffer; the console is on its text backend.");
         return;
     }
 
-    if (mb->framebuffer_type != MULTIBOOT_FRAMEBUFFER_TYPE_RGB) {
-        klog(LOG_LEVEL_INFO, "CONSOLE", "Bootloader left the machine in text mode.");
-        return;
-    }
-
-    if (mb->framebuffer_addr_high != 0) {
-        klog(LOG_LEVEL_WARN, "CONSOLE", "Framebuffer is above 4 GB; this kernel cannot reach it.");
-        return;
-    }
-
-    uint32_t bytes = mb->framebuffer_pitch * mb->framebuffer_height;
-
-    void *base = vmm_map_device(mb->framebuffer_addr_low, bytes);
-    if (base == 0) {
-        klog(LOG_LEVEL_ERROR, "CONSOLE",
-             "Framebuffer could not be mapped; the screen will stay blank.");
-        return;
-    }
-
-    if (console_use_framebuffer(base, mb->framebuffer_pitch, mb->framebuffer_width,
-                                mb->framebuffer_height, mb->framebuffer_bpp) != E_OK) {
-        klog(LOG_LEVEL_ERROR, "CONSOLE",
-             "Framebuffer is in a pixel format this kernel cannot draw.");
-        return;
-    }
+    boot_stop(6);
 
     klog_int(LOG_LEVEL_INFO, "CONSOLE", "Framebuffer console active. Width",
              (int)mb->framebuffer_width);
 
     /*
-     * And now everything printed before the mapping appears at once. The
-     * terminal has been keeping its cell buffers the whole time; this is the
-     * first moment there is somewhere to draw them.
+     * A repaint rather than a first paint. The terminal's cell buffers have been
+     * drawn to all along; this puts the screen back in step with them after
+     * paging, which is the one thing that changed underneath it.
      */
     update_screen();
 }
@@ -448,8 +518,12 @@ static int init_memory_subsystem(void) {
     }
     boot_ok("Physical Memory Manager (PMM) Initialized");
 
+    boot_stop(3);
+
     init_paging();
     serial_print("[MAIN-DBG] Returned from init_paging()!\n");
+
+    boot_stop(4);
 
     uint32_t cr0;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -1165,6 +1239,39 @@ static int init_filesystem_and_vfs(void) {
     }
 
     /*
+     * And the one sentence that connects two facts this kernel already knows and
+     * has never said together.
+     *
+     * A machine with several xHCI controllers has one of them driven, and which
+     * one is chosen by what is attached to it. A boot stick is mass storage, so
+     * a controller carrying one wins that choice - and then the file system layer
+     * refuses the stick, correctly, because it holds an ISO image rather than an
+     * esdumanOS disk. Both decisions are right. Together they are a machine that
+     * boots to no file system while the disk somebody wants sits on the
+     * controller next door.
+     *
+     * The way out already exists and nothing pointed at it. Printed here rather
+     * than in vfs.c because this is the only place that knows both halves: that
+     * there is no file system, and that there is more than one controller to
+     * look for one on.
+     */
+    if (!fs_mounted) {
+        int controllers = pci_count_class_if(PCI_CLASS_SERIAL_BUS,
+                                             PCI_SUBCLASS_USB,
+                                             PCI_PROGIF_XHCI);
+
+        if (controllers > 1) {
+            printk("\n[VFS] This machine has %d USB controllers and this kernel drives one\n",
+                   controllers);
+            printk("      of them. A disk on any of the others is invisible from here.\n");
+            printk("      To use one, add `xhci=N` to the kernel command line - press `e`\n");
+            printk("      at the boot menu - where N is a number from the [XHCI] census\n");
+            printk("      above. The controller carrying the boot medium is the one that\n");
+            printk("      was chosen; a data disk will be on a different number.\n\n");
+        }
+    }
+
+    /*
      * Between the mount and the first write. Everything below this line that
      * touches /etc goes through fs_create_file(), which encrypts under the
      * security level's default - so the key has to be in hand before the first
@@ -1462,9 +1569,52 @@ void kernel_main(uint32_t magic, multiboot_info_t* mboot_info) {
         kernel_panic("Multiboot Error: Invalid magic number!");
     }
 
+    boot_stop_parse();
+    boot_stop(1);
+
+    /*
+     * The screen, before anything that could need to complain about it.
+     *
+     * This is the line v1.13.0 exists for. Until it was here the framebuffer was
+     * mapped in the middle of init_memory_subsystem(), and the five stages
+     * before that drew into text-mode video memory - which on a machine the
+     * bootloader left in a graphics mode is nowhere. On the first physical
+     * machine this project was tried on, that made the first half of the boot
+     * silent, and every failure in it produced the same black screen.
+     *
+     * It needs no allocator and no page tables: a 4 MB page needs neither, and
+     * boot.asm's directory is still the one in CR3. Which is why it can be the
+     * first thing that happens rather than the fifth.
+     */
+    {
+        early_fb_status_t fb = early_fb_init(&global_mboot_info);
+
+        if (fb == EARLY_FB_BAD_FORMAT) early_fb_fill(EARLY_FB_COLOUR_BAD_FORMAT);
+
+        /*
+         * The answer, on the one channel a machine with no screen still has.
+         *
+         * Three of the five refusals cannot paint a colour, because refusing is
+         * exactly the case where there is no mapping to paint through - so on a
+         * machine that shows nothing, "which refusal was it" has no other way
+         * out. bootstop=10 through 15 each reset the machine for one status and
+         * ignore the rest, so the one that restarts is the one that happened:
+         *
+         *   10  EARLY_FB_OK          the screen was mapped and taken
+         *   11  EARLY_FB_NONE        the bootloader reported no framebuffer
+         *   12  EARLY_FB_NOT_RGB     it is a text mode or a paletted one
+         *   13  EARLY_FB_ABOVE_4G    its address needs more than 32 bits
+         *   14  EARLY_FB_TOO_LARGE   it does not fit the window
+         *   15  EARLY_FB_BAD_FORMAT  a depth or pitch this kernel cannot draw
+         */
+        boot_stop(10 + (int)fb);
+    }
+
     if (init_boot_verify(&global_mboot_info) != 0) {
         kernel_panic("Boot verification failed!");
     }
+
+    boot_stop(2);
 
     /*
      * The first line either path leaves behind, and it is here rather than above

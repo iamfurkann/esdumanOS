@@ -444,6 +444,73 @@ static void run_device_assertions(void) {
                  "[STRICT] [XHCI] and its speed is a named one, which it only is after a reset");
 }
 
+/**
+ * @brief The policy that decides which of several controllers gets driven.
+ *
+ * Pure, and asserted for the reason the PSE-36 arithmetic and the SuperSpeed
+ * packet size were: the interesting orderings are the ones this bench will never
+ * produce. Here the decoy controller is empty and the real one has disks, so the
+ * scan only ever compares XHCI_RANK_EMPTY against XHCI_RANK_STORAGE. The machine
+ * that made this release necessary compares a controller with a webcam on it
+ * against one with a disk, and no target in this tree can be made to do that.
+ */
+static void run_rank_assertions(void) {
+    KTEST_ASSERT(xhci_rank(0, 4, 1, 1) == XHCI_RANK_UNUSABLE,
+                 "[STRICT] [XHCI] a controller that would not come up ranks last whatever was plugged into it");
+    KTEST_ASSERT(xhci_rank(1, 0, 0, 0) == XHCI_RANK_EMPTY,
+                 "[STRICT] [XHCI] one that runs with nothing attached still outranks one that would not run");
+    KTEST_ASSERT(xhci_rank(1, 3, 0, 0) == XHCI_RANK_DEVICES,
+                 "[STRICT] [XHCI] devices this kernel cannot drive rank above no devices at all");
+    KTEST_ASSERT(xhci_rank(1, 1, 1, 0) == XHCI_RANK_KEYBOARD,
+                 "[STRICT] [XHCI] a keyboard outranks a device nothing here can use");
+    KTEST_ASSERT(xhci_rank(1, 1, 0, 1) == XHCI_RANK_STORAGE,
+                 "[STRICT] [XHCI] and a disk outranks a keyboard, being the one the boot cannot continue without");
+    KTEST_ASSERT(xhci_rank(1, 2, 1, 1) == XHCI_RANK_STORAGE,
+                 "[STRICT] [XHCI] a controller with both is chosen for the disk");
+
+    /*
+     * The scan compares these with > and keeps the first of any tie, so a
+     * non-strict ordering would make its answer depend on enumeration order
+     * again - which is the whole thing this release removed.
+     */
+    KTEST_ASSERT(XHCI_RANK_UNUSABLE < XHCI_RANK_EMPTY &&
+                 XHCI_RANK_EMPTY    < XHCI_RANK_DEVICES &&
+                 XHCI_RANK_DEVICES  < XHCI_RANK_KEYBOARD &&
+                 XHCI_RANK_KEYBOARD < XHCI_RANK_STORAGE,
+                 "[STRICT] [XHCI] the ranks are strictly ordered, so the scan never breaks a tie by position");
+
+    KTEST_ASSERT(xhci_rank(1, 99, 0, 0) == xhci_rank(1, 1, 0, 0),
+                 "[STRICT] [XHCI] how many unusable devices hang off a controller does not change its rank");
+    KTEST_ASSERT(xhci_rank(1, 0, 0, 0) > XHCI_RANK_UNUSABLE,
+                 "[STRICT] [XHCI] no rank a working controller can earn is one the scan refuses to choose");
+}
+
+/**
+ * @brief That the scan actually walked past the controller it found first.
+ *
+ * The bench puts an empty xHCI controller ahead of the one carrying the disks,
+ * which is the machine that made this release necessary reduced to two
+ * controllers. Every release up to v1.12.0 would drive the empty one, find
+ * nothing, and report a bus with no storage - truthfully, about the wrong
+ * controller.
+ *
+ * So the third assertion is the regression test, and it is a strong one: the
+ * disks are only reachable from the second controller, so a driver that still
+ * kept the first cannot pass it by any other route.
+ */
+static void run_selection_assertions(void) {
+    int controllers = pci_count_class_if(PCI_CLASS_SERIAL_BUS,
+                                         PCI_SUBCLASS_USB,
+                                         PCI_PROGIF_XHCI);
+
+    KTEST_ASSERT(controllers >= 2,
+                 "[STRICT] [XHCI] this bench presents more than one controller, so the scan has a choice to make");
+    KTEST_ASSERT(xhci_running(),
+                 "[STRICT] [XHCI] and the driver settled on one that is running");
+    KTEST_ASSERT(xhci_storage_device_next(-1) >= 0,
+                 "[STRICT] [XHCI] and it is the one with the disks on it, not the empty one it found first");
+}
+
 void run_xhci_tests(void) {
     printk("\n--- XHCI and USB Bus Tests ---\n");
 
@@ -454,6 +521,8 @@ void run_xhci_tests(void) {
     run_register_field_assertions();
     run_descriptor_walk_assertions();
     run_lookup_assertions();
+    run_rank_assertions();
+    run_selection_assertions();
     run_controller_assertions();
     run_device_assertions();
     run_inventory_assertions();

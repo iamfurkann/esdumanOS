@@ -279,15 +279,46 @@ const pci_device_t *pci_find(uint8_t bus, uint8_t device, uint8_t function) {
     return 0;
 }
 
-const pci_device_t *pci_find_class_if(uint8_t class_code, uint8_t subclass,
-                                      uint8_t prog_if) {
+int pci_count_class_if(uint8_t class_code, uint8_t subclass, uint8_t prog_if) {
+    int n = 0;
+
     for (int i = 0; i < pci_count; i++) {
         if (pci_devices[i].class_code != class_code) continue;
         if (subclass != PCI_MATCH_ANY && pci_devices[i].subclass != subclass) continue;
         if (prog_if  != PCI_MATCH_ANY && pci_devices[i].prog_if  != prog_if)  continue;
-        return &pci_devices[i];
+        n++;
+    }
+    return n;
+}
+
+const pci_device_t *pci_nth_class_if(uint8_t class_code, uint8_t subclass,
+                                     uint8_t prog_if, int n) {
+    int seen = 0;
+
+    /*
+     * A negative index is a caller that lost count rather than a request for the
+     * last match, so it finds nothing. xhci_storage_device_next() takes the
+     * opposite position about -1 because there it means "start at the
+     * beginning"; here there is no such reading to give it.
+     */
+    if (n < 0) return 0;
+
+    for (int i = 0; i < pci_count; i++) {
+        if (pci_devices[i].class_code != class_code) continue;
+        if (subclass != PCI_MATCH_ANY && pci_devices[i].subclass != subclass) continue;
+        if (prog_if  != PCI_MATCH_ANY && pci_devices[i].prog_if  != prog_if)  continue;
+        if (seen++ == n) return &pci_devices[i];
     }
     return 0;
+}
+
+/*
+ * The first match, expressed as the zeroth one. Same argument as pci_find_class()
+ * below: a second copy of the match rule is a second place for it to drift.
+ */
+const pci_device_t *pci_find_class_if(uint8_t class_code, uint8_t subclass,
+                                      uint8_t prog_if) {
+    return pci_nth_class_if(class_code, subclass, prog_if, 0);
 }
 
 /*

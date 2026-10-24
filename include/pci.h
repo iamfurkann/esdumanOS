@@ -33,8 +33,26 @@
  * number instead of a memory condition discovered at boot. A machine with more
  * than this many functions gets the first PCI_MAX_DEVICES of them and a log line
  * saying so - the count stops, it does not wrap and it does not overflow.
+ *
+ * It was 32 until v1.13.0, and 32 was a number taken from QEMU. The machine this
+ * project is aimed at answers on far more than that on bus zero alone - an AMD
+ * SoC publishes host bridges, IOMMUs, PCIe ports, SMBus and audio functions
+ * before it gets anywhere near the USB controllers - so the enumeration filled
+ * up and stopped, the xHCI controllers were among what it never reached, and the
+ * kernel reported "no xHCI controller on the bus" on a laptop with four of them.
+ * Which is not a lie: the driver asked the inventory, and the inventory was
+ * truncated.
+ *
+ * The truncation was logged the whole time. It said "list truncated at 32
+ * entries" and nothing connected that line to the missing USB, because the two
+ * are eleven files apart - one of them a bounded table doing exactly what it
+ * documented, the other a driver correctly reporting what it was told.
+ *
+ * 192 entries at 40 bytes is 7.5 KB of BSS. The number is still a documented
+ * ceiling rather than a promise, but it is now above what a real machine
+ * produces rather than above what an emulator does.
  */
-#define PCI_MAX_DEVICES 32
+#define PCI_MAX_DEVICES 192
 
 /**
  * @brief Buffer the rendered inventory needs, terminator included.
@@ -250,6 +268,46 @@ const pci_device_t *pci_find_class(uint8_t class_code, uint8_t subclass);
  */
 const pci_device_t *pci_find_class_if(uint8_t class_code, uint8_t subclass,
                                       uint8_t prog_if);
+
+/**
+ * @brief Finds the @p n th match rather than the first.
+ *
+ * pci_find_class_if() answers with the first match because for most of this
+ * kernel's history one of anything was all there was. That held until a real
+ * machine turned out to have five xHCI controllers, with the USB devices spread
+ * over them and none of them on the first - at which point "the first" stopped
+ * being a simplification and became the reason the disk was invisible.
+ *
+ * A driver that can only run one controller at a time still needs to be able to
+ * look at the others before it chooses, and this is how it walks them. The order
+ * is the enumeration order, which is bus, then device, then function: stable
+ * across boots of the same machine, and meaningless as a ranking - the caller
+ * chooses on what it finds, not on where it found it.
+ *
+ * @param class_code The class to look for.
+ * @param subclass The subclass, or PCI_MATCH_ANY for any subclass.
+ * @param prog_if The programming interface, or PCI_MATCH_ANY for any.
+ * @param n Which match to return, counted from zero.
+ * @return The entry, or 0 when there are @p n or fewer matches.
+ */
+const pci_device_t *pci_nth_class_if(uint8_t class_code, uint8_t subclass,
+                                     uint8_t prog_if, int n);
+
+/**
+ * @brief How many functions match a class, subclass and programming interface.
+ *
+ * pci_find_class_if() answers with the first, which is all a driver that can
+ * only handle one of something needs - and is exactly why nothing said how many
+ * there were. On the first real machine this project ran on there are several
+ * xHCI controllers, the USB devices were spread across them, and the driver
+ * reported a bus with one device on it. Truthfully: it had looked at one
+ * controller. Nothing anywhere said there were others.
+ *
+ * A count does not fix that. It makes it sayable, which is the difference
+ * between a limit somebody can work around and a machine that appears to be
+ * missing hardware.
+ */
+int pci_count_class_if(uint8_t class_code, uint8_t subclass, uint8_t prog_if);
 
 /**
  * @brief A short human name for a class and subclass pair.

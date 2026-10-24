@@ -63,23 +63,51 @@
 #define TEMP_MAP_VADDR     0xE0000000
 
 /**
+ * @brief The framebuffer's own window, at a fixed address and reserved for it.
+ *
+ * Fixed, because the mapping is made once and then carried. earlyfb.c writes it
+ * into the page directory boot.asm built, so that the first line of kernel_main
+ * can draw, and init_paging() copies the entry into the directory that replaces
+ * that one rather than building a page table over it. The address never changes
+ * and the mapping is never absent for an instruction - which is a stronger thing
+ * than a handover done carefully, because there is no moment to get wrong.
+ *
+ * The first version did re-map it after paging, and the window between the two
+ * was real: the console was live, the address was dead, and the first printk()
+ * after init_paging() was a page fault inside this range.
+ *
+ * Reserved, for the other half of the same reason: a driver that mapped its
+ * registers here first would take the address the framebuffer is going to be at.
+ * "It happens to be the first caller" is not a rule anybody could rely on.
+ *
+ * 64 MB. A 4K panel at 32 bits per pixel is 31.6 MB and this project has never
+ * met anything larger; the rest is room for a panel that has not been met yet.
+ */
+#define FB_WINDOW_BASE     0xE1000000
+#define FB_WINDOW_END      0xE5000000
+
+/**
  * @brief The window device registers and DMA buffers are mapped into.
  *
  * Kernel space is 0xC0000000 upwards and most of it is empty: the first 16 MB of
  * physical memory sits at 0xC0000000, the kernel heap grows upwards from
- * 0xD0000000, TEMP_MAP_VADDR takes a single page at 0xE0000000, and the
- * recursive page tables live at the very top. Everything from here to
- * DEVICE_WINDOW_END was unclaimed, and a driver needs somewhere to put a
- * controller's registers that is not backed by RAM.
+ * 0xD0000000, TEMP_MAP_VADDR takes a single page at 0xE0000000, the framebuffer
+ * has the window above, and the recursive page tables live at the very top.
+ * Everything from here to DEVICE_WINDOW_END was unclaimed, and a driver needs
+ * somewhere to put a controller's registers that is not backed by RAM.
  *
- * 16 MB, which is far more than anything this kernel will map - an AHCI
- * controller's register file is under 8 KB - and it costs nothing but address
- * space on a machine that has 128 MB of memory and 4 GB of addresses.
+ * 176 MB, and it was 16 until v1.13.0. The old comment said 16 MB was "far more
+ * than anything this kernel will map - an AHCI controller's register file is
+ * under 8 KB", and that was written before v1.6.0 put a framebuffer through the
+ * same window: a 1920x1080 panel is 7.9 MB of it and a 2560x1440 one is 14.1,
+ * which left almost nothing for the ACPI tables, the xHCI controller and the
+ * disk. A 4K panel did not fit at all. Address space is the one thing this
+ * kernel has plenty of.
  */
-#define DEVICE_WINDOW_BASE 0xE1000000
+#define DEVICE_WINDOW_BASE 0xE5000000
 
 /** @brief One past the last address vmm_map_device() will hand out. */
-#define DEVICE_WINDOW_END  0xE2000000
+#define DEVICE_WINDOW_END  0xF0000000
 
 /**
  * @brief Standard page size (4 KB).
@@ -176,6 +204,7 @@ int map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
  *         mapping was refused.
  */
 void *vmm_map_device(uint32_t phys, uint32_t size);
+
 
 /**
  * @brief Unmaps a previously mapped virtual address.

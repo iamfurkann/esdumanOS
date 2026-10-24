@@ -1,3 +1,6 @@
+# Included dependency files must not choose a single object as the default goal.
+.DEFAULT_GOAL := all
+
 ifndef ESDUMAN_ELF_KEY_HEX
 $(error ERROR: ESDUMAN_ELF_KEY_HEX is not set! Must be exactly 64 hex characters (32 bytes AES key). Build aborted.)
 endif
@@ -102,6 +105,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_usbmsc.c \
             tests/kernel/test_mount.c \
             tests/kernel/test_acpi.c \
+            tests/kernel/test_earlyfb.c \
             tests/kernel/test_console.c \
             tests/kernel/test_keyslot.c \
             tests/kernel/test_string.c \
@@ -225,7 +229,12 @@ ifeq ($(ARCH), x86)
     # reads the same in an interactive log as in a test one. Without them QEMU
     # inserts a hub and puts the second stick behind it, where this driver
     # cannot see it.
-    QEMU_USB = -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0,port=2 \
+    #
+    # The empty decoy controller in front, matching the test bench, so that a
+    # person watching a boot by hand sees the same two lines the assertions see:
+    # a controller passed over, and the one behind it kept. `lspci` lists both.
+    QEMU_USB = -device qemu-xhci,id=xhcidecoy \
+               -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0,port=2 \
                -drive id=usbstick,if=none,format=raw,file=usb.img \
                -device usb-storage,drive=usbstick,bus=xhci.0,port=3 \
                -drive id=usbstick2,if=none,format=raw,file=usb2.img \
@@ -242,6 +251,7 @@ ifeq ($(ARCH), x86)
                 mm/paging_s.asm
 
     ARCH_C_SRCS = arch/x86/boot/multiboot2.c \
+                arch/x86/boot/earlyfb.c \
                 arch/x86/cpu/gdt.c \
                 arch/x86/cpu/idt.c \
                 arch/x86/cpu/isr.c \
@@ -433,32 +443,71 @@ QEMU_TEST_CPU ?=
 # `port=` keeps all four on the root hub. It also puts both sticks at SuperSpeed,
 # which is worth knowing: it makes this the first bench in the project's history
 # where the SuperSpeed path is exercised at all.
-QEMU_TEST_USB ?= -device qemu-xhci,id=xhci \
+#
+# And the empty controller in front of everything, which is the only reason any
+# of this bench exercises the code v1.13.0 added. On a machine with one xHCI
+# controller the driver still does what it always did - finds it, brings it up,
+# keeps it - and every target in this tree was such a machine, so the scan that
+# picks between several would have shipped never having run.
+#
+# The first real machine had five controllers with nothing on the first one, and
+# the driver dutifully drove it and reported a bus with no disk. This decoy is
+# that machine in miniature: the scan has to bring up a controller with nothing
+# attached, halt it, forget every register offset and ring pointer it learned,
+# and come back with the second one intact. All four assertions about the two
+# sticks then have to hold, on a controller that is no longer the first one
+# found.
+QEMU_TEST_USB ?= -device qemu-xhci,id=xhcidecoy \
+                 -device qemu-xhci,id=xhci \
                  -device usb-kbd,bus=xhci.0,port=1 \
                  -device usb-mouse,bus=xhci.0,port=2 \
-                 -drive id=usbstick,if=none,format=raw,file=usb.img \
+                 -drive id=usbstick,if=none,format=raw,file=$(RUN)/usb.img \
                  -device usb-storage,drive=usbstick,bus=xhci.0,port=3 \
-                 -drive id=usbstick2,if=none,format=raw,file=usb2.img \
+                 -drive id=usbstick2,if=none,format=raw,file=$(RUN)/usb2.img \
                  -device usb-storage,drive=usbstick2,bus=xhci.0,port=4
 
-# Run a single test module instead of all of them: make test_kernel MODULE=fork
+# $(RUN) above resolves inside each target's recipe, not here. It is a
+# target-specific variable and this is a recursively-expanded one, so the sticks
+# follow whichever target is running - which is what lets the four run at once.
+
+# Run some of the test modules instead of all of them:
+#
+#     make test_kernel MODULE=fork
+#     make test_kernel MODULE=xhci,usbmsc,mount,blockdev
 #
 # A full run boots the OS and executes every module, which under nested emulation
 # costs minutes whether or not the change being tested touches any of it. The
-# name is appended to the kernel command line and selftest.c looks it up in its
-# module table; an unknown name lists what is available and fails, rather than
-# running nothing and reporting a pass.
+# names are appended to the kernel command line and selftest.c looks each one up
+# in its module table; an unknown name lists what is available and fails, rather
+# than running nothing and reporting a pass.
 #
-# "ring3" runs only the user-mode payload. An empty MODULE runs everything, which
-# is what CI does and what a release has to pass.
+# A list rather than a name, because of what the two cost. Measured on the
+# development VM: a full run is about five minutes, a single-module run about
+# forty-five seconds, and nearly all of that forty-five is the boot. So four
+# modules in one boot cost about what one does, and four boots cost four times as
+# much - which made naming one module the wrong unit. A change to the USB driver
+# has to be checked against xhci, usbmsc, mount and blockdev, and with one name
+# the only thing that covered it was the whole suite.
+#
+# "ring3" names the user-mode payload and may appear in the list with the others.
+# An empty MODULE runs everything, which is what CI does and what a release has
+# to pass.
 MODULE ?=
+
+# Spaces removed rather than rejected. The kernel command line is split on
+# spaces, so `MODULE="xhci, usbmsc"` would arrive as "xhci," alone - a list
+# silently shortened to its first entry, which is the failure that looks like a
+# pass. Written this way because make has no literal for a space.
+empty :=
+space := $(empty) $(empty)
+
 ifeq ($(strip $(MODULE)),)
     KERNEL_PASS := selftest
 else
-    KERNEL_PASS := selftest:$(strip $(MODULE))
+    KERNEL_PASS := selftest:$(subst $(space),,$(strip $(MODULE)))
 endif
 
-.PHONY: all clean run run_text run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_kernel_uefi test_smap fuzz start
+.PHONY: all clean run run_text run-dev debug restart reset-disk test test_kernel test_kernel_q35 test_kernel_uefi test_smap test_build test_matrix fuzz start
 
 all: $(ISO)
 
@@ -624,7 +673,17 @@ src/resources/init_elf_data.c: apps/init_encrypted.elf
 	xxd -i apps/init_encrypted.elf | \
 	sed 's/apps_init_encrypted_elf/init_elf/g' > src/resources/init_elf_data.c
 
-src/resources/hello_elf_data.c: hello.elf
+# tools/encrypt_tool is named here because the recipe below runs it, and that is
+# the whole of the rule for declaring a prerequisite. It was missing, and the
+# twenty-six rules beside this one all have it.
+#
+# Serially the omission is invisible: some earlier rule that does declare the
+# tool has always built it by the time make arrives here, so the ordering that
+# makes this work is an accident of the prerequisite list rather than anything
+# stated. Under `make -j` the accident stops holding - make is free to start this
+# recipe while gcc is still writing the tool - and the build fails with a missing
+# file, intermittently, depending on how the jobs happen to land.
+src/resources/hello_elf_data.c: hello.elf tools/encrypt_tool
 	@mkdir -p src/resources
 	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@xxd -i apps/hello_encrypted.elf | \
@@ -786,20 +845,76 @@ test:
 # share one tree, so every test run began by deleting every object and paying for
 # a full rebuild, and a production image built without `make clean` first would
 # quietly inherit the reduced iteration count. Separate trees end both.
-test_kernel: hello.elf
+# Where a test target keeps the disks it invents, one directory per target.
+#
+# All four used to write disk.img, usb.img, usb2.img, message.txt and gizli.txt
+# into the working directory, which had two consequences and neither was
+# intended. They could not run at the same time, so the matrix cost the sum of
+# four runs rather than the longest of them - nineteen minutes on the machine
+# this was measured on, against five. And they overwrote the disk.img that `make
+# run` keeps its file system on, so running the suite threw away whatever an
+# interactive session had been doing.
+#
+# Under build/, so `make clean` already removes it.
+TESTRUN_ROOT := build/testrun
+
+# The build, named once, so that four targets asked for together build it once.
+#
+# Each of the four used to begin by delegating to this same sub-make. Run singly
+# that is correct and idempotent; run with -j it is four processes deciding
+# whether the same tree needs rebuilding, and $(LIBC) is unconditional - it
+# delegates every time. As a shared prerequisite make does the sequencing itself,
+# which is the difference between "they happen not to collide" and "they cannot".
+.PHONY: test_build
+test_build: hello.elf
 	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+
+test_kernel:      RUN := $(TESTRUN_ROOT)/bios
+test_kernel_q35:  RUN := $(TESTRUN_ROOT)/q35
+test_kernel_uefi: RUN := $(TESTRUN_ROOT)/uefi
+test_smap:        RUN := $(TESTRUN_ROOT)/smap
+
+# All four kernel targets at once, on a machine with cores to spare.
+#
+# The build is taken first and alone, so the four QEMU runs start against a tree
+# nobody is still writing to. --output-sync=target holds each target's output
+# until it finishes, because four suites interleaving 1572 PASS lines is not a
+# transcript anybody can read.
+#
+# -j4 rather than -j$(nproc): these are four TCG guests and each is one thread,
+# so more jobs than targets buys nothing and leaves the host nothing to run the
+# host tests on.
+#
+# And a longer deadline than a run on its own gets, because the deadline is what
+# tells a hung kernel from a slow one and running four at once makes every one of
+# them slower. Measured: a solo run takes about 280 seconds and the same run in
+# the matrix takes close to 600, which is where QEMU_TEST_TIMEOUT sits. A suite
+# that passes alone and reports KERNEL HUNG in the matrix would be the harness
+# accusing the kernel of a fault the harness caused.
+#
+# It does not weaken the check. A kernel that has actually halted still never
+# reports, and waiting twenty minutes to say so costs nothing that matters.
+QEMU_MATRIX_TIMEOUT ?= 1800
+
+.PHONY: test_matrix
+test_matrix: test_build
+	@$(MAKE) -j4 --output-sync=target QEMU_TEST_TIMEOUT=$(QEMU_MATRIX_TIMEOUT) \
+		test_kernel test_kernel_q35 test_kernel_uefi test_smap
+
+test_kernel: test_build
+	@mkdir -p $(RUN)
 	@echo "--- Running Kernel QEMU Self-Tests (PBKDF2=$(PBKDF2_TEST_ITERATIONS) iterations, CPU='$(QEMU_TEST_CPU)') ---"
-	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
-	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
+	@echo "Merhaba Hard Disk! Ben esdumanOS!" > $(RUN)/message.txt
+	@echo "Bu bir esdumanOS gizli metin belgesidir!" > $(RUN)/gizli.txt
+	@dd if=$(RUN)/message.txt of=$(RUN)/disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) $(QEMU_TEST_CPU) -append "kernel_pass=$(KERNEL_PASS)" \
-		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-d int,cpu_reset -D qemu.log \
+		-d int,cpu_reset -D $(RUN)/qemu.log \
 		-serial stdio -display none -no-reboot; then \
 		echo "ERROR: QEMU exited unexpectedly!"; exit 1; \
 	else \
@@ -839,21 +954,21 @@ test_kernel: hello.elf
 # It reports the same number of assertions as test_kernel. If it ever does not,
 # some assertion has learned which machine it is running on, and that is worth
 # knowing rather than working around.
-test_kernel_q35:
-	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+test_kernel_q35: test_build
+	@mkdir -p $(RUN)
 	@echo "--- Running Kernel QEMU Self-Tests on q35 (disk behind AHCI) ---"
-	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
-	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
+	@echo "Merhaba Hard Disk! Ben esdumanOS!" > $(RUN)/message.txt
+	@echo "Bu bir esdumanOS gizli metin belgesidir!" > $(RUN)/gizli.txt
+	@dd if=$(RUN)/message.txt of=$(RUN)/disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -M q35 -kernel $(TEST_BIN) $(QEMU_TEST_CPU) \
 		-append "kernel_pass=$(KERNEL_PASS)" \
-		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-d int,cpu_reset -D qemu_q35.log \
+		-d int,cpu_reset -D $(RUN)/qemu.log \
 		-serial stdio -display none -no-reboot; then \
 		echo "ERROR: QEMU exited unexpectedly!"; exit 1; \
 	else \
@@ -907,7 +1022,11 @@ test_kernel_q35:
 # and a free-range search. That is a release of its own, and it is only worth
 # doing if a real machine turns out to place this controller high, which the
 # fixed-function xHCI in a PCH does not.
-UEFI_TEST_ISO = esdumanOS-uefi-test.iso
+# Inside the UEFI target's own run directory, like everything else it invents.
+# Written literally rather than through $(RUN) because this is a global variable
+# and $(RUN) only has a value inside a recipe; the UEFI target's directory is
+# fixed, so naming it here costs nothing and keeps `make clean` able to see it.
+UEFI_TEST_ISO = $(TESTRUN_ROOT)/uefi/esdumanOS-uefi-test.iso
 
 # Where the firmware lives, as a variable because distributions disagree. Debian
 # puts it here; Fedora uses /usr/share/edk2/ovmf/OVMF_CODE.fd.
@@ -925,8 +1044,8 @@ OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 # project meets is one nobody has tried yet; a test target that quietly fell back
 # would report a pass for a boot path that is broken, which is the opposite of
 # what it is for.
-test_kernel_uefi:
-	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+test_kernel_uefi: test_build
+	@mkdir -p $(RUN)
 	@test -f $(OVMF_CODE) || { \
 		echo "ERROR: UEFI firmware not found at $(OVMF_CODE)."; \
 		echo "       Install the 'ovmf' package, or set OVMF_CODE and OVMF_VARS."; \
@@ -939,25 +1058,25 @@ test_kernel_uefi:
 		exit 1; \
 	}
 	@echo "--- Running Kernel QEMU Self-Tests under UEFI (booted by GRUB) ---"
-	@rm -rf isodir_uefi
-	@mkdir -p isodir_uefi/boot/grub
-	@cp $(TEST_BIN) isodir_uefi/boot/myos.bin
-	@printf 'set default=0\nset timeout=0\ninsmod all_video\ninsmod multiboot2\n\nmenuentry "esdumanOS self-test" {\n    multiboot2 /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > isodir_uefi/boot/grub/grub.cfg
-	@grub-mkrescue -o $(UEFI_TEST_ISO) isodir_uefi > /dev/null 2>&1
-	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > gizli.txt
-	@dd if=message.txt of=disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
-	@cp $(OVMF_VARS) /tmp/esdumanos_ovmf_vars.fd
-	@chmod u+w /tmp/esdumanos_ovmf_vars.fd
+	@rm -rf $(RUN)/isodir
+	@mkdir -p $(RUN)/isodir/boot/grub
+	@cp $(TEST_BIN) $(RUN)/isodir/boot/myos.bin
+	@printf 'set default=0\nset timeout=0\ninsmod all_video\ninsmod multiboot2\n\nmenuentry "esdumanOS self-test" {\n    multiboot2 /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > $(RUN)/isodir/boot/grub/grub.cfg
+	@grub-mkrescue -o $(UEFI_TEST_ISO) $(RUN)/isodir > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
+	@echo "Merhaba Hard Disk! Ben esdumanOS!" > $(RUN)/message.txt
+	@echo "Bu bir esdumanOS gizli metin belgesidir!" > $(RUN)/gizli.txt
+	@dd if=$(RUN)/message.txt of=$(RUN)/disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
+	@cp $(OVMF_VARS) $(RUN)/ovmf_vars.fd
+	@chmod u+w $(RUN)/ovmf_vars.fd
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) qemu-system-x86_64 -M q35 \
 		-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
-		-drive if=pflash,format=raw,file=/tmp/esdumanos_ovmf_vars.fd \
+		-drive if=pflash,format=raw,file=$(RUN)/ovmf_vars.fd \
 		-cdrom $(UEFI_TEST_ISO) -boot d \
-		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none -no-reboot; then \
@@ -980,14 +1099,14 @@ test_kernel_uefi:
 # in which the uaccess paths are actually enforced by hardware. Gated on the same
 # exit codes as test_kernel: a supervisor access to user memory that bypasses
 # copy_to_user() faults here and must fail the build rather than be swallowed.
-test_smap:
-	@$(MAKE) BUILD=test EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=$(PBKDF2_TEST_ITERATIONS)' $(TEST_BIN)
+test_smap: test_build
+	@mkdir -p $(RUN)
 	@echo "[SMAP TEST] Running kernel self-tests with -cpu max (SMEP/SMAP enabled)..."
-	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
+	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=$(KERNEL_PASS)" \
-		-drive format=raw,file=disk.img,if=ide,index=0,media=disk \
+		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio -display none -no-reboot; then \
@@ -1091,8 +1210,19 @@ clean:
 	rm -f $(ARCH_C_SRCS:.c=.o) $(ARCH_C_SRCS:.c=.d)
 	rm -f $(ARCH_ASM_SRCS:.asm=.o)
 	rm -f lib/*.o lib/*.d lib/libc.a
-	# Left by the test targets: QEMU's instruction log and the host SAST binary.
-	rm -f qemu.log qemu_q35.log
+	# Left by the test targets before they were given run directories of their
+	# own: the instruction logs, the scratch disks and the UEFI ISO all sat in
+	# the working directory. `rm -rf build` above reaches where they live now, so
+	# these lines are for a tree checked out before that change - and for the
+	# disk.img `make run` still keeps here, which is deliberately not one of them.
+	#
+	# usb.img and usb2.img are not in the list, and disk.img never was. Those
+	# three are `make run`'s disks and may hold whatever an interactive session
+	# put on them; the test targets used to overwrite them and no longer do, so
+	# deleting them here would be this change taking away with one hand what it
+	# just gave with the other. `make reset-disk` is where that decision lives.
+	rm -f qemu.log qemu_q35.log esdumanOS-uefi-test.iso message.txt gizli.txt
+	rm -rf isodir_uefi
 	rm -rf tests/host/bin
 	# Not removed on purpose: .vscode/ and compile_commands.json are editor state,
 	# not build output. Deleting the compilation database would silently break

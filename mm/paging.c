@@ -11,6 +11,7 @@
 #include "errno.h"
 #include "serial.h"
 #include "uaccess.h"
+#include "earlyfb.h"
 uint32_t *page_directory;
 
 /**
@@ -35,6 +36,28 @@ void init_paging(void) {
     // Pre-allocate ALL page tables for the Kernel Space (3GB - 4GB)
     // Indices 768 to 1022 (1023 is recursive mapping)
     for (int i = 0; i < (1023 - 768); i++) {
+        /*
+         * The framebuffer's indices are carried over from the directory boot.asm
+         * built rather than given a page table of their own.
+         *
+         * earlyfb.c mapped the screen with 4 MB pages before any of this existed,
+         * and the console has been drawing there since the first line of
+         * kernel_main. Building an empty page table over those indices unmaps it
+         * the instant this directory is loaded - which it did, and the first
+         * printk() after paging was a page fault inside the framebuffer window.
+         *
+         * Copying the entry means the mapping is present in both directories and
+         * absent for no instruction at all. A re-map afterwards would have worked
+         * too, and would have left a window between the load and the re-map with
+         * a live console pointing into nothing.
+         */
+        uint32_t fb_pde = early_fb_pde(768 + i);
+
+        if (fb_pde != 0) {
+            pd_virt[768 + i] = fb_pde;
+            continue;
+        }
+
         uint32_t pt_phys = pmm_alloc_frame();
         if (pt_phys == 0xFFFFFFFF) kernel_panic("OOM while pre-allocating kernel PTs");
         volatile uint32_t *pt_virt = (volatile uint32_t *)(pt_phys + 0xC0000000);
@@ -148,8 +171,9 @@ void unmap_page(uint32_t virtual_addr) {
  * Device mappings in this kernel are taken once, on the boot path, by a driver
  * that is never unloaded - there is no mechanism to unload one - so a free list
  * would be a structure with no caller, which this project deletes. The window is
- * 16 MB and the only thing that maps into it needs 8 KB; if that ever stops
- * being true, the release that makes it untrue is the release that grows this.
+ * 176 MB now and the largest thing in it is an xHCI controller's register file;
+ * the framebuffer, which is what made the old 16 MB too small, has a window of
+ * its own above and does not come through here at all.
  */
 static uint32_t device_window_next = DEVICE_WINDOW_BASE;
 

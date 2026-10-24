@@ -259,10 +259,10 @@ void sys_panic(arch_regs_t *regs) {
 /**
  * @brief Writes every dirty block-cache sector out to disk.
  *
- * The cache is write-back, and the automatic policy only promises that dirty data
- * reaches the platter within BCACHE_FLUSH_INTERVAL_TICKS or once
- * BCACHE_DIRTY_HIGH_WATER slots are outstanding. A caller that has just written
- * something it cannot afford to lose needs a way to close that window itself.
+ * The cache is write-back. Its automatic policy attempts writes after a delay
+ * or at a dirty-sector threshold. This explicit path reports whether the device
+ * accepted all pending sectors; it is not a hardware write-cache barrier or a
+ * filesystem transaction.
  *
  * Unprivileged on purpose: it writes back data the caller was already allowed to
  * write, creates nothing new, and the alternative - making durability a root-only
@@ -280,8 +280,7 @@ void sys_sync(arch_regs_t *regs) {
      * the flush - which is what the caller actually asked for - still happens. */
     klog_persist();
     entropy_persist_seed();
-    bcache_flush();
-    regs->eax = E_OK;
+    regs->eax = bcache_flush();
 }
 
 /**
@@ -295,7 +294,12 @@ void sys_reboot(arch_regs_t *regs) {
     }
     klog_persist();
     entropy_persist_seed();
-    bcache_flush();
+    int flush_result = bcache_flush();
+    if (flush_result != E_OK) {
+        klog(LOG_LEVEL_ERROR, "SYSCALL", "Reboot refused: unwritten data remains in the cache.");
+        regs->eax = flush_result;
+        return;
+    }
 
     /*
      * A ladder, and every rung answers a machine the one above it does not.
@@ -352,7 +356,12 @@ void sys_halt(arch_regs_t *regs) {
     }
     klog_persist();
     entropy_persist_seed();
-    bcache_flush();
+    int flush_result = bcache_flush();
+    if (flush_result != E_OK) {
+        klog(LOG_LEVEL_ERROR, "SYSCALL", "Halt refused: unwritten data remains in the cache.");
+        regs->eax = flush_result;
+        return;
+    }
 
     /*
      * `halt` means what people expect it to mean now, and that is the whole of

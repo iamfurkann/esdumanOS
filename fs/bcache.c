@@ -25,12 +25,12 @@ static uint32_t bcache_ticks = 0;
  * power going away - lost it. With a 64-slot cache that is up to 32 KB of
  * filesystem, including /etc/shadow and the directory tables.
  *
- * Two independent bounds now apply, because either one alone leaves a hole:
+ * Two independent flush triggers apply when device I/O succeeds:
  *
- *   By volume, BCACHE_DIRTY_HIGH_WATER caps how much unwritten data can
- *   accumulate. Without it a burst of writes puts the whole cache at risk.
+ *   By volume, BCACHE_DIRTY_HIGH_WATER requests write-back. On failure,
+ *   accepted data remains dirty and may occupy all BCACHE_SIZE slots.
  *
- *   By time, BCACHE_FLUSH_INTERVAL_TICKS caps how long any of it can sit there.
+ *   By time, BCACHE_FLUSH_INTERVAL_TICKS requests write-back on a later yield.
  *   Without it a single sector written once and never followed by another write
  *   stays in RAM indefinitely, which is the common case for a small edit.
  */
@@ -62,47 +62,6 @@ static void mark_clean(int slot) {
 }
 
 /**
- * @brief Whether a refused write could ever be accepted if it were tried again.
- *
- * Everything blockdev_write() rejects before the driver sees it describes the
- * *request* rather than the device's mood: a sector past the end of a disk is
- * past the end at every later attempt, and a device with no write handler will
- * not grow one. Keeping such a sector dirty is not persistence - it is a slot
- * that can never be freed, and because a slot nothing can write is also never
- * touched again, it becomes the least recently used one and every eviction from
- * then on picks it, fails, and hands back -1. One sector the device would never
- * have taken stops the whole cache from giving out slots.
- *
- * The default is to keep, not to drop. An unrecognised code is more likely a
- * device having a bad moment than a request that is malformed, and writing a
- * sector late is better than losing it. The four listed here are the ones this
- * tree actually produces, and each of them answers the same request the same way
- * however many times it is asked.
- *
- * @param err A negative errno from blockdev_write().
- * @return Non-zero when retrying is pointless.
- */
-static int write_is_hopeless(int err) {
-    return err == E_INVAL || err == E_ROFS || err == E_NODEV || err == E_NXIO;
-}
-
-/**
- * @brief Gives up a slot the device will never accept, and says so once.
- *
- * The log line lives here rather than at the three call sites so that "once" is
- * a property of the code rather than a promise: the slot is invalidated in the
- * same breath, so there is nothing left to report a second time.
- */
-static void drop_hopeless(int slot) {
-    klog_int(LOG_LEVEL_ERROR, "BCACHE",
-             "The device can never take this sector; dropped rather than retried forever. Sector",
-             (int)cache[slot].sector);
-    mark_clean(slot);
-    cache[slot].is_valid = 0;
-    cache[slot].dev = 0;
-}
-
-/**
  * @brief Initialize the block cache system.
  */
 void bcache_init(void) {
@@ -114,6 +73,7 @@ void bcache_init(void) {
         cache[i].dev = 0;
         ft_memset(cache[i].data, 0, 512);
     }
+    bcache_ticks = 0;
     dirty_count = 0;
     oldest_dirty_tick = 0;
     printk("[BCACHE] Block Cache System (Write-Back) initialized with 32KB.\n");
@@ -134,56 +94,49 @@ int bcache_flush_is_due(void) {
 }
 
 /**
- * @brief Get the least recently used cache slot.
- * @return The index of the available or LRU cache slot.
+ * @brief Find a reusable slot without losing a failed write.
+ *
+ * Prefer empty slots, then the oldest clean slot. If all slots are dirty, try
+ * them in LRU order, at most once each. One failing device must not block a
+ * healthy device's slot, and a failure must never make accepted data disposable.
  */
 static int bcache_get_lru_slot(void) {
-    int oldest_idx = 0;
-    uint32_t oldest_time = 0xFFFFFFFF;
+    int clean = -1;
+    uint32_t clean_age = 0;
+    uint8_t tried[BCACHE_SIZE] = {0};
 
     for (int i = 0; i < BCACHE_SIZE; i++) {
-        if (!cache[i].is_valid) {
-            return i;
-        }
-        if (cache[i].last_access < oldest_time) {
-            oldest_time = cache[i].last_access;
-            oldest_idx = i;
+        if (!cache[i].is_valid) return i;
+        uint32_t age = bcache_ticks - cache[i].last_access;
+        if (!cache[i].is_dirty && (clean < 0 || age > clean_age)) {
+            clean = i;
+            clean_age = age;
         }
     }
+    if (clean >= 0) return clean;
 
-    if (cache[oldest_idx].is_valid && cache[oldest_idx].is_dirty) {
-        /*
-         * An eviction the device refused does not free the slot.
-         *
-         * This used to write and then mark clean unconditionally, so a failed
-         * write lost the sector twice over: the data never reached the disk, and
-         * the slot was handed to a different sector with the dirty flag cleared,
-         * so nothing would ever try again. Refusing the slot keeps the data in
-         * the cache where a later flush can still write it, and the caller finds
-         * out rather than being handed somebody else's storage.
-         *
-         * Unless the device was never going to take it. Then keeping the slot is
-         * not patience but a deadlock: an unwritable slot is never touched again,
-         * so it stays the least recently used one, so every eviction after this
-         * picks it and fails the same way. See write_is_hopeless().
-         */
-        int res = blockdev_write(cache[oldest_idx].dev, cache[oldest_idx].sector,
-                                 cache[oldest_idx].data);
-
-        if (res != E_OK) {
-            if (!write_is_hopeless(res)) {
-                klog_int(LOG_LEVEL_ERROR, "BCACHE",
-                         "Eviction write failed; slot kept dirty. Sector",
-                         (int)cache[oldest_idx].sector);
-                return -1;
+    for (int attempt = 0; attempt < BCACHE_SIZE; attempt++) {
+        int oldest = -1;
+        uint32_t oldest_age = 0;
+        for (int i = 0; i < BCACHE_SIZE; i++) {
+            uint32_t age = bcache_ticks - cache[i].last_access;
+            if (!tried[i] && (oldest < 0 || age > oldest_age)) {
+                oldest = i;
+                oldest_age = age;
             }
-            drop_hopeless(oldest_idx);
-            return oldest_idx;
         }
-        mark_clean(oldest_idx);
+        if (oldest < 0) break;
+        tried[oldest] = 1;
+
+        if (blockdev_write(cache[oldest].dev, cache[oldest].sector,
+                           cache[oldest].data) == E_OK) {
+            mark_clean(oldest);
+            return oldest;
+        }
     }
 
-    return oldest_idx;
+    klog(LOG_LEVEL_ERROR, "BCACHE", "No writable slot; all accepted data kept dirty.");
+    return -1;
 }
 
 /**
@@ -204,7 +157,9 @@ static int bcache_get_lru_slot(void) {
  * @return E_OK, or a negative errno from the device.
  */
 int bcache_read_sector(blockdev_t *dev, uint32_t sector, uint8_t *buffer) {
-    if (dev == 0) return E_NODEV;
+    int check = blockdev_check_read(dev, sector, buffer);
+    if (check != E_OK) return check;
+    if (dev->sector_size != sizeof(cache[0].data)) return E_INVAL;
 
     bcache_ticks++;
     for (int i = 0; i < BCACHE_SIZE; i++) {
@@ -236,7 +191,8 @@ int bcache_read_sector(blockdev_t *dev, uint32_t sector, uint8_t *buffer) {
 
     /*
      * A no-op today - bcache_get_lru_slot() only ever returns a clean slot, and
-     * nothing invalidates a slot after init. Routed through mark_clean() anyway
+     * failed reads and per-device flushes invalidate only clean slots. Routed
+     * through mark_clean() anyway
      * so that the dirty counter cannot silently drift out of step with the flags
      * if that ever stops being true.
      */
@@ -250,16 +206,18 @@ int bcache_read_sector(blockdev_t *dev, uint32_t sector, uint8_t *buffer) {
  * @brief Write a sector to the block cache.
  *
  * The write itself is deferred - this is a write-back cache - so E_OK here means
- * the sector was taken, not that it reached the disk. What it can report is a
- * cache that could not take it: every slot occupied by dirty data the device
- * refused to accept. bcache_flush() is where a write failure is reported.
+ * the sector was taken, not that it reached the disk. Invalid requests are
+ * rejected before cache lookup. E_IO means every slot held dirty data that
+ * could not be written; bcache_flush() reports deferred device failures.
  *
  * @param sector The sector number to write.
  * @param buffer The buffer containing the sector data.
- * @return E_OK, or E_IO when no slot could be freed.
+ * @return E_OK, a request-validation errno, or E_IO when no slot could be freed.
  */
 int bcache_write_sector(blockdev_t *dev, uint32_t sector, uint8_t *buffer) {
-    if (dev == 0) return E_NODEV;
+    int check = blockdev_check_write(dev, sector, buffer);
+    if (check != E_OK) return check;
+    if (dev->sector_size != sizeof(cache[0].data)) return E_INVAL;
 
     bcache_ticks++;
 
@@ -320,24 +278,14 @@ static int bcache_flush_reporting(int log_level) {
 
     for (int i = 0; i < BCACHE_SIZE; i++) {
         if (cache[i].is_valid && cache[i].is_dirty) {
-            /*
-             * A sector the device refused stays dirty. Marking it clean anyway -
-             * which this did until v1.2.0 - is how a flush reports success over
-             * data that never left RAM, and it also guarantees nothing will try
-             * again: the next flush skips it because it looks written.
-             *
-             * A sector the device could never take is the other case, and it is
-             * counted here and dropped: it is still a failure to report, but
-             * keeping it would leave the eviction path with a slot it can never
-             * free. Either way this returns E_IO, because the caller's question
-             * is whether everything reached the disk and the answer is no; which
-             * of the two it was belongs to the retry policy, not to the caller.
-             */
+            /* Every accepted sector survives a failed write, regardless of
+             * errno. E_NODEV can mean an unplugged device, and E_ROFS can mean
+             * media that became write-protected after cache admission. Neither
+             * is evidence that the caller's data may be discarded. */
             int res = blockdev_write(cache[i].dev, cache[i].sector, cache[i].data);
 
             if (res != E_OK) {
                 failed++;
-                if (write_is_hopeless(res)) drop_hopeless(i);
                 continue;
             }
             mark_clean(i);
@@ -376,20 +324,8 @@ int bcache_flush_dev(blockdev_t *dev) {
             int res = blockdev_write(cache[i].dev, cache[i].sector, cache[i].data);
 
             if (res != E_OK) {
-                /*
-                 * Kept, and kept dirty. The same refusal bcache_flush() has: a
-                 * sector marked clean over a write that did not happen is a
-                 * sector nothing will ever try again. Dropping it would be
-                 * worse still, because unmounting is exactly when the last
-                 * chance to write it is being taken.
-                 *
-                 * That argument only holds while a later chance exists. For a
-                 * sector this device could never accept there is no later
-                 * chance, and holding it would leave a slot pinned against a
-                 * device the caller is in the middle of forgetting.
-                 */
+                /* Failed unmount must retain both the bytes and their device. */
                 failed++;
-                if (write_is_hopeless(res)) drop_hopeless(i);
                 continue;
             }
             mark_clean(i);

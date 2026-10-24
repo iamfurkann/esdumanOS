@@ -60,6 +60,7 @@ static const ktest_module_t kernel_modules[] = {
     { "usbmsc",      run_usbmsc_tests },
     { "mount",       run_mount_tests },
     { "acpi",        run_acpi_tests },
+    { "earlyfb",     run_earlyfb_tests },
     { "console",     run_console_tests },
     { "string",      run_string_tests },
     { "memory",      run_memory_tests },
@@ -99,14 +100,22 @@ static const ktest_module_t kernel_modules[] = {
 };
 
 /**
- * @brief Reads the module name from `kernel_pass=selftest:<name>`, if given.
+ * @brief Reads the module list from `kernel_pass=selftest:<names>`, if given.
  *
  * A bare `selftest` runs everything, which is what CI does and what a release
  * has to pass. The suffix exists for iteration: a full run boots the OS and
  * executes every module, and under nested emulation that costs minutes whether
  * or not the change being tested touched any of it.
  *
- * @param out Buffer receiving the name; set to the empty string when absent.
+ * The suffix was one name until it was measured. A full run costs about five
+ * minutes and a single-module run about forty-five seconds, nearly all of it the
+ * boot - so the cheap thing is to run several modules in one boot, and the
+ * expensive thing is to boot several times. One name meant that a change to the
+ * USB driver, whose blast radius is xhci, usbmsc, mount and blockdev, had no way
+ * to be checked short of the whole suite; the full run was reached for because
+ * the alternative did not cover the change, not because it was wanted.
+ *
+ * @param out Buffer receiving the list; set to the empty string when absent.
  * @param max Size of @p out.
  */
 static void read_module_filter(char *out, uint32_t max) {
@@ -127,6 +136,54 @@ static void read_module_filter(char *out, uint32_t max) {
         i++;
     }
     out[i] = '\0';
+}
+
+/**
+ * @brief Copies the next comma-separated name out of the list.
+ *
+ * A tokeniser rather than a split, because there is nowhere to put an array of
+ * names: this runs before the heap is anybody's to use and the list is read
+ * twice - once to ask whether it names the Ring 3 payload, once to run what it
+ * names. Walking it twice costs a few hundred bytes of comparison and saves a
+ * fixed-size table that would have to guess how many names is enough.
+ *
+ * Empty entries are skipped rather than refused, so "xhci,,mount" and a trailing
+ * comma both mean what they look like. A name longer than @p max is truncated
+ * and will then fail to match, which is the loud path - the alternative is
+ * silently running a module whose name merely starts the same way.
+ *
+ * @param at Where to continue from; the list itself on the first call.
+ * @param out Receives the name.
+ * @param max Size of @p out.
+ * @return Where the next call should continue, or 0 when the list is spent.
+ */
+static const char *module_filter_next(const char *at, char *out, uint32_t max) {
+    uint32_t i = 0;
+
+    if (at == 0) return 0;
+
+    while (*at == ',') at++;
+    if (*at == '\0') return 0;
+
+    while (*at != '\0' && *at != ',' && i < max - 1) out[i++] = *at++;
+    out[i] = '\0';
+
+    /* Past the rest of a name too long to have been copied whole. */
+    while (*at != '\0' && *at != ',') at++;
+    return at;
+}
+
+/**
+ * @brief Whether the list names @p name.
+ */
+static int module_filter_has(const char *filter, const char *name) {
+    char one[32];
+    const char *at = filter;
+
+    while ((at = module_filter_next(at, one, sizeof(one))) != 0) {
+        if (ft_strcmp(one, name) == 0) return 1;
+    }
+    return 0;
 }
 
 /*
@@ -454,9 +511,16 @@ void run_all_selftests(void) {
      * only the user-mode payload. Nothing else in the suite changes behaviour
      * based on this - a filtered run is the same code, just less of it.
      */
-    char module_filter[32];
+    /*
+     * Room for a list rather than a name. Four modules with their commas is
+     * about thirty characters, which the old thirty-two byte buffer would have
+     * truncated into a name that matches nothing - a size limit reporting itself
+     * as a typo.
+     */
+    char module_filter[128];
     read_module_filter(module_filter, sizeof(module_filter));
-    int run_ring3 = (module_filter[0] == '\0') || (ft_strcmp(module_filter, "ring3") == 0);
+    int run_ring3 = (module_filter[0] == '\0') ||
+                    module_filter_has(module_filter, "ring3");
 
     // Create a mock task structure so syscalls have valid fd_table and uid
     static process_t dummy_task;
@@ -522,24 +586,45 @@ void run_all_selftests(void) {
             kernel_modules[i].run();
         }
         printk("\n*** KERNEL-MODE SELF-TESTS FINISHED ***\n");
-    } else if (!run_ring3) {
-        const ktest_module_t *chosen = 0;
-        for (int i = 0; kernel_modules[i].name != 0; i++) {
-            if (ft_strcmp(kernel_modules[i].name, module_filter) == 0) {
-                chosen = &kernel_modules[i];
-                break;
-            }
-        }
+    } else {
+        /*
+         * The list, in the order it was written rather than in table order. A
+         * person naming four modules is usually naming them in the order they
+         * want to read the output in, and there is no reason to reorder it.
+         *
+         * "ring3" is skipped here rather than rejected: it names the user-mode
+         * payload, which runs from its own place below, so a list may mix the
+         * two and "xhci,ring3" means both halves of the USB keyboard path.
+         */
+        char one[32];
+        const char *at = module_filter;
 
-        if (chosen) {
-            printk("\n[KTEST] Running one module: %s\n", module_filter);
-            chosen->run();
-        } else {
+        while ((at = module_filter_next(at, one, sizeof(one))) != 0) {
+            const ktest_module_t *chosen = 0;
+
+            if (ft_strcmp(one, "ring3") == 0) continue;
+
+            for (int i = 0; kernel_modules[i].name != 0; i++) {
+                if (ft_strcmp(kernel_modules[i].name, one) == 0) {
+                    chosen = &kernel_modules[i];
+                    break;
+                }
+            }
+
+            if (chosen) {
+                printk("\n[KTEST] Running module: %s\n", one);
+                chosen->run();
+                continue;
+            }
+
             /*
-             * Loud rather than silent. A typo in MODULE= would otherwise run
-             * nothing, report zero failures, and look exactly like a pass.
+             * Loud rather than silent, and it does not stop the rest of the
+             * list. A typo in MODULE= would otherwise run nothing, report zero
+             * failures, and look exactly like a pass - and with a list, one bad
+             * name must not take the other three down with it, because then a
+             * typo and a real failure look the same again.
              */
-            printk("\n[KTEST] No module named '%s'. Available:\n", module_filter);
+            printk("\n[KTEST] No module named '%s'. Available:\n", one);
             for (int i = 0; kernel_modules[i].name != 0; i++) {
                 printk("        %s\n", kernel_modules[i].name);
             }

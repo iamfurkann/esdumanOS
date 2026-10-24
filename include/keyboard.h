@@ -21,6 +21,53 @@
  */
 void keyboard_interrupt_handler(void);
 
+/** @brief Status port bit 0: a byte is waiting in the output buffer. */
+#define KBD_STATUS_OBF 0x01
+/** @brief Status port bit 5: that byte came from the pointing device. */
+#define KBD_STATUS_AUX 0x20
+
+/**
+ * @brief The most bytes one pass will take before returning.
+ *
+ * A bound for the reason pci.c's bus walk and the xHCI capability chain are
+ * bounded: a controller that reports a full output buffer for ever would hang
+ * this loop, and this loop runs in interrupt context. Sixteen is far more than a
+ * keystroke burst and far less than a hang.
+ */
+#define KBD_DRAIN_MAX 16
+
+/**
+ * @brief Takes every byte the controller is holding, not just one.
+ *
+ * The i8042 has one output buffer and two devices behind it, and until v1.13.0
+ * the handler read one byte per interrupt and left whatever else was there. On
+ * every machine this project could be tested on that was indistinguishable from
+ * correct: QEMU raises an interrupt per byte and has no PS/2 pointing device, so
+ * there was never a second byte to leave.
+ *
+ * A laptop has both. Its touchpad is on the same controller, nothing here reads
+ * IRQ12, and a pointer byte nobody takes sits in the shared buffer blocking the
+ * keystroke behind it - which arrives only when some later interrupt happens to
+ * push things along. The keyboard works, one keypress behind, and everything
+ * else on the machine is fast: the symptom is a keyboard that feels broken while
+ * the clock ticks perfectly.
+ *
+ * So the buffer is drained rather than sampled, and bytes belonging to the
+ * pointing device are read and dropped - dropped because nothing here wants
+ * them, read because that is the only way to get them out of the way.
+ *
+ * This cannot be asserted from the test suite. It reads a port, there is no way
+ * to write one from a test, and the machine the suite runs on cannot produce the
+ * condition it exists for - the same standing as xhci_take_ownership(), and
+ * worth saying rather than leaving to be discovered.
+ *
+ * @param credit_entropy Non-zero only from IRQ1, where the arrival time of the
+ *                       first byte is a real measurement. A byte collected by
+ *                       the timer tick arrived at the tick's convenience and its
+ *                       timing says nothing, so it is not credited.
+ */
+void keyboard_drain(int credit_entropy);
+
 /**
  * @brief Turns one scancode into whatever it means, with no hardware involved.
  *

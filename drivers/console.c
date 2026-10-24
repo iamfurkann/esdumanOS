@@ -238,6 +238,33 @@ void console_use_vga(void) {
     active = &vga_backend;
 }
 
+void console_layout(uint32_t width, uint32_t height, console_layout_t *out) {
+    if (out == 0) return;
+
+    /*
+     * The largest whole-number scale that still leaves the whole console on the
+     * display. At 1024x768 that is one and the console is 640x400; at the
+     * 1920x1080 a real panel is likely to report it is two, and the text is
+     * twice the size. Scaling by anything other than a whole number has to
+     * decide what to do with half a pixel of a bitmap glyph, and every answer
+     * looks worse than the small version.
+     */
+    out->scale = 1;
+    while ((CONSOLE_COLS * FONT_WIDTH * (out->scale + 1)) <= width &&
+           (CONSOLE_ROWS * FONT_HEIGHT * (out->scale + 1)) <= height) {
+        out->scale++;
+    }
+
+    out->cols = width / (FONT_WIDTH * out->scale);
+    out->rows = height / (FONT_HEIGHT * out->scale);
+    if (out->cols > CONSOLE_COLS) out->cols = CONSOLE_COLS;
+    if (out->rows > CONSOLE_ROWS) out->rows = CONSOLE_ROWS;
+
+    /* Centred, so that what is left over is a border rather than a corner. */
+    out->origin_x = (width  - out->cols * FONT_WIDTH  * out->scale) / 2;
+    out->origin_y = (height - out->rows * FONT_HEIGHT * out->scale) / 2;
+}
+
 int console_use_framebuffer(void *base, uint32_t pitch, uint32_t width,
                             uint32_t height, uint8_t bpp) {
     /*
@@ -268,20 +295,17 @@ int console_use_framebuffer(void *base, uint32_t pitch, uint32_t width,
      * decide what to do with half a pixel of a bitmap glyph, and every answer
      * looks worse than the small version.
      */
-    fb.scale = 1;
-    while ((CONSOLE_COLS * FONT_WIDTH * (fb.scale + 1)) <= width &&
-           (CONSOLE_ROWS * FONT_HEIGHT * (fb.scale + 1)) <= height) {
-        fb.scale++;
+    {
+        console_layout_t layout;
+
+        console_layout(width, height, &layout);
+
+        fb.scale    = layout.scale;
+        fb.cols     = layout.cols;
+        fb.rows     = layout.rows;
+        fb.origin_x = layout.origin_x;
+        fb.origin_y = layout.origin_y;
     }
-
-    fb.cols = width / (FONT_WIDTH * fb.scale);
-    fb.rows = height / (FONT_HEIGHT * fb.scale);
-    if (fb.cols > CONSOLE_COLS) fb.cols = CONSOLE_COLS;
-    if (fb.rows > CONSOLE_ROWS) fb.rows = CONSOLE_ROWS;
-
-    /* Centred, so that what is left over is a border rather than a corner. */
-    fb.origin_x = (width  - (uint32_t)fb.cols * FONT_WIDTH  * fb.scale) / 2;
-    fb.origin_y = (height - (uint32_t)fb.rows * FONT_HEIGHT * fb.scale) / 2;
 
     /*
      * The whole buffer to black first, and not only the part the console

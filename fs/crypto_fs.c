@@ -26,22 +26,18 @@
  * the pool was worth perhaps twenty bits, and nothing at all guaranteed two files
  * would not receive the same IV.
  *
- * Deriving it instead splits the two requirements apart. The monotonic counter
- * makes the HMAC input distinct on every single call, so uniqueness holds even
- * with a completely dead entropy pool; keying the derivation with the file key
- * makes the result unpredictable to anyone without that key. Pool bytes are still
- * mixed in, so with RDRAND present the IV is fully random as well - but nothing
- * now depends on that.
+ * The counter distinguishes HMAC inputs before wrap within a boot. The
+ * truncated 128-bit output still has collision probability. Unpredictability
+ * depends on the file key: hashing cannot strengthen a predictably generated
+ * key. Pool bytes provide additional input.
  *
  * The wire format is unchanged: the IV is still the first 16 plaintext bytes of
  * the file, so fs_read_encrypted() needs no matching change and files written by
  * earlier builds still decrypt.
  *
- * BOUNDARY: the counter restarts at zero on every boot, so what keeps boot N's
- * first file from sharing an IV with boot N+1's is the pool bytes, not the
- * counter - and those carry the RTC timestamp and TSC that entropy_init() mixed
- * in. Two cold boots of the same image inside the same RTC second are therefore
- * the one case this does not provably separate. See the note in entropy.h.
+ * The counter restarts each boot. Initialization and the persisted seed
+ * influence later state, but failed persistence, cloning or rollback can reuse
+ * old state. This is not an anti-replay or collision-free guarantee.
  *
  * @param key    The 32-byte file key; also the HMAC key.
  * @param iv_out 16-byte output.
@@ -52,9 +48,8 @@ static int derive_file_iv(const uint8_t key[32], uint8_t iv_out[16]) {
     int quality = generate_random_bytes(pool_bytes, sizeof(pool_bytes));
 
     /*
-     * ENTROPY_FAIL means the pool is not initialised, so not even the uniqueness
-     * of the counter can be trusted to have been seeded. Refuse rather than write
-     * a file whose IV might repeat. ENTROPY_WEAK is fine here by construction.
+     * An uninitialized pool cannot supply input. Weak input is accepted here;
+     * the key-quality limitations remain as documented in SECURITY.md.
      */
     if (quality == ENTROPY_FAIL) return E_IO;
 
@@ -189,7 +184,9 @@ int fs_size_encrypted(vfs_file_t *file, const uint8_t key[32], uint32_t *out_siz
      * reader at a different problem. The two causes are separated here because
      * the caller can act on the difference.
      */
-    if (fs_read_sector(fs_cluster_to_sector(file->start_cluster), sector) != E_OK) {
+    fs_volume_t *volume = fs_volume_for(file->volume_prefix);
+    if (!volume) return E_NODEV;
+    if (fs_volume_read_sector(volume, fs_volume_cluster_sector(volume, file->start_cluster), sector) != E_OK) {
         klog(LOG_LEVEL_ERROR, "CRYPTO", "Could not read the header sector of an encrypted file.");
         return E_IO;
     }
@@ -346,16 +343,16 @@ int fs_read_encrypted(vfs_file_t *file, uint8_t *buffer, uint32_t size, const ui
     if (file->file_size <= 56) return 0;
 
     uint8_t *temp_buf = (uint8_t *)kmalloc(file->file_size);
-    if (!temp_buf) return 0;
+    if (!temp_buf) return E_NOMEM;
 
     uint32_t requested_offset = file->current_offset;
     file->current_offset = 0;
 
     int read_bytes = fs_read_raw(file, temp_buf, file->file_size);
-    if (read_bytes <= 56) {
+    if (read_bytes < 0 || (uint32_t)read_bytes != file->file_size) {
         file->current_offset = requested_offset;
         kfree(temp_buf);
-        return 0;
+        return read_bytes < 0 ? read_bytes : E_IO;
     }
 
     uint8_t *plaintext = 0;

@@ -219,15 +219,16 @@ static void run_retired_number_assertions(void) {
                  "[STRICT] [ABI] 99 stays retired - YIELD left it for 67 at the freeze");
 
     /*
-     * 73 is where the next call goes, and it must be free until one is written.
+     * 74 is where the next call goes, and it must be free until one is written.
      * This is the assertion that catches a number being taken quietly. It said
      * 68 until v1.1.0 assigned that one, 69 until v1.4.0, 70 until v1.8.0, and
      * 71 until v1.11.0 spent both 71 and 72 at once - which is what this line is
      * for: the frontier moves by somebody editing it deliberately, not by
      * drifting. Every time, it moved by failing first.
      */
-    KTEST_ASSERT(dispatch_retired(73) == E_NOSYS,
-                 "[STRICT] [ABI] 73 is unassigned, and is where the next call continues from");
+    KTEST_ASSERT(SYSCALL_MKFS == 73, "[STRICT] [ABI] MKFS uses the next free number");
+    KTEST_ASSERT(dispatch_retired(74) == E_NOSYS,
+                 "[STRICT] [ABI] 74 is unassigned, and is where the next call continues from");
 }
 
 /**

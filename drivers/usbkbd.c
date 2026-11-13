@@ -128,6 +128,8 @@ static const uint8_t usage_to_set1[0xE8] = {
 };
 
 uint8_t usbkbd_scancode_for(uint8_t usage) {
+    /* A device supplies the full byte range, including usages above 0xE7. */
+    if (usage >= sizeof(usage_to_set1)) return 0;
     return usage_to_set1[usage];
 }
 

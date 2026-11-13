@@ -33,6 +33,17 @@
 #include "libft.h"
 #include "errno.h"
 
+/* The driver calls only when an event exists and timer polling is armed.
+ * Calling the actual poller at this boundary deterministically exercises the
+ * same ownership guard used by IRQ0 during usbmsc_init(). */
+static unsigned command_poll_attempts;
+static unsigned control_poll_attempts;
+void xhci_test_before_event(uint32_t type) {
+    if (type == XHCI_TRB_CMD_COMPLETE) command_poll_attempts++;
+    if (type == XHCI_TRB_TRANSFER_EV) control_poll_attempts++;
+    xhci_poll();
+}
+
 /**
  * @brief The shapes the controller reads out of memory on its own.
  *
@@ -514,6 +525,10 @@ static void run_selection_assertions(void) {
 void run_xhci_tests(void) {
     printk("\n--- XHCI and USB Bus Tests ---\n");
 
+    KTEST_ASSERT(command_poll_attempts >= 4,
+                 "[STRICT] [XHCI] synchronous disk commands withstand a poll with a completion pending");
+    KTEST_ASSERT(control_poll_attempts >= 2,
+                 "[STRICT] [XHCI] disk EP0 transfers withstand a poll with a completion pending");
     run_layout_assertions();
     run_segment_placement_assertions();
     run_context_assertions();

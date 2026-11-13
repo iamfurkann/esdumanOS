@@ -71,19 +71,33 @@ static int xhci_scratchpads = 0;
  */
 static int xhci_ready = 0;
 
-/**
- * @brief Whether the timer tick may touch the event ring.
- *
- * Cleared until xhci_init() has finished, and it is the whole defence against
- * the release's one genuine trap. Enumeration waits on the event ring with
- * interrupts enabled, so a tick that drained the ring while that was happening
- * would consume the completion the boot path was waiting for - and the symptom
- * would be a controller that worked until a line was added to the timer, with
- * nothing anywhere pointing at the timer.
- *
- * One owner at a time: the boot path until it is done, the tick from then on.
- */
+/* Enumeration starts with polling disabled. Later synchronous commands and
+ * EP0 transfers still take exclusive ownership before ringing a doorbell. */
 static int xhci_poll_armed = 0;
+static volatile int poll_busy = 0;
+static volatile int sync_busy = 0;
+
+/* Single CPU, non-preemptible kernel: the IRQ handler cannot remain active
+ * when ordinary kernel code resumes. Keep IRQs enabled during hardware waits
+ * so their PIT deadline continues to advance. */
+static int xhci_sync_begin(void) {
+    uint32_t flags;
+    asm volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    int busy = poll_busy || sync_busy;
+    if (!busy) sync_busy = 1;
+    if (flags & 0x200) asm volatile("sti" : : : "memory");
+    return busy ? E_BUSY : E_OK;
+}
+
+static void xhci_sync_end(void) {
+    asm volatile("" : : : "memory");
+    sync_busy = 0;
+}
+
+/* Only the test kernel defines this hook; it forces a poll when a completion
+ * is already present, reproducing the IRQ/waiter race without timing luck. */
+extern void xhci_test_before_event(uint32_t type) __attribute__((weak));
+static void xhci_dispatch_async(const xhci_trb_t *event);
 
 /** One frame holding the device context array, the segment table and the
  *  scratchpad array; see the offsets in xhci.h. */
@@ -413,52 +427,47 @@ static void xhci_consume_event(void) {
     rt_write(XHCI_RT_IR0 + XHCI_IR_ERDP + 4, 0);
 }
 
-/**
- * @brief Waits for one event of a given type and copies it out of the ring.
- *
- * Everything else that arrives is read and dropped, and the deadline is
- * deliberately not restarted by it. Port status change events queue up behind
- * every reset this driver performs, and a waiter that stopped at the first
- * record would take one of those for the answer it was waiting for.
- *
- * The record is copied before it is consumed. Once the dequeue pointer moves the
- * controller is free to write over that entry, so reading a field afterwards is
- * reading whatever arrived next - which for a slot id is the difference between
- * addressing a device and addressing whatever the controller happened to write.
- *
- * @param want_type The TRB type to stop on.
- * @param out Receives the record; may be 0.
- * @param what Logged if nothing of that type arrives in time.
- * @return E_OK, or E_IO on timeout.
- */
-static int xhci_wait_event(uint32_t want_type, xhci_trb_t *out, const char *what) {
+/** Wait for this request, dispatching unrelated keyboard and bulk events.
+ * The caller owns the ring from before the doorbell until this returns. */
+static int xhci_wait_event(uint32_t want_type, uint32_t slot,
+                           const uint32_t *pointers, unsigned count,
+                           xhci_trb_t *out, const char *what) {
     uint32_t start = timer_get_ticks();
+    int hook_called = 0;
 
     for (;;) {
-        volatile xhci_trb_t *ev = xhci_next_event();
-
-        if (ev != 0) {
-            xhci_trb_t copy;
-
-            copy.param_lo = ev->param_lo;
-            copy.param_hi = ev->param_hi;
-            copy.status   = ev->status;
-            copy.control  = ev->control;
-
-            xhci_consume_event();
-
-            if (XHCI_TRB_TYPE(copy.control) == want_type) {
-                if (out != 0) *out = copy;
-                return E_OK;
-            }
-            continue;
-        }
-
+        /* Check even under a continuous stream of unrelated events. */
         if ((timer_get_ticks() - start) > XHCI_TIMEOUT_TICKS) {
             klog(LOG_LEVEL_ERROR, "XHCI", what);
             return E_IO;
         }
-        asm volatile("pause");
+        volatile xhci_trb_t *ev = xhci_next_event();
+        if (ev != 0) {
+            if (!hook_called && xhci_poll_armed && xhci_test_before_event) {
+                hook_called = 1;
+                xhci_test_before_event(want_type);
+                ev = xhci_next_event();
+                if (ev == 0) continue;
+            }
+            xhci_trb_t copy = {ev->param_lo, ev->param_hi,
+                               ev->status, ev->control};
+            xhci_consume_event();
+            int matches = 0;
+            for (unsigned i = 0; i < count; i++) {
+                if (copy.param_hi == 0 && copy.param_lo == pointers[i])
+                    matches = 1;
+            }
+            if (matches && XHCI_TRB_TYPE(copy.control) == want_type &&
+                (want_type != XHCI_TRB_TRANSFER_EV ||
+                 (XHCI_TRB_SLOT(copy.control) == slot &&
+                  XHCI_TRB_EP_ID(copy.control) == 1))) {
+                if (out != 0) *out = copy;
+                return E_OK;
+            }
+            xhci_dispatch_async(&copy);
+        } else {
+            asm volatile("pause");
+        }
     }
 }
 
@@ -483,6 +492,8 @@ static int xhci_wait_event(uint32_t want_type, xhci_trb_t *out, const char *what
  */
 static int xhci_command(uint32_t param_lo, uint32_t param_hi, uint32_t control,
                         xhci_trb_t *ev, const char *what) {
+    int claim = xhci_sync_begin();
+    if (claim != E_OK) return claim;
     if (cmd_enqueue == XHCI_TRBS_PER_SEGMENT - 1) {
         volatile xhci_trb_t *link = &cmd_ring[cmd_enqueue];
 
@@ -491,6 +502,7 @@ static int xhci_command(uint32_t param_lo, uint32_t param_hi, uint32_t control,
         cmd_pcs ^= 1;
     }
 
+    uint32_t pointer = cmd_ring_phys + cmd_enqueue * sizeof(xhci_trb_t);
     volatile xhci_trb_t *trb = &cmd_ring[cmd_enqueue];
 
     trb->param_lo = param_lo;
@@ -514,7 +526,9 @@ static int xhci_command(uint32_t param_lo, uint32_t param_hi, uint32_t control,
 
     xhci_trb_t got;
 
-    if (xhci_wait_event(XHCI_TRB_CMD_COMPLETE, &got, what) != E_OK) return E_IO;
+    int result = xhci_wait_event(XHCI_TRB_CMD_COMPLETE, 0, &pointer, 1, &got, what);
+    xhci_sync_end();
+    if (result != E_OK) return result;
 
     uint32_t code = XHCI_TRB_COMPLETION(got.status);
 
@@ -819,7 +833,7 @@ static uint32_t ep0_packet_size(uint8_t speed) {
 }
 
 /** @brief Puts one TRB on a device's control ring, following the link at the end. */
-static void ep0_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
+static uint32_t ep0_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
                      uint32_t status, uint32_t control) {
     if (r->ep0_enqueue == XHCI_TRBS_PER_SEGMENT - 1) {
         volatile xhci_trb_t *link = &r->ep0_ring[r->ep0_enqueue];
@@ -836,7 +850,7 @@ static void ep0_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
     t->status   = status;
     t->control  = control | r->ep0_pcs;
 
-    r->ep0_enqueue++;
+    return r->ep0_ring_phys + r->ep0_enqueue++ * sizeof(xhci_trb_t);
 }
 
 /**
@@ -855,6 +869,10 @@ static void ep0_push(xhci_devres_t *r, uint32_t lo, uint32_t hi,
  */
 static int xhci_control(int index, uint8_t request_type, uint8_t request,
                         uint16_t value, uint16_t windex, uint16_t length) {
+    int claim = xhci_sync_begin();
+    if (claim != E_OK) return claim;
+    uint32_t pointers[3];
+    unsigned count = 0;
     xhci_devres_t *r = &devres[index];
     uint8_t slot = devices[index].slot;
 
@@ -872,12 +890,12 @@ static int xhci_control(int index, uint8_t request_type, uint8_t request,
                       | ((uint32_t)value << 16);
     uint32_t setup_hi = (uint32_t)windex | ((uint32_t)length << 16);
 
-    ep0_push(r, setup_lo, setup_hi, 8,
+    pointers[count++] = ep0_push(r, setup_lo, setup_hi, 8,
              XHCI_TRB_SET_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT
              | (length ? (dir_in ? XHCI_TRT_IN : XHCI_TRT_OUT) : XHCI_TRT_NO_DATA));
 
     if (length) {
-        ep0_push(r, r->desc_buf_phys, 0, length,
+        pointers[count++] = ep0_push(r, r->desc_buf_phys, 0, length,
                  XHCI_TRB_SET_TYPE(XHCI_TRB_DATA_STAGE)
                  | (dir_in ? XHCI_TRB_DIR_IN : 0));
     }
@@ -888,7 +906,7 @@ static int xhci_control(int index, uint8_t request_type, uint8_t request,
      * stage is IN. So the direction bit is set unless there was an IN data
      * stage to be the opposite of.
      */
-    ep0_push(r, 0, 0, 0,
+    pointers[count++] = ep0_push(r, 0, 0, 0,
              XHCI_TRB_SET_TYPE(XHCI_TRB_STATUS_STAGE) | XHCI_TRB_IOC
              | ((length && dir_in) ? 0 : XHCI_TRB_DIR_IN));
 
@@ -898,10 +916,10 @@ static int xhci_control(int index, uint8_t request_type, uint8_t request,
 
     xhci_trb_t ev;
 
-    if (xhci_wait_event(XHCI_TRB_TRANSFER_EV, &ev,
-                        "A control transfer never completed.") != E_OK) {
-        return E_IO;
-    }
+    int result = xhci_wait_event(XHCI_TRB_TRANSFER_EV, slot, pointers, count,
+                                 &ev, "A control transfer never completed.");
+    xhci_sync_end();
+    if (result != E_OK) return result;
 
     uint32_t code = XHCI_TRB_COMPLETION(ev.status);
 
@@ -1393,103 +1411,49 @@ static int xhci_open_keyboard(int index) {
     return E_OK;
 }
 
-/**
- * @brief Guards the event ring against being drained twice at once.
- *
- * xhci_poll() has two callers now and one of them can interrupt the other. A
- * bulk transfer spins calling it from ordinary kernel context; the timer tick
- * calls it from IRQ0, and a tick lands in the middle of that spin a hundred
- * times a second. Two readers stepping the same dequeue pointer would each
- * consume records the other was about to look at, and the ring's cycle state
- * would stop meaning anything.
- *
- * The flag is tested and set with interrupts off - the tree's own idiom, the one
- * elf.c and entropy.c use - and then interrupts go back to whatever they were,
- * so the window is a few instructions rather than the whole drain.
- */
-static volatile int poll_busy = 0;
+/* Shared by the IRQ poller and synchronous waiter. Copy before consuming so
+ * the controller cannot overwrite the record while it is being dispatched. */
+static void xhci_dispatch_async(const xhci_trb_t *event) {
+    if (XHCI_TRB_TYPE(event->control) != XHCI_TRB_TRANSFER_EV) return;
+    int index = device_for_slot(XHCI_TRB_SLOT(event->control));
+    if (index < 0) return;
+    xhci_devres_t *r = &devres[index];
+    uint32_t endpoint = XHCI_TRB_EP_ID(event->control);
+    uint32_t code = XHCI_TRB_COMPLETION(event->status);
+    if (r->int_ring != 0 && endpoint == r->kbd_dci) {
+        if (code == XHCI_COMPLETION_SUCCESS || code == 13)
+            usbkbd_report(r->desc_buf + XHCI_OFF_REPORT);
+        xhci_queue_report(index);
+    } else if (endpoint != 0 &&
+               (endpoint == r->bulk_in_dci || endpoint == r->bulk_out_dci)) {
+        r->bulk_residual = XHCI_TRB_RESIDUAL(event->status);
+        r->bulk_code = code;
+        r->bulk_done = 1;
+    }
+    /* Port status changes and unowned completions do not implement hotplug. */
+}
 
 void xhci_poll(void) {
-    uint32_t eflags;
-
+    uint32_t flags;
     if (!xhci_poll_armed) return;
-
-    asm volatile("pushf; pop %0" : "=r"(eflags));
-    asm volatile("cli");
-
-    if (poll_busy) {
-        if (eflags & 0x200) asm volatile("sti");
+    asm volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    if (poll_busy || sync_busy) {
+        if (flags & 0x200) asm volatile("sti" : : : "memory");
         return;
     }
     poll_busy = 1;
+    if (flags & 0x200) asm volatile("sti" : : : "memory");
 
-    if (eflags & 0x200) asm volatile("sti");
-
-    /*
-     * Bounded, and the bound is the interrupt handler's. Everything else in this
-     * driver waits with a deadline because it runs on the boot path; this runs a
-     * hundred times a second inside IRQ0, so it does not wait at all - it takes
-     * what is there, up to a limit, and leaves the rest for the next tick.
-     */
+    /* IRQ work remains bounded; synchronous waiters use a PIT deadline. */
     for (int drained = 0; drained < XHCI_POLL_MAX_EVENTS; drained++) {
         volatile xhci_trb_t *ev = xhci_next_event();
-
         if (ev == 0) break;
-
-        uint32_t type = XHCI_TRB_TYPE(ev->control);
-        uint32_t slot = XHCI_TRB_SLOT(ev->control);
-        uint32_t endpoint = XHCI_TRB_EP_ID(ev->control);
-        uint32_t code = XHCI_TRB_COMPLETION(ev->status);
-        uint32_t residual = XHCI_TRB_RESIDUAL(ev->status);
-
+        xhci_trb_t copy = {ev->param_lo, ev->param_hi, ev->status, ev->control};
         xhci_consume_event();
-
-        /* Port status changes still arrive here and are still dropped. This
-         * release does not react to a device appearing, and saying so is better
-         * than a handler that looks like it might. */
-        if (type != XHCI_TRB_TRANSFER_EV) continue;
-
-        int index = device_for_slot(slot);
-
-        if (index < 0) continue;
-
-        xhci_devres_t *r = &devres[index];
-
-        /*
-         * Which endpoint finished, and that question did not exist until this
-         * release. With one endpoint per device anything that completed was the
-         * keyboard's; with a keyboard and a disk on the same bus the endpoint id
-         * in the event is the only thing that says which.
-         */
-        if (r->int_ring != 0 && endpoint == r->kbd_dci) {
-            /*
-             * Success, or a short packet - which is what a keyboard with nothing
-             * to say produces and is not a failure. Anything else means the
-             * report did not arrive, and the read is re-armed without one being
-             * handed on: a stale buffer read as a report would look like keys
-             * being released.
-             */
-            if (code == XHCI_COMPLETION_SUCCESS || code == 13) {
-                usbkbd_report(r->desc_buf + XHCI_OFF_REPORT);
-            }
-            xhci_queue_report(index);
-            continue;
-        }
-
-        if (endpoint == r->bulk_in_dci || endpoint == r->bulk_out_dci) {
-            /*
-             * Recorded rather than acted on. The transfer that queued this is
-             * spinning on bulk_done in ordinary kernel context, and it is the
-             * one that knows what to do with the answer - an interrupt handler
-             * deciding what a failed disk read means is an interrupt handler
-             * doing the block layer's job.
-             */
-            r->bulk_residual = residual;
-            r->bulk_code = code;
-            r->bulk_done = 1;
-        }
+        xhci_dispatch_async(&copy);
     }
-
+    /* Publish ring/device state before the next IRQ reader can claim it. */
+    asm volatile("" : : : "memory");
     poll_busy = 0;
 }
 
@@ -2246,11 +2210,9 @@ static int xhci_bring_up(const pci_device_t *dev) {
 
     xhci_enumerate();
 
-    /*
-     * And only now may the timer touch the event ring. Everything above waited
-     * on it with interrupts enabled; from here nothing does, and the tick is its
-     * only reader. The flag is the handover.
-     */
+    /* Start periodic keyboard/bulk delivery. usbmsc_init() still issues
+     * synchronous commands and EP0 transfers after this point; each temporarily
+     * owns the ring and dispatches unrelated events until its request ends. */
     xhci_poll_armed = 1;
 
     /*

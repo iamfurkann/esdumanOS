@@ -69,7 +69,8 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
     while (1) {
         if (path[i] == '/' || path[i] == '\0') {
             token[t_idx] = '\0';
-            
+            if (t_idx && !check_vfs_search(current_id)) return E_ACCES;
+
             if (path[i] == '\0') {
                 int j = 0;
                 while (token[j] && j < MAX_FILENAME - 1) { basename[j] = token[j]; j++; }
@@ -81,28 +82,11 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
                 if (token[0] == '.' && token[1] == '\0') {
                 } 
                 else if (token[0] == '.' && token[1] == '.' && token[2] == '\0') {
-                    if (current_id != 0) {
-                        for (int k = 0; k < fs_max_entries; k++) {
-                            if (dir_table[k].entry_id == current_id && dir_table[k].file_type == 1 && dir_table[k].is_used == 1) {
-                                current_id = dir_table[k].parent_id;
-                                break;
-                            }
-                        }
-                    }
+                    current_id = fs_parent_dir(current_id);
+                } else {
+                    current_id = fs_child_dir(current_id, token);
                 }
-                else {
-                    int idx = fs_get_entry_idx(token, current_id);
-                    if (idx == -1) {
-                        klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Directory not found");
-                        return E_NOENT;
-                    }
-                    
-                    if (dir_table[idx].file_type != 1) {
-                        klog(LOG_LEVEL_DEBUG, "VFS", "vfs_resolve_path: Path component is not a directory");
-                        return E_NOTDIR;
-                    }
-                    current_id = dir_table[idx].entry_id;
-                }
+                if (current_id < 0) return current_id;
             }
             t_idx = 0;
         } else {
@@ -134,13 +118,6 @@ int vfs_resolve_path(const char *path, int start_dir_id, char *basename) {
  * @param entry_id Entry to find.
  * @return Slot index, or -1.
  */
-static int slot_of_entry(int entry_id) {
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].entry_id == entry_id) return i;
-    }
-    return -1;
-}
-
 /**
  * @brief Decides whether the calling task may use a directory.
  *
@@ -175,55 +152,30 @@ static int slot_of_entry(int entry_id) {
  * @param needs_write Non-zero when the operation will modify the directory.
  * @return 1 when the task may proceed.
  */
+static int check_directory_access(int entry_id, int want) {
+    if (entry_id < 0 || !fs_dir_exists((fs_id_t)entry_id)) return 0;
+    if (!current_task || current_task->uid == 0) return 1;
+    uint32_t uid = current_task->uid, gid = current_task->gid;
+    for (unsigned hops = 0; hops <= 2 * FS_MAX_ENTRIES_CAP; hops++) {
+        if (entry_id == 0) return fs_mode_allows(0755, 0, 0, uid, gid, want);
+        const disk_file_entry_t *entry = fs_entry((fs_id_t)entry_id);
+        if (!entry || entry->file_type != FT_DIR ||
+            !fs_mode_allows(entry->mode, entry->owner_uid, entry->owner_gid, uid, gid, want))
+            return 0;
+        entry_id = fs_parent_dir((fs_id_t)entry_id);
+        if (entry_id < 0) return 0;
+        want = FS_WANT_EXEC;
+    }
+    return 0;
+}
+
 int check_vfs_access(int entry_id, int needs_write) {
-    if (current_task == 0) return 1;
+    return check_directory_access(entry_id,
+        (needs_write ? FS_WANT_WRITE : FS_WANT_READ) | FS_WANT_EXEC);
+}
 
-    uint32_t uid = current_task->uid;
-    uint32_t gid = current_task->gid;
-
-    /* Root is not subject to the bits, as everywhere else. */
-    if (uid == 0) return 1;
-
-    int want = needs_write ? (FS_WANT_WRITE | FS_WANT_EXEC)
-                           : (FS_WANT_READ | FS_WANT_EXEC);
-
-    /*
-     * The root directory owns no table entry, so it has no mode to read and its
-     * permissions are stated here instead: 0755 owned by root, which is what
-     * every Unix ships. A user who cannot write to / has /home and /tmp, which
-     * is the arrangement this is copying rather than a restriction invented now.
-     */
-    if (entry_id == 0) return fs_mode_allows(0755, 0, 0, uid, gid, want);
-
-    int idx = slot_of_entry(entry_id);
-    if (idx < 0) return 0;
-
-    if (!fs_mode_allows(dir_table[idx].mode, dir_table[idx].owner_uid,
-                        dir_table[idx].owner_gid, uid, gid, want)) {
-        return 0;
-    }
-
-    /* And every directory on the way down to it has to have been searchable. */
-    int curr = dir_table[idx].parent_id;
-    int hops = 0;
-
-    while (curr != 0) {
-        if (++hops > fs_max_entries) {
-            klog_int(LOG_LEVEL_ERROR, "VFS", "Cycle in the directory tree; denying access to entry", entry_id);
-            return 0;
-        }
-
-        int up = slot_of_entry(curr);
-        if (up < 0) break;
-
-        if (!fs_mode_allows(dir_table[up].mode, dir_table[up].owner_uid,
-                            dir_table[up].owner_gid, uid, gid, FS_WANT_EXEC)) {
-            return 0;
-        }
-        curr = dir_table[up].parent_id;
-    }
-
-    return 1;
+int check_vfs_search(int entry_id) {
+    return check_directory_access(entry_id, FS_WANT_EXEC);
 }
 
 /**
@@ -262,9 +214,9 @@ int check_file_access(fs_id_t parent_id, const char *name, int want) {
     int idx = fs_get_entry_idx(name, parent_id);
     if (idx < 0) return 1;
 
-    return fs_mode_allows(dir_table[idx].mode, dir_table[idx].owner_uid,
-                          dir_table[idx].owner_gid,
-                          current_task->uid, current_task->gid, want);
+    const disk_file_entry_t *entry = fs_entry((parent_id & 0xffff0000u) | (uint32_t)idx);
+    return entry && fs_mode_allows(entry->mode, entry->owner_uid, entry->owner_gid,
+                                   current_task->uid, current_task->gid, want);
 }
 
 /**
@@ -302,15 +254,14 @@ int check_removal_access(fs_id_t parent_id, const char *name) {
     uint32_t dir_owner = 0;
 
     if (parent_id != 0) {
-        int dir_idx = slot_of_entry(parent_id);
-        if (dir_idx < 0) return 0;
-        dir_mode  = dir_table[dir_idx].mode;
-        dir_owner = dir_table[dir_idx].owner_uid;
+        const disk_file_entry_t *parent = fs_entry(parent_id);
+        if (!parent) return 0;
+        dir_mode = parent->mode;
+        dir_owner = parent->owner_uid;
     }
-
-    return fs_sticky_allows_removal(dir_mode, dir_owner,
-                                    dir_table[entry_idx].owner_uid,
-                                    current_task->uid);
+    const disk_file_entry_t *entry = fs_entry((parent_id & 0xffff0000u) | (uint32_t)entry_idx);
+    return entry && fs_sticky_allows_removal(dir_mode, dir_owner, entry->owner_uid,
+                                              current_task->uid);
 }
 
 /**

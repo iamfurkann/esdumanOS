@@ -128,7 +128,7 @@ static void test_vfs_size_reporting(void) {
      * underflow the subtraction that derives the maximum plausible length.
      */
     uint32_t tiny_size = 0xFFFFFFFFu;
-    vfs_file_t tiny;
+    vfs_file_t tiny = {0};
     for (uint32_t i = 0; i < sizeof(tiny.filename); i++) tiny.filename[i] = '\0';
     tiny.file_size = 8;
     tiny.current_offset = 0;
@@ -168,7 +168,7 @@ static void test_vfs_size_reporting(void) {
  * - A zero-length write, which must succeed without allocating.
  */
 static void test_vfs_write_bounds(void) {
-    vfs_file_t probe;
+    vfs_file_t probe = {0};
     for (uint32_t i = 0; i < sizeof(probe.filename); i++) probe.filename[i] = '\0';
     probe.file_size = 0;
     probe.current_offset = 0;
@@ -211,6 +211,11 @@ static void test_vfs_write_bounds(void) {
 
     KTEST_ASSERT(fs_commit_writes(&probe) == E_OK,
                  "[WRITE] committing a file with nothing buffered is a no-op");
+
+    probe.volume_prefix = 0x7fff0000u;
+    KTEST_ASSERT(fs_write_buffered(&probe, chunk, sizeof(chunk)) == sizeof(chunk) &&
+                 fs_commit_writes(&probe) == E_NODEV && !probe.write_buf && !probe.dirty,
+                 "[WRITE] a stale mount identity reports failure and releases its buffer");
 }
 
 /**

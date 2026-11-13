@@ -603,6 +603,10 @@ void run_all_selftests(void) {
             const ktest_module_t *chosen = 0;
 
             if (ft_strcmp(one, "ring3") == 0) continue;
+            if (ft_strncmp(one, "crash-", 6) == 0) {
+                run_fs_crash_probe(one + 6);
+                continue;
+            }
 
             for (int i = 0; kernel_modules[i].name != 0; i++) {
                 if (ft_strcmp(kernel_modules[i].name, one) == 0) {
@@ -648,6 +652,7 @@ void run_all_selftests(void) {
     }
 
     if (run_ring3) {
+        KTEST_ASSERT(ktest_prepare_mount_disk() == 0, "[MOUNT] Ring 3 has an isolated RAM disk");
         run_user_mode_tests();   /* iret's into Ring 3 and does not come back */
     }
 

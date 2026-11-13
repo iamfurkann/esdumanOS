@@ -111,7 +111,8 @@ void sys_auth(arch_regs_t *regs) {
 
     int p_len = 0;
     while (pass[p_len]) p_len++;
-    while (p_len > 0 && (pass[p_len - 1] == '\n' || pass[p_len - 1] == '\r' || pass[p_len - 1] == ' ')) {
+    /* Account setup accepts spaces, including the final character. */
+    while (p_len > 0 && (pass[p_len - 1] == '\n' || pass[p_len - 1] == '\r')) {
         pass[p_len - 1] = '\0';
         p_len--;
     }
@@ -280,7 +281,7 @@ void sys_sync(arch_regs_t *regs) {
      * the flush - which is what the caller actually asked for - still happens. */
     klog_persist();
     entropy_persist_seed();
-    regs->eax = bcache_flush();
+    regs->eax = fs_sync_all();
 }
 
 /**
@@ -294,7 +295,7 @@ void sys_reboot(arch_regs_t *regs) {
     }
     klog_persist();
     entropy_persist_seed();
-    int flush_result = bcache_flush();
+    int flush_result = fs_sync_all();
     if (flush_result != E_OK) {
         klog(LOG_LEVEL_ERROR, "SYSCALL", "Reboot refused: unwritten data remains in the cache.");
         regs->eax = flush_result;
@@ -356,7 +357,7 @@ void sys_halt(arch_regs_t *regs) {
     }
     klog_persist();
     entropy_persist_seed();
-    int flush_result = bcache_flush();
+    int flush_result = fs_sync_all();
     if (flush_result != E_OK) {
         klog(LOG_LEVEL_ERROR, "SYSCALL", "Halt refused: unwritten data remains in the cache.");
         regs->eax = flush_result;

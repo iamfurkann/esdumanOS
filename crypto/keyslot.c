@@ -23,10 +23,11 @@
 /**
  * @brief The bytes the tag is computed over: salt || iv || wrapped.
  *
- * Everything in the slot except the tag itself. Binding the parameters and not
- * just the ciphertext is the point: with a tag over the wrapped key alone, an
- * attacker could keep a captured ciphertext and substitute their own salt, and
- * the unwrap would then succeed under a passphrase they chose.
+ * The iteration count is not directly included in this HMAC input. It is
+ * range-checked before use and affects the derived KEK, so changing it normally
+ * changes the expected tag. The remaining superblock metadata is not covered.
+ * The three fields below are copied explicitly to define the authenticated
+ * byte sequence independently of structure layout.
  */
 #define KEYSLOT_TAG_INPUT_LEN (KEYSLOT_SALT_LEN + KEYSLOT_IV_LEN + KEYSLOT_KEY_LEN)
 
@@ -47,7 +48,7 @@ static void keyslot_tag_input(const keyslot_t *slot, uint8_t out[KEYSLOT_TAG_INP
  * @brief Derives the key-encryption key for a slot.
  *
  * The iteration count comes from the slot rather than from this build, so a disk
- * written when the cost was lower still opens. The caller is responsible for
+ * written at an older cost opens only if this build accepts that count. The caller must
  * having checked it against pbkdf2_iterations_are_acceptable() first - a count
  * read off a disk is attacker-controlled, and PBKDF2 will happily spend an
  * afternoon on two billion rounds.

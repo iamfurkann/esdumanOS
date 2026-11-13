@@ -5,27 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+Entries describe the source and observations at their dated release. Historical
+limits, counts and original security claims are not current guarantees; use
+[README.md](README.md), [SECURITY.md](SECURITY.md) and the
+[reliability audit](docs/engineering/RELIABILITY_AUDIT.md) for current behavior.
 
-### Fixed
+## [1.14.0-beta.1]
 
-- Keep `all` as the default goal in both Makefiles after generated dependency
-  files exist; otherwise a later plain `make` could build only one object and
-  the libc submake could skip rebuilding its archive.
-- Validate deferred block-cache requests before accepting or overwriting data,
-  sharing bounds and handler checks with direct block I/O. Reject unsupported
-  sector sizes before a driver can overrun a 512-byte cache slot.
-- Preserve every accepted dirty sector on device write failure, including
-  `E_NODEV`, `E_ROFS`, `E_NXIO` and `E_INVAL`. Prefer clean eviction victims and
-  try each dirty victim at most once instead of letting one failing sector stop
-  the entire cache. Recovery writes the retained bytes to their original device.
-- Return flush errors through `sync` and refuse reboot, halt or mount transitions
-  while data remains unwritten. Mount changes previously reset the entire cache
-  after ignoring the flush result.
-- Replace block-cache tests that wrote assumed-unused disk sectors with RAM-backed
-  fault-injection devices, covering admission, full-cache failure, recovery and
-  lifecycle error propagation. Runtime verification is recorded in
-  `docs/engineering/RELIABILITY_AUDIT.md`; no release assertion total is claimed.
+Source changes prepared for this release; publication is a separate step.
+
+- Keep the boot filesystem live while attaching an independent encrypted v3
+  volume at `/mnt`. Namespace traversal, working directories and descriptors
+  carry mount identity. Detach checks other processes' references and retries
+  failed writeback before it releases the volume.
+- Separate mount from disk initialization. `mkfs DEVICE SECTORS` provisions
+  a blank data disk after two passphrase prompts. `mkfs=<device>` selects a
+  first-boot disk explicitly. The filesystem checks the full device for data.
+- Bound metadata I/O to the partition, copy only the allocated bytes in a
+  partial FAT sector, and report metadata write errors to callers. Sync retries
+  pending metadata. Existing disk layouts and syscall numbers remain readable.
+- Preserve interactive disk images across `make run` and `make clean`, and
+  exercise creation, reuse and cleanup inside a disposable host test fixture.
+- Validate bounded names, unique directory entries and complete FAT ownership
+  before a volume is published. Add a read-only host image checker and six
+  reproducible sector-boundary power-cut scenarios. The v3 format remains
+  nontransactional: two measured cuts leave orphan allocations and are refused
+  on the next mount. No automatic repair or journal guarantee is claimed.
+- Require search permission on every traversed path component, including one
+  followed by `..`, and preserve pre-existing `.tmp` files during atomic update.
+- Align the login password limit with first-boot account setup at 63 characters.
+  Reject overlong password input rather than silently accepting a prefix.
+  Preserve trailing spaces during authentication, as account setup does.
+- Protect CMOS index/data accesses and clock updates from timer IRQ readers,
+  and decode twelve-hour midnight/noon correctly. Add a deterministic driver
+  model and interrupt-enabled kernel round-trip regressions.
+- Prevent xHCI timer polling from consuming a synchronous command or EP0
+  completion during USB storage setup. Match the queued request and keep
+  unrelated keyboard/bulk events flowing while it waits.
+- Reject HID usages 0xE8–0xFF before indexing the 232-entry keyboard table.
+  The documentation audit exposed this unchecked read. Add press/release and
+  subsequent valid-input regressions; the original fails a sanitizer check.
+- Reconcile public documentation: build key and first-boot requirements,
+  persistent images, v3 program refresh, volume ABI, commands, memory/driver
+  limits and complete test/release procedures. Correct claims of collision-free
+  IV/salt derivation and embedded-image authenticity, describe metadata/replay
+  limits, and retire the RFC 6070 attribution for SHA-256 PBKDF2 tests.
+  Earlier changelog wording remains history, not a current security guarantee.
 
 ## [1.13.0-beta.1] - 2026-09-03
 
@@ -100,6 +125,26 @@ can be watched, and a kernel that can say what happened to it.
 - **Three of the five refusals cannot be painted.** No framebuffer reported, a text mode,
   and an address above 4 GB all lack a mapping. The first two are also the cases where the
   text backend is the right answer and generally works.
+
+### Storage corrections included in v1.13.0-beta.1
+
+- Keep `all` as the default goal in both Makefiles after generated dependency
+  files exist; otherwise a later plain `make` could build only one object and
+  the libc submake could skip rebuilding its archive.
+- Validate deferred block-cache requests before accepting or overwriting data,
+  sharing bounds and handler checks with direct block I/O. Reject unsupported
+  sector sizes before a driver can overrun a 512-byte cache slot.
+- Preserve every accepted dirty sector on device write failure, including
+  `E_NODEV`, `E_ROFS`, `E_NXIO` and `E_INVAL`. Prefer clean eviction victims and
+  try each dirty victim at most once instead of letting one failing sector stop
+  the entire cache. Recovery writes the retained bytes to their original device.
+- Return flush errors through `sync` and refuse reboot, halt or mount transitions
+  while data remains unwritten. Mount changes previously reset the entire cache
+  after ignoring the flush result.
+- Replace block-cache tests that wrote assumed-unused disk sectors with RAM-backed
+  fault-injection devices, covering admission, full-cache failure, recovery and
+  lifecycle error propagation. Runtime verification is recorded in
+  `docs/engineering/RELIABILITY_AUDIT.md`; no release assertion total is claimed.
 
 ## [1.12.0-beta.1] - 2026-08-31
 

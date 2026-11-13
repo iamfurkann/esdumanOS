@@ -937,6 +937,7 @@ static void line_refresh(char *buf, int len, int pos);
  */
 int read_line(char *buf, int hide, int max_len) {
     int idx = 0;
+    int truncated = 0;
     while (1) {
         char c = 0;
         int r = sys_read_char(&c);
@@ -956,9 +957,19 @@ int read_line(char *buf, int hide, int max_len) {
         /* Swallowed whole. See the note above the function. */
         if (c == 27) { read_escape_key(); continue; }
 
-        if (c == '\n' || c == '\r') { buf[idx] = '\0'; printk("\n"); return 0; }
+        if (c == '\n' || c == '\r') {
+            buf[idx] = '\0';
+            printk("\n");
+            if (truncated) {
+                buf[0] = '\0';
+                printk("Input exceeds the supported length. Please try again.\n");
+                return E_NAMETOOLONG;
+            }
+            return 0;
+        }
         else if (c == '\b') { if (idx > 0) { idx--; printk("\b \b"); } }
-        else if (c >= 32 && c <= 126 && idx < max_len - 1) {
+        else if (c >= 32 && c <= 126) {
+            if (idx >= max_len - 1) { truncated = 1; continue; }
             char str[2] = { hide ? '*' : c, '\0' };
             printk(str);
             buf[idx++] = c;
@@ -1015,6 +1026,7 @@ void show_help(void) {
     printk("\n  Settings:\n");
     printk("    layout tr|us      Set keyboard layout\n");
     printk("    lockdown          Switch system to safe mode\n");
+    printk("    mkfs DEVICE SECTORS   Initialize a blank data disk (root)\n");
     printk("    setkey            Change the disk passphrase asked for at boot (root)\n");
     printk("    clear             Clear the screen\n");
     printk("\n  Operators: | (pipe, up to four stages), > (redirect), && (AND), || (OR)\n");
@@ -1938,6 +1950,36 @@ void execute_command(char **args) {
             last_exit_status = 1;
         }
     }
+    else if (ft_strcmp(args[0], "mkfs") == 0) {
+        last_exit_status = 1;
+        uint32_t sectors = 0;
+        int valid = args[1] && args[2] && *args[2] && !args[3];
+        for (const char *c = valid ? args[2] : ""; *c; c++) {
+            if (*c < '0' || *c > '9' || sectors > (0xffffffffu - (uint32_t)(*c - '0')) / 10) {
+                valid = 0;
+                break;
+            }
+            sectors = sectors * 10 + (*c - '0');
+        }
+        if (!valid || !sectors) printk("Usage: mkfs DEVICE SECTORS (see mount for capacity)\n");
+        else {
+            char pass[64] = {0}, confirm[64] = {0};
+            printk("New disk passphrase: ");
+            if (read_line(pass, 1, sizeof(pass)) == 0) {
+                printk("Repeat disk passphrase: ");
+                if (read_line(confirm, 1, sizeof(confirm)) == 0 && *pass && ft_strcmp(pass, confirm) == 0) {
+                    int rc = syscall(73, (int)args[1], (int)pass, sectors);
+                    if (!rc) { printk("Disk initialized. Use mount to attach it.\n"); last_exit_status = 0; }
+                    else if (rc == E_EXIST) printk("mkfs: disk contains data\n");
+                    else if (rc == E_BUSY) printk("mkfs: disk is mounted\n");
+                    else if (rc == E_PERM) printk("mkfs: root permission required\n");
+                    else printk("mkfs: check the device, capacity and write access\n");
+                } else printk("Passphrases must be nonempty and match.\n");
+            }
+            volatile char *a = pass, *b = confirm;
+            for (unsigned i = 0; i < sizeof(pass); i++) { a[i] = 0; b[i] = 0; }
+        }
+    }
     else if (ft_strcmp(args[0], "setkey") == 0) {
         /*
          * Changes the passphrase the disk is unlocked with at boot, which is a
@@ -2398,7 +2440,7 @@ void run_with_redirect(char **args, char *redirect_file) {
 /**
  * @brief What Tab offers, which is deliberately not the list of what runs.
  *
- * Thirty-four words reach a builtin branch in execute_command(). Thirty-two are
+ * Thirty-five words reach a builtin branch in execute_command(). Thirty-three are
  * here, and the four that are missing are missing on purpose: `panic` deliberately
  * crashes the kernel, and `stack`, `testmalloc` and `alarm` are debugging tools
  * that exist to be typed by somebody who already knows they are there. Offering
@@ -2416,7 +2458,7 @@ static const char *builtin_commands[] = {
     "cat", "cat_raw", "cd", "clear", "dmesg", "echo", "env", "exec",
     "bg", "fg", "jobs", "wait",
     "exit", "export", "halt", "help", "hexdump", "kill", "layout",
-    "lockdown", "ls", "meminfo", "mkdir", "mv", "pwd", "reboot",
+    "lockdown", "ls", "meminfo", "mkdir", "mkfs", "mv", "pwd", "reboot",
     "rm", "setkey", "sleep", "su", "sync", "write",
     0  // sentinel
 };

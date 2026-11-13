@@ -184,6 +184,141 @@ static int kt_strlen(const char *s) {
  * Ordering note: assertions that could take the kernel down are deliberately
  * placed last, so that everything before them has already been reported.
  */
+/* Exercise actual Ring 3 paths with a RAM disk supplied by the test runner. */
+/* Handshakes keep the child alive at each ownership boundary without sleeps. */
+static void test_child_volume_pins(int data_fd) {
+    int command[2] = {-1, -1}, answer[2] = {-1, -1};
+    int pipes = syscall(SYSCALL_PIPE, (int)command, 0, 0) == E_OK &&
+                syscall(SYSCALL_PIPE, (int)answer, 0, 0) == E_OK;
+    int child = pipes ? syscall(SYSCALL_FORK, 0, 0, 0) : -1;
+    char token = 1;
+    if (child == 0) {
+        syscall(SYSCALL_CLOSE, command[1], 0, 0);
+        syscall(SYSCALL_CLOSE, answer[0], 0, 0);
+        if (syscall(SYSCALL_READ, command[0], (int)&token, 1) != 1) kt_child_exit(1);
+        int ok = syscall(SYSCALL_CLOSE, data_fd, 0, 0) == E_OK &&
+                 syscall(SYSCALL_CHDIR, (int)"/mnt", 0, 0) == E_OK;
+        token = ok ? 1 : 0;
+        if (syscall(SYSCALL_WRITE, answer[1], (int)&token, 1) != 1) kt_child_exit(2);
+        if (syscall(SYSCALL_READ, command[0], (int)&token, 1) != 1) kt_child_exit(3);
+        kt_child_exit(ok ? 0 : 4);
+    }
+    KT_ASSERT(pipes && child > 0, "[MULTIMOUNT] a child inherits the secondary descriptor");
+    syscall(SYSCALL_CLOSE, command[0], 0, 0);
+    syscall(SYSCALL_CLOSE, answer[1], 0, 0);
+    int closed = syscall(SYSCALL_CLOSE, data_fd, 0, 0);
+    KT_ASSERT(child > 0 && closed == E_OK && syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_BUSY,
+              "[MULTIMOUNT] another process's descriptor alone prevents detach");
+    int moved = child > 0 && syscall(SYSCALL_WRITE, command[1], (int)&token, 1) == 1 &&
+                syscall(SYSCALL_READ, answer[0], (int)&token, 1) == 1 && token == 1;
+    KT_ASSERT(moved, "[MULTIMOUNT] child exchanges its descriptor for a secondary CWD");
+    KT_ASSERT(moved && syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_BUSY,
+              "[MULTIMOUNT] another process's CWD alone prevents detach");
+    if (child > 0) syscall(SYSCALL_WRITE, command[1], (int)&token, 1);
+    syscall(SYSCALL_CLOSE, command[1], 0, 0);
+    syscall(SYSCALL_CLOSE, answer[0], 0, 0);
+    int status = -1;
+    int reaped = child > 0 ? syscall(SYSCALL_WAIT, (int)&status, 0, 0) : -1;
+    KT_ASSERT(reaped == child && child > 0 && status == 0,
+              "[MULTIMOUNT] child exit releases its volume references");
+}
+
+static void test_volume_permissions(void) {
+    int setup = syscall(SYSCALL_CHMOD, (int)"/dual.txt", 0600, 0) == E_OK &&
+                syscall(SYSCALL_MKDIR, (int)"/mnt/private", 0, 0) == E_OK &&
+                syscall(SYSCALL_CHMOD, (int)"/mnt/private", 0700, 0) == E_OK;
+    int child = setup ? syscall(SYSCALL_FORK, 0, 0, 0) : -1;
+    if (child == 0) {
+        int ok = syscall(SYSCALL_SETUID, 1000, 0, 0) == E_OK;
+        int fd = syscall(SYSCALL_OPEN, (int)"/mnt/dual.txt", 0, 0);
+        ok = ok && fd >= 0 && syscall(SYSCALL_CLOSE, fd, 0, 0) == E_OK;
+        ok = ok && syscall(SYSCALL_OPEN, (int)"/dual.txt", 0, 0) == E_ACCES;
+        ok = ok && syscall(SYSCALL_OPEN, (int)"/mnt/private/../dual.txt", 0, 0) == E_ACCES;
+        ok = ok && syscall(SYSCALL_CHDIR, (int)"/mnt/private/..", 0, 0) == E_ACCES;
+        ok = ok && syscall(SYSCALL_MOUNT, (int)"ktram14", 0, 0) == E_PERM;
+        ok = ok && syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_PERM;
+        ok = ok && syscall(SYSCALL_MKFS, (int)"ktram14", (int)"denied", 544) == E_PERM;
+        kt_child_exit(ok ? 0 : 5);
+    }
+    int status = -1;
+    int reaped = child > 0 ? syscall(SYSCALL_WAIT, (int)&status, 0, 0) : -1;
+    KT_ASSERT(setup && child > 0 && reaped == child && status == 0,
+              "[MULTIMOUNT] unprivileged paths enforce each volume's permissions and traversal checks");
+}
+
+static void test_exact_authentication(void) {
+    /* A child isolates the deliberate failure's rate-limit state. Self-test
+     * provisioning creates root with exactly "test", without a final space. */
+    int child = syscall(SYSCALL_FORK, 0, 0, 0);
+    if (child == 0) {
+        int exact = syscall(SYSCALL_AUTH, (int)"root", (int)"test", 0);
+        int altered = syscall(SYSCALL_AUTH, (int)"root", (int)"test ", 0);
+        kt_child_exit(exact == 0 && altered < 0 ? 0 : 1);
+    }
+    int status = -1;
+    int reaped = child > 0 ? syscall(SYSCALL_WAIT, (int)&status, 0, 0) : -1;
+    KT_ASSERT(child > 0 && reaped == child && status == 0,
+              "[AUTH] authentication accepts the exact password and preserves trailing spaces");
+}
+
+static void test_two_volumes(void) {
+    const char *dev = "ktram14", *pass = "private-volume-test";
+    char buf[32] = {0};
+    esd_stat_t primary, secondary;
+    KT_ASSERT(syscall(SYSCALL_MOUNT, (int)dev, 0, 0) == E_INVAL,
+              "[MULTIMOUNT] blank mount refuses without formatting");
+    KT_ASSERT(syscall(SYSCALL_MKFS, (int)dev, (int)pass, 544) == E_OK,
+              "[MULTIMOUNT] explicitly initialize the named RAM disk");
+    KT_ASSERT(syscall(SYSCALL_CREATE_FILE, (int)"/dual.txt", (int)"root", 0) == E_OK,
+              "[MULTIMOUNT] root file created");
+    int root_fd = syscall(SYSCALL_OPEN, (int)"/dual.txt", 0, 0);
+    KT_ASSERT(root_fd >= 0 && syscall(SYSCALL_MOUNT, (int)dev, (int)pass, MOUNT_UNLOCK_V1) == E_OK,
+              "[MULTIMOUNT] root descriptor survives attaching another disk");
+    int old_id = syscall(SYSCALL_GET_DIR_ID, (int)"/mnt", 0, 0);
+    KT_ASSERT(old_id > 65535 && syscall(SYSCALL_CHDIR, (int)"/mnt", 0, 0) == E_OK,
+              "[MULTIMOUNT] chdir crosses into the attached filesystem");
+    KT_ASSERT(syscall(SYSCALL_GETCWD, (int)buf, sizeof(buf), 0) == 4 &&
+              buf[0]=='/' && buf[1]=='m' && buf[2]=='n' && buf[3]=='t' && !buf[4],
+              "[MULTIMOUNT] cwd names the covered directory");
+    KT_ASSERT(syscall(SYSCALL_CREATE_FILE, (int)"dual.txt", (int)"data", 0) == E_OK,
+              "[MULTIMOUNT] relative create uses the CWD volume");
+    int data_fd = syscall(SYSCALL_OPEN, (int)"dual.txt", 0, 0);
+    KT_ASSERT(syscall(SYSCALL_FSTAT, root_fd, (int)&primary, 0) == E_OK &&
+              syscall(SYSCALL_FSTAT, data_fd, (int)&secondary, 0) == E_OK &&
+              primary.st_ino < 65536 && secondary.st_ino > 65535 &&
+              secondary.st_parent == (unsigned)old_id, "[MULTIMOUNT] descriptor metadata includes mount identity");
+    KT_ASSERT(syscall(SYSCALL_READ, root_fd, (int)buf, 4) == 4 && buf[0]=='r' && buf[3]=='t' &&
+              syscall(SYSCALL_READ, data_fd, (int)buf, 4) == 4 && buf[0]=='d' && buf[3]=='a',
+              "[MULTIMOUNT] identical file names read different encrypted data");
+    KT_ASSERT(syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_BUSY, "[MULTIMOUNT] active secondary stays mounted");
+    syscall(SYSCALL_CLOSE, data_fd, 0, 0);
+    KT_ASSERT(syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_BUSY, "[MULTIMOUNT] a CWD alone pins its mount");
+    KT_ASSERT(syscall(SYSCALL_CHDIR, (int)"..", 0, 0) == E_OK &&
+              syscall(SYSCALL_GETCWD, (int)buf, sizeof(buf), 0) == 1 && buf[0]=='/',
+              "[MULTIMOUNT] parent of the attached root crosses back to /");
+    test_volume_permissions();
+    KT_ASSERT(syscall(SYSCALL_MV_FILE, (int)"/dual.txt", (int)"/mnt/moved", 0) == E_XDEV,
+              "[MULTIMOUNT] rename across volumes fails before mutation");
+    KT_ASSERT(syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_OK &&
+              syscall(SYSCALL_READDIR, old_id, (int)buf, sizeof(buf)) == E_NOENT,
+              "[MULTIMOUNT] root descriptor stays open and detached directory ID expires");
+    KT_ASSERT(syscall(SYSCALL_MOUNT, (int)dev, (int)pass, MOUNT_UNLOCK_V1) == E_OK &&
+              syscall(SYSCALL_GET_DIR_ID, (int)"/mnt", 0, 0) != old_id &&
+              syscall(SYSCALL_READDIR, old_id, (int)buf, sizeof(buf)) == E_NOENT,
+              "[MULTIMOUNT] remount cannot revive an old handle");
+    data_fd = syscall(SYSCALL_OPEN, (int)"/mnt/dual.txt", 0, 0);
+    KT_ASSERT(data_fd >= 0 && syscall(SYSCALL_READ, data_fd, (int)buf, 4) == 4 &&
+              buf[0]=='d' && buf[3]=='a', "[MULTIMOUNT] secondary data survives detach and unlock");
+    KT_ASSERT(syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_BUSY,
+              "[MULTIMOUNT] open descriptor pins mount even with root CWD");
+    test_child_volume_pins(data_fd);
+    KT_ASSERT(syscall(SYSCALL_UMOUNT, 0, 0, 0) == E_OK &&
+              syscall(SYSCALL_FSTAT, root_fd, (int)&primary, 0) == E_OK,
+              "[MULTIMOUNT] detaching the secondary preserves the root file");
+    syscall(SYSCALL_CLOSE, root_fd, 0, 0);
+    syscall(SYSCALL_RM_FILE, (int)"/dual.txt", 0, 0);
+}
+
 void main(void) {
     /* ------------------------------------------------------------------
      * 1. Prove we really are in Ring 3.
@@ -214,6 +349,9 @@ void main(void) {
     const char *banner = "[RING3] hello from CPL=3\n";
     int wr = syscall(SYSCALL_WRITE, 1, (int)banner, kt_strlen(banner));
     KT_ASSERT(wr == kt_strlen(banner), "[RING3] write() with a valid user buffer returns the byte count");
+
+    test_exact_authentication();
+    test_two_volumes();
 
     int uid = syscall(SYSCALL_GETUID, 0, 0, 0);
     KT_ASSERT(uid >= 0, "[RING3] getuid() returns a valid uid");

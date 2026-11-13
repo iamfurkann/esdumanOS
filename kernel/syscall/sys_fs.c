@@ -687,6 +687,9 @@ void sys_mv_file(arch_regs_t *regs) {
      * silently dropping the destination directory and renaming in place, which
      * is what ignoring new_parent would do.
      */
+    if (((uint32_t)old_parent >> 16) != ((uint32_t)new_parent >> 16)) {
+        regs->eax = E_XDEV; return;
+    }
     if (old_parent != new_parent) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "mv: moving between directories is not supported.");
         regs->eax = E_INVAL; return;
@@ -753,22 +756,11 @@ static int resolve_dir_from_cwd(const char *path) {
         target = parent;
     }
     else if (basename[0] == '.' && basename[1] == '.' && basename[2] == '\0') {
-        /* Root is its own parent; anything unfound falls back to root. */
-        target = 0;
-        for (int k = 0; k < fs_max_entries; k++) {
-            if (dir_table[k].entry_id == parent && dir_table[k].file_type == FT_DIR &&
-                dir_table[k].is_used == 1) {
-                target = dir_table[k].parent_id;
-                break;
-            }
-        }
+        target = fs_parent_dir(parent);
+    } else {
+        target = fs_child_dir(parent, basename);
     }
-    else {
-        int idx = fs_get_entry_idx(basename, parent);
-        if (idx == -1) return E_NOENT;
-        if (dir_table[idx].file_type != FT_DIR) return E_NOTDIR;
-        target = dir_table[idx].entry_id;
-    }
+    if (target < 0) return target;
 
     if (!check_vfs_access(target, 0)) return E_ACCES;
     return target;
@@ -833,18 +825,12 @@ void sys_getcwd(arch_regs_t *regs) {
     while (id != 0) {
         if (depth >= GETCWD_MAX_DEPTH) { regs->eax = E_NAMETOOLONG; return; }
 
-        int idx = -1;
-        for (int k = 0; k < fs_max_entries; k++) {
-            if (dir_table[k].entry_id == id && dir_table[k].file_type == FT_DIR &&
-                dir_table[k].is_used == 1) {
-                idx = k;
-                break;
-            }
-        }
-        if (idx == -1) { regs->eax = E_NOENT; return; }
-
-        chain[depth++] = idx;
-        id = dir_table[idx].parent_id;
+        const disk_file_entry_t *entry = fs_entry(id);
+        if (!entry || entry->file_type != FT_DIR) { regs->eax = E_NOENT; return; }
+        chain[depth++] = id;
+        int parent = fs_parent_dir(id);
+        if (parent < 0) { regs->eax = parent; return; }
+        id = (fs_id_t)parent;
     }
 
     char path[GETCWD_MAX_PATH];
@@ -853,7 +839,9 @@ void sys_getcwd(arch_regs_t *regs) {
 
     /* chain holds cwd-first, so render it in reverse to get root-first. */
     for (int d = depth - 1; d >= 0; d--) {
-        const char *name = dir_table[chain[d]].filename;
+        const disk_file_entry_t *entry = fs_entry(chain[d]);
+        if (!entry) { regs->eax = E_NOENT; return; }
+        const char *name = entry->filename;
 
         if (pos > 1) {
             if (pos + 1 >= sizeof(path)) { regs->eax = E_NAMETOOLONG; return; }
@@ -883,13 +871,6 @@ void sys_getcwd(arch_regs_t *regs) {
  * @param id Entry id to find. 0 is the root, which has no slot of its own.
  * @return Index into dir_table, or -1 when no live entry carries that id.
  */
-static int dir_index_of_entry_id(fs_id_t id) {
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used == 1 && dir_table[i].entry_id == id) return i;
-    }
-    return -1;
-}
-
 /**
  * @brief Describes the root directory, which owns no directory table entry.
  *
@@ -935,20 +916,21 @@ static void stat_fill_root(esd_stat_t *out) {
  *                  entry is not looked up twice; fs_size() only reads from it.
  * @return E_OK on success, or a negative error code.
  */
-static int stat_fill_from_index(esd_stat_t *out, int idx, vfs_file_t *open_file) {
-    if (idx < 0 || idx >= fs_max_entries || dir_table[idx].is_used != 1) return E_NOENT;
+static int stat_fill_entry(esd_stat_t *out, fs_id_t id, vfs_file_t *open_file) {
+    if (id == 0) { stat_fill_root(out); return E_OK; }
+    const disk_file_entry_t *entry = fs_entry(id);
+    if (!entry) return E_NOENT;
+    out->st_ino = id;
+    out->st_uid = entry->owner_uid;
+    out->st_gid = entry->owner_gid;
+    out->st_parent = ((uint16_t)id == 0 ? 0 : (id & 0xffff0000u)) | entry->parent_id;
+    out->st_type = entry->file_type;
+    out->st_disk_size = entry->file_size;
+    out->st_mtime = entry->mtime;
+    out->st_ctime = entry->ctime;
+    out->st_mode = entry->mode & FS_MODE_PERM_MASK;
 
-    out->st_ino = dir_table[idx].entry_id;
-    out->st_uid = dir_table[idx].owner_uid;
-    out->st_gid = dir_table[idx].owner_gid;
-    out->st_parent = dir_table[idx].parent_id;
-    out->st_type = dir_table[idx].file_type;
-    out->st_disk_size = dir_table[idx].file_size;
-    out->st_mtime = dir_table[idx].mtime;
-    out->st_ctime = dir_table[idx].ctime;
-    out->st_mode = dir_table[idx].mode & FS_MODE_PERM_MASK;
-
-    if (dir_table[idx].file_type == FT_DIR) {
+    if (entry->file_type == FT_DIR) {
         /* Directories hold no file content: fs_mkdir() stores size 0 and there
          * is nothing encrypted to measure. */
         out->st_encrypted = 0;
@@ -961,7 +943,7 @@ static int stat_fill_from_index(esd_stat_t *out, int idx, vfs_file_t *open_file)
     if (open_file != 0) return fs_size(open_file, &out->st_size);
 
     vfs_file_t probe;
-    if (fs_open(dir_table[idx].filename, dir_table[idx].parent_id, &probe) != E_OK) return E_NOENT;
+    if (fs_open(entry->filename, out->st_parent, &probe) != E_OK) return E_NOENT;
     return fs_size(&probe, &out->st_size);
 }
 
@@ -1003,19 +985,16 @@ void sys_stat(arch_regs_t *regs) {
         int target = resolve_dir_from_cwd(path);
         if (target < 0) { regs->eax = target; return; }
 
-        if (target == 0) {
-            stat_fill_root(&st);
-            rc = E_OK;
-        } else {
-            rc = stat_fill_from_index(&st, dir_index_of_entry_id((fs_id_t)target), 0);
-        }
+        rc = stat_fill_entry(&st, (fs_id_t)target, 0);
     } else {
         if (!check_vfs_access(parent_id, 0)) {
             klog(LOG_LEVEL_WARN, "SYSCALL", "stat: Permission denied");
             regs->eax = E_ACCES; return;
         }
 
-        rc = stat_fill_from_index(&st, fs_get_entry_idx(basename, (fs_id_t)parent_id), 0);
+        int idx = fs_get_entry_idx(basename, (fs_id_t)parent_id);
+        rc = idx < 0 ? E_NOENT :
+             stat_fill_entry(&st, fs_follow_mount((parent_id & 0xffff0000u) | (uint32_t)idx), 0);
     }
 
     if (rc != E_OK) { regs->eax = rc; return; }
@@ -1045,7 +1024,7 @@ void sys_fstat(arch_regs_t *regs) {
     vfs_file_t *file = (vfs_file_t *)desc->ptr;
 
     esd_stat_t st;
-    int rc = stat_fill_from_index(&st, file->inode_idx, file);
+    int rc = stat_fill_entry(&st, file->volume_prefix | (fs_id_t)file->inode_idx, file);
     if (rc != E_OK) { regs->eax = rc; return; }
 
     regs->eax = (copy_to_user(user_out, &st, sizeof(st)) == E_OK) ? E_OK : E_FAULT;
@@ -1078,13 +1057,14 @@ static int entry_id_for_path(const char *path) {
         if (target < 0) return target;
         /* The root owns no directory table entry, so it has nothing to carry a
          * mode and nothing to change. */
-        if (target == 0) return E_PERM;
+        if ((uint16_t)target == 0) return E_PERM;
         return target;
     }
 
     idx = fs_get_entry_idx(basename, (fs_id_t)parent_id);
     if (idx < 0) return E_NOENT;
-    return dir_table[idx].entry_id;
+    fs_id_t id = fs_follow_mount((parent_id & 0xffff0000u) | (uint32_t)idx);
+    return (uint16_t)id == 0 ? E_PERM : (int)id;
 }
 
 /**
@@ -1097,7 +1077,7 @@ static int entry_id_for_path(const char *path) {
 void sys_chmod(arch_regs_t *regs) {
     char path[MAX_PATH];
     uint32_t mode = (uint32_t)regs->ecx;
-    int entry_id, idx;
+    int entry_id;
     uint32_t uid;
 
     if (!copy_user_string(path, (const char *)regs->ebx, sizeof(path))) { regs->eax = E_FAULT; return; }
@@ -1105,11 +1085,11 @@ void sys_chmod(arch_regs_t *regs) {
     entry_id = entry_id_for_path(path);
     if (entry_id < 0) { regs->eax = entry_id; return; }
 
-    idx = dir_index_of_entry_id((fs_id_t)entry_id);
-    if (idx < 0) { regs->eax = E_NOENT; return; }
+    const disk_file_entry_t *entry = fs_entry((fs_id_t)entry_id);
+    if (!entry) { regs->eax = E_NOENT; return; }
 
     uid = current_task ? current_task->uid : 0;
-    if (uid != 0 && dir_table[idx].owner_uid != uid) {
+    if (uid != 0 && entry->owner_uid != uid) {
         klog(LOG_LEVEL_WARN, "SYSCALL", "chmod: not the owner");
         regs->eax = E_PERM; return;
     }
@@ -1282,7 +1262,9 @@ void sys_read_raw(arch_regs_t *regs) {
  *   eax = total bytes written, or negative error code
  */
 void sys_readdir(arch_regs_t *regs) {
-    fs_id_t parent_id = (fs_id_t)regs->ebx;
+    fs_id_t parent_id = fs_follow_mount((fs_id_t)regs->ebx);
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume || !fs_dir_exists(parent_id)) { regs->eax = E_NOENT; return; }
     char *user_buf = (char *)regs->ecx;
     uint32_t buf_size = regs->edx;
 
@@ -1314,20 +1296,20 @@ void sys_readdir(arch_regs_t *regs) {
     if (!kbuf) { regs->eax = E_NOMEM; return; }
 
     uint32_t offset = 0;
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].parent_id == parent_id) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used && volume->entries[i].parent_id == (uint16_t)parent_id) {
             uint32_t name_len = 0;
-            while (dir_table[i].filename[name_len] && name_len < MAX_FILENAME - 1) name_len++;
+            while (volume->entries[i].filename[name_len] && name_len < MAX_FILENAME - 1) name_len++;
 
             // Need space for: name + type byte + null separator.
             if (offset + name_len + 2 > cap) break;
 
             for (uint32_t j = 0; j < name_len; j++) {
-                kbuf[offset++] = dir_table[i].filename[j];
+                kbuf[offset++] = volume->entries[i].filename[j];
             }
             // Type marker sits right after the name, before the separator:
             // "filename\x01" for directories, "filename\x02" for files.
-            kbuf[offset++] = (dir_table[i].file_type == FT_DIR) ? 1 : 2;
+            kbuf[offset++] = (volume->entries[i].file_type == FT_DIR) ? 1 : 2;
             kbuf[offset++] = '\0';
         }
     }

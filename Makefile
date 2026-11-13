@@ -104,6 +104,7 @@ TEST_SRCS = tests/kernel/selftest.c \
             tests/kernel/test_usbkbd.c \
             tests/kernel/test_usbmsc.c \
             tests/kernel/test_mount.c \
+            tests/kernel/test_fs_crash.c \
             tests/kernel/test_acpi.c \
             tests/kernel/test_earlyfb.c \
             tests/kernel/test_console.c \
@@ -220,9 +221,8 @@ ifeq ($(ARCH), x86)
     # run with -display none.
     #
     # Two sticks, and they are what makes `mount` demonstrable by hand: this is
-    # the release where a person can list two disks, move the file system to one
-    # of them and back, and the images have existed since v1.11.0 with nothing
-    # attached to them.
+    # release where root stays live while one independently keyed disk attaches
+    # at /mnt. Blank data disks require explicit mkfs first.
     #
     # The ports are named here for the same reason they are named on the test
     # bench, and the roles keep the same numbers so that "usb0 is on port 3"
@@ -823,6 +823,12 @@ src/resources/edit_elf_data.c: apps/bin/edit.elf tools/encrypt_tool
 
 
 test:
+	@python3 tests/host/test_disk_targets.py
+	@python3 tests/host/test_fs_image.py
+	@python3 tests/host/test_storage_terminal.py
+	@mkdir -p tests/host/bin
+	@gcc -Wall -Wextra -Werror -iquote ./include tests/host/c/test_rtc.c -o tests/host/bin/test_rtc
+	@./tests/host/bin/test_rtc
 	@echo "--- Running Host Unit Tests ---"
 	
 	@gcc -Wall -Wextra -iquote ./include -DARCH_X86 tests/host/c/test_crypto.c crypto/aes.c -o tests/host/test_crypto
@@ -901,16 +907,19 @@ test_matrix: test_build
 	@$(MAKE) -j4 --output-sync=target QEMU_TEST_TIMEOUT=$(QEMU_MATRIX_TIMEOUT) \
 		test_kernel test_kernel_q35 test_kernel_uefi test_smap
 
+# Explicit opt-in: each power-cut case creates its own disposable raw image.
+.PHONY: test_powercut
+test_powercut: test_build
+	@python3 tests/host/test_fs_powercut.py --kernel $(TEST_BIN) \
+		--output $(TESTRUN_ROOT)/powercut --timeout $(QEMU_TEST_TIMEOUT)
+
 test_kernel: test_build
 	@mkdir -p $(RUN)
 	@echo "--- Running Kernel QEMU Self-Tests (PBKDF2=$(PBKDF2_TEST_ITERATIONS) iterations, CPU='$(QEMU_TEST_CPU)') ---"
 	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > $(RUN)/message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > $(RUN)/gizli.txt
-	@dd if=$(RUN)/message.txt of=$(RUN)/disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
-	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) $(QEMU_TEST_CPU) -append "kernel_pass=$(KERNEL_PASS)" \
+	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) $(QEMU_TEST_CPU) -append "kernel_pass=$(KERNEL_PASS) mkfs=ata0" \
 		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -960,11 +969,8 @@ test_kernel_q35: test_build
 	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > $(RUN)/message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > $(RUN)/gizli.txt
-	@dd if=$(RUN)/message.txt of=$(RUN)/disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -M q35 -kernel $(TEST_BIN) $(QEMU_TEST_CPU) \
-		-append "kernel_pass=$(KERNEL_PASS)" \
+		-append "kernel_pass=$(KERNEL_PASS) mkfs=sata0" \
 		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -1061,14 +1067,11 @@ test_kernel_uefi: test_build
 	@rm -rf $(RUN)/isodir
 	@mkdir -p $(RUN)/isodir/boot/grub
 	@cp $(TEST_BIN) $(RUN)/isodir/boot/myos.bin
-	@printf 'set default=0\nset timeout=0\ninsmod all_video\ninsmod multiboot2\n\nmenuentry "esdumanOS self-test" {\n    multiboot2 /boot/myos.bin kernel_pass=%s\n    boot\n}\n' "$(KERNEL_PASS)" > $(RUN)/isodir/boot/grub/grub.cfg
+	@printf 'set default=0\nset timeout=0\ninsmod all_video\ninsmod multiboot2\n\nmenuentry "esdumanOS self-test" {\n    multiboot2 /boot/myos.bin kernel_pass=%s mkfs=sata0\n    boot\n}\n' "$(KERNEL_PASS)" > $(RUN)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue -o $(UEFI_TEST_ISO) $(RUN)/isodir > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@echo "Merhaba Hard Disk! Ben esdumanOS!" > $(RUN)/message.txt
-	@echo "Bu bir esdumanOS gizli metin belgesidir!" > $(RUN)/gizli.txt
-	@dd if=$(RUN)/message.txt of=$(RUN)/disk.img bs=512 seek=2048 conv=notrunc > /dev/null 2>&1
 	@cp $(OVMF_VARS) $(RUN)/ovmf_vars.fd
 	@chmod u+w $(RUN)/ovmf_vars.fd
 	@if timeout --foreground $(QEMU_TEST_TIMEOUT) qemu-system-x86_64 -M q35 \
@@ -1105,7 +1108,7 @@ test_smap: test_build
 	@dd if=/dev/zero of=$(RUN)/disk.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb.img bs=512 count=4096 > /dev/null 2>&1
 	@dd if=/dev/zero of=$(RUN)/usb2.img bs=512 count=8192 > /dev/null 2>&1
-	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=$(KERNEL_PASS)" \
+	@if timeout --foreground $(QEMU_TEST_TIMEOUT) $(QEMU) -kernel $(TEST_BIN) -cpu max -append "kernel_pass=$(KERNEL_PASS) mkfs=ata0" \
 		-drive format=raw,file=$(RUN)/disk.img,if=ide,index=0,media=disk \
 		$(QEMU_TEST_USB) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -1151,7 +1154,14 @@ fuzz:
 	@echo "Testing known crash (corpus) files, then generating new attack vectors..."
 	@./tests/host/fuzz_parser tests/host/corpus -max_total_time=10
 
-run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
+# Interactive disks can contain user data. Make creates each missing target
+# once; exclusive creation also protects a concurrently created path.
+disk.img usb.img: IMAGE_SECTORS := 4096
+usb2.img: IMAGE_SECTORS := 8192
+disk.img usb.img usb2.img:
+	@dd if=/dev/zero of=$@ bs=512 count=$(IMAGE_SECTORS) conv=excl status=none
+
+run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf | disk.img usb.img usb2.img
 	@echo "--- [1/4] Encrypting ELF binaries..."
 	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
@@ -1170,9 +1180,6 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 	@echo "--- [3/4] Rebuilding kernel (with encrypted ELF binaries)..."
 	@$(MAKE) $(ISO)
 	@echo "--- [4/4] Preparing disk image and launching QEMU..."
-	@dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	@echo "    Display: VNC on 127.0.0.1:5901 - tunnel with: ssh -L 5901:localhost:5901 <host>"
 	$(QEMU) $(QEMU_FLAGS)
 
@@ -1189,11 +1196,8 @@ run: apps/init.elf tools/encrypt_tool $(ISO) hello.elf apps/bin/clear.elf apps/b
 # terminal is a great deal less trouble than a VNC client over ssh; and this is
 # the only thing that ever exercises the text-mode fallback outside the test
 # suite.
-run_text:
+run_text: | disk.img usb.img usb2.img
 	@echo "--- Booting in a terminal. Choose the second GRUB entry (text mode). ---"
-	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@test -f usb.img || dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@test -f usb2.img || dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	$(QEMU) $(QEMU_FLAGS_TEXT)
 
 clean:
@@ -1231,7 +1235,7 @@ clean:
 	rm -f apps/bin/*.elf apps/bin/*_encrypted.elf
 	rm -f tests/user/*.elf
 	rm -rf src/resources/*_data.c src/resources/*.o
-	rm -f disk.img usb.img usb2.img kernel_log.txt
+	rm -f kernel_log.txt
 	rm -f tests/host/test_runner tests/host/test_crypto tests/host/test_hash tests/host/test_elf_validation tests/host/fuzz_parser
 	rm -f $(BIN) $(TEST_BIN)
 	rm -rf isodir isodir_uefi message.txt gizli.txt
@@ -1244,12 +1248,13 @@ clean:
 # =============================================================================
 
 # Fast development build + run. Reduces PBKDF2 to 1000 iterations for instant
-# password setup. Preserves disk.img across runs to skip first-boot setup.
+# password setup. Preserves disk.img across runs; a blank root still needs an
+# explicit mkfs=ata0 (or mkfs=sata0) boot argument.
 # Usage: make run-dev
 # Builds into build/dev. The reduced iteration count used to be applied by adding
 # to CFLAGS for this target, which put dev-cost objects into the tree the release
 # image is linked from - the same hazard the test targets had.
-run-dev: apps/init.elf tools/encrypt_tool hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf
+run-dev: apps/init.elf tools/encrypt_tool hello.elf apps/bin/clear.elf apps/bin/echo.elf apps/bin/sh.elf | disk.img usb.img usb2.img
 	@echo "--- [DEV 1/4] Encrypting ELF binaries..."
 	@./tools/encrypt_tool apps/init.elf apps/init_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
 	@./tools/encrypt_tool hello.elf apps/hello_encrypted.elf $(ESDUMAN_ELF_KEY_HEX)
@@ -1266,17 +1271,11 @@ run-dev: apps/init.elf tools/encrypt_tool hello.elf apps/bin/clear.elf apps/bin/
 	@echo "--- [DEV 3/4] Rebuilding kernel (dev mode, PBKDF2=1000)..."
 	@$(MAKE) BUILD=dev EXTRA_CFLAGS='-DPBKDF2_DEV_ITERATIONS=1000' $(ISO)
 	@echo "--- [DEV 4/4] Launching QEMU..."
-	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@test -f usb.img || dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@test -f usb2.img || dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
 	$(QEMU) $(QEMU_FLAGS)
 
 # GDB debug target: starts QEMU with GDB stub, waits for debugger connection.
 # Usage: make debug (then in another terminal: gdb -ex 'target remote :1234' myos.bin)
-debug: $(ISO)
-	@test -f disk.img || dd if=/dev/zero of=disk.img bs=512 count=4096 > /dev/null 2>&1
-	@test -f usb.img || dd if=/dev/zero of=usb.img bs=512 count=4096 > /dev/null 2>&1
-	@test -f usb2.img || dd if=/dev/zero of=usb2.img bs=512 count=8192 > /dev/null 2>&1
+debug: $(ISO) | disk.img usb.img usb2.img
 	@echo "--- Waiting for GDB connection on :1234 ---"
 	@echo "--- Run: gdb -ex 'target remote :1234' myos.bin ---"
 	$(QEMU) $(QEMU_FLAGS) -s -S
@@ -1286,7 +1285,7 @@ debug: $(ISO)
 restart:
 	$(QEMU) $(QEMU_FLAGS)
 
-# Reset dev disk: delete disk.img to force first-boot setup on next run-dev
+# Delete disk.img; a newly created replacement still needs mkfs=<device>.
 reset-disk:
 	rm -f disk.img
-	@echo "disk.img removed. Next 'make run-dev' will trigger first-boot setup."
+	@echo "disk.img removed. Next boot requires explicit mkfs=ata0 (or mkfs=sata0 on q35) to provision it."

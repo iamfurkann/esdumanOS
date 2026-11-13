@@ -26,22 +26,39 @@
 #include "errno.h"
 #include "libft.h"
 
-/*
- * High enough to be past anything the file system uses on either disk, and low
- * enough to exist on both of them - which is the half that was missing. This was
- * 4200, chosen as "past everything", and 4200 is past the end of the test images
- * as well: the root is 4096 sectors and the stick was 2048. Both writes were
- * refused by the block layer's bounds check, both slots stayed dirty forever,
- * and because a slot nothing can write is also never touched again it became the
- * least recently used one - so every eviction for the rest of the boot picked it,
- * failed, and returned no slot at all. Two sectors nobody needed stopped the
- * whole cache.
- *
- * 4050 sits inside both images and clear of the 4000-4032 range test_bcache.c
- * dirties, in the same region that file documents as untouched by a boot. The
- * assertion below is what keeps it true if an image is ever resized.
- */
-#define MT_TEST_SECTOR 4050
+#include "fs.h"
+
+#define RAM_SECTORS 544u
+static uint8_t media[RAM_SECTORS][512];
+static int fail_read, fail_write, write_count;
+static int ram_read(void *ctx, uint32_t lba, uint8_t *buf) {
+    (void)ctx;
+    if (fail_read || lba >= RAM_SECTORS) return E_IO;
+    ft_memcpy(buf, media[lba], 512);
+    return E_OK;
+}
+static int ram_write(void *ctx, uint32_t lba, const uint8_t *buf) {
+    (void)ctx;
+    if (fail_write || lba >= RAM_SECTORS) return E_IO;
+    ft_memcpy(media[lba], buf, 512);
+    write_count++;
+    return E_OK;
+}
+static blockdev_t ram_disk = {
+    .name = "ktram14", .sector_size = 512, .sector_count = RAM_SECTORS,
+    .read = ram_read, .write = ram_write
+};
+
+/* Only test builds register this device. All destructive tests address it
+ * by its unique name, never by physical discovery order. */
+int ktest_prepare_mount_disk(void) {
+    if (fs_secondary_device() == &ram_disk) return E_BUSY;
+    fail_read = fail_write = 0;
+    if (bcache_flush_dev(&ram_disk) != E_OK) return E_IO;
+    ft_memset(media, 0, sizeof(media));
+    write_count = 0;
+    return blockdev_register(&ram_disk);
+}
 
 /**
  * @brief The table, and what it refuses.
@@ -86,106 +103,178 @@ static void run_registry_assertions(void) {
                  "[STRICT] [MOUNT] a device that cannot read is refused at the table rather than at the first mount");
 }
 
-/**
- * @brief The assertion this release turns on.
- *
- * The same sector number on two devices must be two different sectors. Before
- * the cache carried a device it was one, and nothing anywhere would have said
- * so.
- */
-static void run_cache_separation_assertions(void) {
+/* Restore a formatted fixture between corruptions. Only clean, detached
+ * cache entries are invalidated before touching the RAM backing store. */
+static uint8_t pristine[RAM_SECTORS][512];
+static void restore_fixture(void) {
+    bcache_flush_dev(&ram_disk);
+    ft_memcpy(media, pristine, sizeof(media));
+}
+
+static int rejects_corruption(const char *pass) {
+    int before = write_count;
+    int rc = fs_attach(&ram_disk, pass);
+    int rejected = rc == E_INVAL && !fs_secondary_device() && write_count == before;
+    if (rc == E_OK) fs_detach();
+    return rejected;
+}
+
+static void run_media_validation(const char *pass) {
+    bcache_flush_dev(&ram_disk);
+    ft_memcpy(pristine, media, sizeof(media));
+    disk_superblock_t *super = (disk_superblock_t *)media[FS_PART_START_LBA];
+    uint32_t dir_lba = FS_PART_START_LBA + super->dir_start;
+    uint32_t fat_lba = FS_PART_START_LBA + super->fat_start;
+    disk_file_entry_t *entries = (disk_file_entry_t *)media[dir_lba];
+    uint32_t *fat = (uint32_t *)media[fat_lba];
+
+    super->fat_start = super->dir_start;
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] overlapping directory and FAT are rejected without writes");
+    restore_fixture();
+    super->total_clusters = FS_MAX_CLUSTERS_CAP;
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] allocation geometry cannot extend beyond the partition");
+    restore_fixture();
+    super->max_entries = 0;
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] zero directory entries are rejected before allocation");
+    restore_fixture();
+    entries[1].is_used = 1;
+    entries[1].entry_id = 1;
+    ft_memset(entries[1].filename, 'x', MAX_FILENAME);
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] unterminated disk names never reach string lookup");
+    restore_fixture();
+    entries[1].is_used = entries[2].is_used = 1;
+    entries[1].entry_id = 1;
+    entries[2].entry_id = 2;
+    ft_strcpy(entries[1].filename, "duplicate");
+    ft_strcpy(entries[2].filename, "duplicate");
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] duplicate names cannot make lookup ambiguous");
+    restore_fixture();
+    entries[1].is_used = 1;
+    entries[1].entry_id = 1;
+    entries[1].file_type = FT_DIR;
+    entries[1].parent_id = 1;
+    ft_strcpy(entries[1].filename, "cycle");
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] cyclic parents leave both namespace and disk unchanged");
+    restore_fixture();
+    fat[2] = FAT_EOF;
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] an allocated cluster with no owner is rejected");
+    restore_fixture();
+    entries[1].is_used = 1;
+    entries[1].entry_id = 1;
+    entries[1].file_size = 4097;
+    entries[1].start_cluster = 2;
+    ft_strcpy(entries[1].filename, "cycle");
+    fat[2] = 2;
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] cyclic file chains are rejected before unlock");
+    fat[2] = FAT_EOF;
+    bcache_flush_dev(&ram_disk);
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] a file length beyond its chain is rejected");
+    entries[1].file_size = 1;
+    entries[2] = entries[1];
+    entries[2].entry_id = 2;
+    ft_strcpy(entries[2].filename, "shared");
+    bcache_flush_dev(&ram_disk);
+    KTEST_ASSERT(rejects_corruption(pass), "[MOUNT] two files cannot own the same data cluster");
+    restore_fixture();
+}
+
+static void run_live_volume_assertions(fs_id_t id) {
+    const uint8_t primary[] = "root", secondary[] = "data";
+    int created = fs_create_file("volume-slot.txt", primary, 4, 0);
+    int slot = fs_get_entry_idx("volume-slot.txt", 0);
+    fs_volume_t *v = fs_volume_for(id);
+    int padded = v && slot > 0 && slot < v->entry_count;
+    for (int i = 1; padded && i < slot; i++) {
+        char name[32];
+        kbprintf(name, sizeof(name), 0, "pad-%d", i);
+        if (fs_mkdir(name, id) != E_OK) padded = 0;
+    }
+    int data = padded ? fs_create_file("volume-slot.txt", secondary, 4, id) : E_IO;
+    KTEST_ASSERT(created == E_OK && data == E_OK && fs_get_entry_idx("volume-slot.txt", id) == slot,
+                 "[MOUNT] fixture uses exactly the same local file slot on both disks");
+    vfs_file_t root_file = {0}, data_file = {0};
+    uint8_t a[4] = {0}, b[4] = {0};
+    KTEST_ASSERT(fs_open("volume-slot.txt", 0, &root_file) == E_OK &&
+                 fs_open("volume-slot.txt", id, &data_file) == E_OK &&
+                 fs_read(&root_file, a, sizeof(a)) == 4 && fs_read(&data_file, b, sizeof(b)) == 4 &&
+                 ft_memcmp(a, primary, 4) == 0 && ft_memcmp(b, secondary, 4) == 0,
+                 "[MOUNT] matching local slots read through independent devices and keys");
+    int sentinel = fs_create_file("volume-slot.txt.tmp", secondary, 4, 0);
+    int updated = fs_atomic_update("volume-slot.txt", secondary, 4, 0);
+    KTEST_ASSERT(sentinel == E_OK && updated == E_OK &&
+                 fs_open("volume-slot.txt.tmp", 0, &root_file) == E_OK &&
+                 fs_read(&root_file, a, sizeof(a)) == 4 && ft_memcmp(a, secondary, 4) == 0,
+                 "[MOUNT] atomic replacement preserves a pre-existing .tmp file");
+    fs_delete("volume-slot.txt.tmp", 0);
+    fs_delete("volume-slot.txt", 0);
+
+    fail_write = 1;
+    int pending = fs_mkdir("retry-dir", id);
+    KTEST_ASSERT(pending == E_IO && v && v->directory_pending,
+                 "[MOUNT] metadata cache exhaustion reports failure and retains pending data");
+    KTEST_ASSERT(fs_sync_all() == E_IO && fs_detach() == E_IO && fs_volume_for(id) == v,
+                 "[MOUNT] sync and detach cannot discard metadata rejected by the device");
+    fail_write = 0;
+    KTEST_ASSERT(fs_sync_all() == E_OK && v && !v->directory_pending &&
+                 fs_child_dir(id, "retry-dir") > 0,
+                 "[MOUNT] sync retries every pending metadata sector after recovery");
+}
+
+static void run_volume_assertions(void) {
     blockdev_t *root = blockdev_root();
-    blockdev_t *usb = blockdev_find("usb0");
-
-    if (root == 0 || usb == 0 || usb == root) {
-        KTEST_ASSERT(0, "[STRICT] [MOUNT] the sector these assertions use exists on both disks");
-        KTEST_ASSERT(0, "[STRICT] [BCACHE] the same sector on two devices holds two different things");
-        KTEST_ASSERT(0, "[STRICT] [BCACHE] and each reads back what was written to it, not to the other");
+    const char *pass = "volume-test";
+    KTEST_ASSERT(ktest_prepare_mount_disk() == E_OK, "[MOUNT] disposable RAM device available");
+    KTEST_ASSERT(fs_attach(&ram_disk, pass) == E_INVAL && write_count == 0,
+                 "[MOUNT] mounting a blank disk leaves it byte-for-byte untouched");
+    media[RAM_SECTORS - 1][511] = 0x7e;
+    KTEST_ASSERT(fs_format_data_device(&ram_disk, RAM_SECTORS, pass) == E_EXIST &&
+                 write_count == 0 && media[RAM_SECTORS - 1][511] == 0x7e,
+                 "[MOUNT] data beyond a zero header prevents formatting");
+    bcache_flush_dev(&ram_disk);
+    media[RAM_SECTORS - 1][511] = 0;
+    fail_read = 1;
+    KTEST_ASSERT(fs_format_data_device(&ram_disk, RAM_SECTORS, pass) == E_IO && write_count == 0,
+                 "[MOUNT] an unreadable device cannot be formatted");
+    fail_read = 0;
+    KTEST_ASSERT(fs_format_data_device(&ram_disk, RAM_SECTORS - 1, pass) == E_INVAL &&
+                 write_count == 0, "[MOUNT] provisioning requires the expected capacity");
+    KTEST_ASSERT(fs_format_data_device(&ram_disk, RAM_SECTORS, pass) == E_OK,
+                 "[MOUNT] an explicit format prepares a blank RAM disk");
+    run_media_validation(pass);
+    int before_mount = write_count;
+    KTEST_ASSERT(fs_attach(&ram_disk, "incorrect") == E_ACCES &&
+                 !fs_secondary_device() && write_count == before_mount,
+                 "[MOUNT] rejected key leaves the root and target unchanged");
+    int rc = fs_attach(&ram_disk, pass);
+    KTEST_ASSERT(rc == E_OK && fs_secondary_device() == &ram_disk &&
+                 write_count == before_mount && blockdev_root() == root,
+                 "[MOUNT] attaching an existing v3 volume performs no writes");
+    if (rc != E_OK) {
+        KTEST_ASSERT(0, "[MOUNT] qualified identity requires a successful attach");
+        for (int i = 0; i < 6; i++)
+            KTEST_ASSERT(0, "[MOUNT] live-volume regression requires a successful attach");
+        KTEST_ASSERT(0, "[MOUNT] dirty fixture requires a successful attach");
+        KTEST_ASSERT(0, "[MOUNT] failed detach requires a successful attach");
+        KTEST_ASSERT(0, "[MOUNT] retry requires a successful attach");
         return;
     }
-
-    /*
-     * Asked before anything is written, and asked of the devices rather than of
-     * the Makefile. A sector past the end of either one is refused by the block
-     * layer, which leaves a dirty slot the cache can never place - and the
-     * symptom of that is not a failed assertion here but an eviction path that
-     * stops working for every module after this one. The cache no longer hangs
-     * on it, but a test whose sector does not exist proves nothing either way,
-     * so it is caught at the top rather than diagnosed at the bottom.
-     */
-    KTEST_ASSERT(root->sector_count > MT_TEST_SECTOR &&
-                 usb->sector_count > MT_TEST_SECTOR,
-                 "[STRICT] [MOUNT] the sector these assertions use exists on both disks");
-
-    static uint8_t wa[512];
-    static uint8_t wb[512];
-    static uint8_t ra[512];
-    static uint8_t rb[512];
-
-    ft_memset(wa, 0xA1, sizeof(wa));
-    ft_memset(wb, 0xB2, sizeof(wb));
-
-    bcache_write_sector(root, MT_TEST_SECTOR, wa);
-    bcache_write_sector(usb, MT_TEST_SECTOR, wb);
-
-    ft_memset(ra, 0, sizeof(ra));
-    ft_memset(rb, 0, sizeof(rb));
-
-    bcache_read_sector(root, MT_TEST_SECTOR, ra);
-    bcache_read_sector(usb, MT_TEST_SECTOR, rb);
-
-    KTEST_ASSERT(ra[0] != rb[0],
-                 "[STRICT] [BCACHE] the same sector on two devices holds two different things");
-
-    KTEST_ASSERT(ra[0] == 0xA1 && ra[511] == 0xA1 &&
-                 rb[0] == 0xB2 && rb[511] == 0xB2,
-                 "[STRICT] [BCACHE] and each reads back what was written to it, not to the other");
-
-    /*
-     * Written out and dropped, on both. Leaving two dirty slots behind would
-     * hand the next module a flush it did not ask for, and leaving them valid
-     * would leave this module's pattern in the cache for whatever reads those
-     * sectors next.
-     */
-    bcache_flush_dev(root);
-    bcache_flush_dev(usb);
+    int id = fs_child_dir(0, "mnt");
+    KTEST_ASSERT(id > 0xffff && fs_parent_dir((fs_id_t)id) == 0,
+                 "[MOUNT] mounted root has a qualified ID and a namespace parent");
+    run_live_volume_assertions((fs_id_t)id);
+    uint8_t marker[512]; ft_memset(marker, 0x5a, sizeof(marker));
+    KTEST_ASSERT(bcache_write_sector(&ram_disk, RAM_SECTORS - 1, marker) == E_OK,
+                 "[MOUNT] fixture has one accepted dirty sector");
+    fail_write = 1;
+    KTEST_ASSERT(fs_detach() == E_IO && fs_secondary_device() == &ram_disk &&
+                 fs_child_dir(0, "mnt") == id, "[MOUNT] failed detach retains the same live volume");
+    fail_write = 0;
+    KTEST_ASSERT(fs_detach() == E_OK && !fs_volume_for(id) &&
+                 media[RAM_SECTORS - 1][0] == 0x5a && blockdev_root() == root,
+                 "[MOUNT] retry persists data, invalidates its handle and preserves the root");
 }
-
-/**
- * @brief Changing which disk is in use, and putting it back.
- *
- * The root is moved and restored without init_fs() being called on either side.
- * Re-mounting mid-suite would tear down the file system every module after this
- * one is standing on - the full cycle is a manual test, and saying so is better
- * than a test that proves it by breaking the run.
- */
-static void run_root_switch_assertions(void) {
-    blockdev_t *saved = blockdev_root();
-    blockdev_t *usb = blockdev_find("usb0");
-
-    if (saved == 0 || usb == 0) {
-        KTEST_ASSERT(0, "[STRICT] [MOUNT] the root can be moved to another registered disk");
-        KTEST_ASSERT(0, "[STRICT] [MOUNT] and detached entirely, which is what umount leaves behind");
-        KTEST_ASSERT(0, "[STRICT] [MOUNT] and the disk the suite was using is back where it was");
-        return;
-    }
-
-    KTEST_ASSERT(blockdev_set_root(usb) == E_OK && blockdev_root() == usb,
-                 "[STRICT] [MOUNT] the root can be moved to another registered disk");
-
-    KTEST_ASSERT(blockdev_set_root(0) == E_OK && blockdev_root() == 0,
-                 "[STRICT] [MOUNT] and detached entirely, which is what umount leaves behind");
-
-    blockdev_set_root(saved);
-
-    KTEST_ASSERT(blockdev_root() == saved,
-                 "[STRICT] [MOUNT] and the disk the suite was using is back where it was");
-}
-
 void run_mount_tests(void) {
     printk("\n--- Mount and Multi-Device Tests ---\n");
-
     run_registry_assertions();
-    run_cache_separation_assertions();
-    run_root_switch_assertions();
+    run_volume_assertions();
 }

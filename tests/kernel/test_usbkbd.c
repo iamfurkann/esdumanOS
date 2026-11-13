@@ -92,6 +92,32 @@ static void run_table_assertions(void) {
                  "[STRICT] [USBKBD] a usage set 1 cannot express translates to nothing rather than to something wrong");
 }
 
+/* Untrusted report bytes can exceed the final modifier at 0xE7. Exercise
+ * both press and release, then confirm that a real key still reaches input. */
+static void run_unknown_usage_assertions(void) {
+    char got[16];
+    int unmapped = 1;
+
+    usbkbd_reset();
+    drain();
+    for (unsigned usage = 0xE8; usage <= 0xFF; usage++) {
+        if (usbkbd_scancode_for((uint8_t)usage) != 0) unmapped = 0;
+        report(0, (uint8_t)usage, 0);
+        report(0, 0, 0);
+    }
+    KTEST_ASSERT(unmapped,
+                 "[STRICT] [USBKBD] every usage above the final modifier is unmapped");
+    take(got, sizeof(got));
+    KTEST_ASSERT(got[0] == '\0',
+                 "[STRICT] [USBKBD] unknown presses and releases produce no input");
+    report(0, USAGE_A, 0);
+    take(got, sizeof(got));
+    report(0, 0, 0);
+    drain();
+    KTEST_ASSERT(ft_strcmp(got, "a") == 0,
+                 "[STRICT] [USBKBD] a valid key still works after unknown usages");
+}
+
 /**
  * @brief A report says what is held, not what changed, and that is the trap.
  *
@@ -255,6 +281,7 @@ void run_usbkbd_tests(void) {
     printk("\n--- USB HID Keyboard Tests ---\n");
 
     run_table_assertions();
+    run_unknown_usage_assertions();
     run_diff_assertions();
     run_release_assertions();
     run_prefix_assertions();

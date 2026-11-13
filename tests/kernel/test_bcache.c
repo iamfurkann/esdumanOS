@@ -316,9 +316,9 @@ static void run_syscall_failure_assertions(void) {
                  "[STRICT] [BCACHE] reboot refuses to discard data after a failed flush");
     KTEST_ASSERT(dispatch(SYSCALL_HALT, 0) == E_IO,
                  "[STRICT] [BCACHE] halt refuses to discard data after a failed flush");
-    KTEST_ASSERT(dispatch(SYSCALL_UMOUNT, 0) == E_IO &&
+    KTEST_ASSERT(dispatch(SYSCALL_UMOUNT, 0) == E_NODEV &&
                  blockdev_root() == saved_root && fs_mounted == saved_mounted,
-                 "[STRICT] [BCACHE] unmount preserves the mount when any device has dirty data");
+                 "[STRICT] [BCACHE] without a secondary volume umount leaves the root attached");
 
     /* The runner maps this user scratch page for syscall arguments. Save it so
      * this module does not depend on what another module left there. */
@@ -326,9 +326,9 @@ static void run_syscall_failure_assertions(void) {
     char saved_name[32];
     ft_memcpy(saved_name, user_name, sizeof(saved_name));
     ft_strcpy(user_name, "usb0");
-    KTEST_ASSERT(dispatch(SYSCALL_MOUNT, (uint32_t)user_name) == E_IO &&
+    KTEST_ASSERT(dispatch(SYSCALL_MOUNT, (uint32_t)user_name) == E_INVAL &&
                  blockdev_root() == saved_root && fs_mounted == saved_mounted,
-                 "[STRICT] [BCACHE] switching disks cannot reset a cache with failed writes");
+                 "[STRICT] [BCACHE] probing a blank device preserves unrelated dirty cache entries");
     ft_memcpy(user_name, saved_name, sizeof(saved_name));
     current_task->uid = saved_uid;
     KTEST_ASSERT(bcache_read_sector(&devs[0], 0, buf) == E_OK && bytes_are(buf, 0xD3),

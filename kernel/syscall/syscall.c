@@ -77,6 +77,7 @@ void syscall_handler(arch_regs_t *regs) {
 
         //sys_mount.c
         case SYSCALL_MOUNT:        sys_mount(regs); break;
+        case SYSCALL_MKFS:         sys_mkfs(regs); break;
         case SYSCALL_UMOUNT:       sys_umount(regs); break;
 
         //sys_fs.c

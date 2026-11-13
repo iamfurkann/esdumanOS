@@ -683,7 +683,7 @@ extern int receive_message(uint32_t *sender_out, uint32_t *payload_out);
  * The real declaration lives in signal.h; include that instead.
  */
 
-typedef struct {
+typedef struct fs_inode_lock {
     int readers;
     int writer_active;
     mutex_t mutex;

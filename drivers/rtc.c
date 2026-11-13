@@ -11,14 +11,24 @@
 #define CMOS_ADDRESS 0x70
 #define CMOS_DATA 0x71
 
-/**
- * @brief Checks if the RTC update is in progress.
- * @return 1 if update is in progress, 0 otherwise.
- */
-int get_update_in_progress_flag() {
-    outb(CMOS_ADDRESS, 0x0A);
-    return (inb(CMOS_DATA) & 0x80);
+/* IRQ0 reads this same indexed device for the status bar. Protect both port
+ * accesses and preserve the caller's interrupt state, including nested calls
+ * from interrupt context. This kernel has one CPU and no CMOS-reading NMI. */
+#ifdef RTC_HOST_TEST
+extern uint32_t rtc_test_irq_save(void);
+extern void rtc_test_irq_restore(uint32_t flags);
+#define rtc_irq_save rtc_test_irq_save
+#define rtc_irq_restore rtc_test_irq_restore
+#else
+static uint32_t rtc_irq_save(void) {
+    uint32_t flags;
+    asm volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    return flags;
 }
+static void rtc_irq_restore(uint32_t flags) {
+    if (flags & 0x200u) asm volatile("sti" : : : "memory");
+}
+#endif
 
 /**
  * @brief Reads a value from a specific RTC register.
@@ -26,8 +36,19 @@ int get_update_in_progress_flag() {
  * @return The value from the register.
  */
 uint8_t get_RTC_register(int reg) {
+    uint32_t flags = rtc_irq_save();
     outb(CMOS_ADDRESS, reg);
-    return inb(CMOS_DATA);
+    uint8_t value = inb(CMOS_DATA);
+    rtc_irq_restore(flags);
+    return value;
+}
+
+/**
+ * @brief Checks if the RTC update is in progress.
+ * @return 1 if update is in progress, 0 otherwise.
+ */
+int get_update_in_progress_flag() {
+    return get_RTC_register(0x0A) & 0x80;
 }
 
 /**
@@ -186,7 +207,11 @@ void rtc_read_utc(esd_time_t *out) {
     }
 
     /* Bit 1 clear means 12-hour mode, with bit 7 of the hour marking PM. */
-    if (!(registerB & 0x02) && (hour & 0x80)) hour = ((hour & 0x7F) + 12) % 24;
+    if (!(registerB & 0x02)) {
+        int pm = hour & 0x80;
+        hour = (hour & 0x7F) % 12;
+        if (pm) hour += 12;
+    }
 
     out->year   = (uint16_t)(year + 2000);
     out->month  = (uint8_t)month;
@@ -204,8 +229,10 @@ void rtc_read_utc(esd_time_t *out) {
  * @param value The value.
  */
 static void set_RTC_register(int reg, uint8_t value) {
+    uint32_t flags = rtc_irq_save();
     outb(CMOS_ADDRESS, reg);
     outb(CMOS_DATA, value);
+    rtc_irq_restore(flags);
 }
 
 /**
@@ -253,6 +280,7 @@ int rtc_set_utc(const esd_time_t *t) {
 
     while (get_update_in_progress_flag());
 
+    uint32_t flags = rtc_irq_save();
     uint8_t regB = get_RTC_register(0x0B);
 
     /* Bit 1 clear means the chip keeps 12-hour time, with bit 7 marking PM. */
@@ -275,24 +303,9 @@ int rtc_set_utc(const esd_time_t *t) {
         hour   = (uint8_t)(rtc_to_bcd((uint8_t)(hour & 0x7F)) | (hour & 0x80));
     }
 
-    /*
-     * Halt the update cycle, write, let it run again.
-     *
-     * There is a window here that the datasheet cares about: UIP is checked
-     * above, the chip sets it about 244 microseconds before it rolls the time,
-     * and an update can begin between that check and the SET bit going up.
-     *
-     * An extra UIP wait after asserting SET was tried, on the theory that the
-     * in-flight update was writing incremented values back over these. It made
-     * the [TIME] round-trip assertions fail more, not less, and was removed
-     * rather than kept: with SET asserted the chip does not update, so QEMU
-     * reports UIP as clear and the wait is a no-op - which means the theory it
-     * rested on cannot have been what was happening.
-     *
-     * The round-trip test is known to fail occasionally and the cause is not
-     * established. It is written down in the README rather than guessed at
-     * again here.
-     */
+    /* SET stops hardware updates. Masking interrupts across the transaction
+     * also prevents the status-bar reader from seeing a partly written date.
+     * The UIP wait stays outside this short critical section. */
     set_RTC_register(0x0B, (uint8_t)(regB | 0x80));
 
     set_RTC_register(0x00, second);
@@ -303,6 +316,7 @@ int rtc_set_utc(const esd_time_t *t) {
     set_RTC_register(0x09, year);
 
     set_RTC_register(0x0B, regB);
+    rtc_irq_restore(flags);
 
     return E_OK;
 }

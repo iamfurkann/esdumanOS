@@ -18,50 +18,17 @@
 #include "esdtime.h"
 #include "rtc.h"
 #include "entropy.h"
-disk_file_entry_t *dir_table = 0;
+fs_volume_t fs_root_volume;
+static fs_volume_t secondary_volume;
 
-/*
- * Whether this boot is the one that created the file system.
- *
- * The key slot is installed from outside init_fs(), because installing it means
- * asking the user for a passphrase and the file system has no business running a
- * prompt. That leaves the caller with a question it cannot otherwise answer: a
- * disk with no slot is either one this boot has just formatted, which should be
- * given a passphrase, or one that had a slot and lost it, which must be refused
- * - offering to set a new passphrase there would generate a fresh data key and
- * turn every existing file into noise.
- */
-int fs_was_formatted = 0;
-/* Zero until init_fs() learns the partition's size. It used to default to 4096,
- * which was the old cap and therefore a plausible-looking wrong answer for
- * anything that read it before the mount; nothing should, and zero says so. */
-uint32_t fs_max_sectors = 0;
-uint32_t *file_allocation_table = 0;
-
-disk_superblock_t fs_super;
-int fs_mounted = 0;
-uint32_t fs_part_start = 0;
-uint32_t fs_total_clusters = 0;
-
-/*
- * Entries the mounted file system holds, as the superblock recorded them.
- *
- * The runtime counterpart of FS_MAX_ENTRIES_CAP, and the bound of every loop over
- * dir_table. Those loops used the cap as their bound until v1.3.0, which was
- * correct while the table was a static array of exactly that size and is a read
- * past the end of an allocation now. Renaming the constant is what forced every
- * one of them to be visited; see the note on FS_MAX_ENTRIES_CAP in fs.h.
- */
-int fs_max_entries = 0;
-
-/*
- * One lock per directory entry, and therefore exactly as long as dir_table: the
- * index into one is the index into the other. It sat further down this file as a
- * static array; it is up here now because the allocator below has to treat the
- * three tables as one unit, and because a reader looking for what mount
- * allocates should find all of it in one place.
- */
-rwlock_t *inode_locks = 0;
+/* A handle from a detached volume must never resolve against its successor. */
+fs_volume_t *fs_volume_for(fs_id_t id) {
+    fs_id_t prefix = id & 0xffff0000u;
+    if (prefix == 0) return &fs_root_volume;
+    if (secondary_volume.mounted && secondary_volume.prefix == prefix)
+        return &secondary_volume;
+    return 0;
+}
 
 /**
  * @brief Releases the tables a previous mount allocated.
@@ -72,11 +39,11 @@ rwlock_t *inode_locks = 0;
  * would have been introduced here at all was caught by a test written for
  * something else entirely.
  */
-static void fs_tables_free(void) {
-    if (dir_table)             { kfree(dir_table);             dir_table = 0; }
-    if (file_allocation_table) { kfree(file_allocation_table); file_allocation_table = 0; }
-    if (inode_locks)           { kfree(inode_locks);           inode_locks = 0; }
-    fs_max_entries = 0;
+static void fs_tables_free(fs_volume_t *volume) {
+    if (volume->entries)             { kfree(volume->entries);             volume->entries = 0; }
+    if (volume->fat) { kfree(volume->fat); volume->fat = 0; }
+    if (volume->locks)           { kfree(volume->locks);           volume->locks = 0; }
+    volume->entry_count = 0;
 }
 
 /**
@@ -91,30 +58,30 @@ static void fs_tables_free(void) {
  * @param clusters Allocation table entries.
  * @return E_OK, or E_NOMEM with nothing allocated.
  */
-static int fs_tables_alloc(uint32_t entries, uint32_t clusters) {
-    fs_tables_free();
+static int fs_tables_alloc(fs_volume_t *volume, uint32_t entries, uint32_t clusters) {
+    fs_tables_free(volume);
 
     if (entries == 0 || clusters == 0) return E_INVAL;
     if (entries > FS_MAX_ENTRIES_CAP || clusters > FS_MAX_CLUSTERS_CAP) return E_INVAL;
 
-    dir_table             = (disk_file_entry_t *)kmalloc(entries * sizeof(disk_file_entry_t));
-    file_allocation_table = (uint32_t *)kmalloc(clusters * sizeof(uint32_t));
-    inode_locks           = (rwlock_t *)kmalloc(entries * sizeof(rwlock_t));
+    volume->entries             = (disk_file_entry_t *)kmalloc(entries * sizeof(disk_file_entry_t));
+    volume->fat = (uint32_t *)kmalloc(clusters * sizeof(uint32_t));
+    volume->locks           = (rwlock_t *)kmalloc(entries * sizeof(rwlock_t));
 
-    if (!dir_table || !file_allocation_table || !inode_locks) {
+    if (!volume->entries || !volume->fat || !volume->locks) {
         klog(LOG_LEVEL_ERROR, "VFS", "Not enough kernel memory for the file system tables.");
-        fs_tables_free();
+        fs_tables_free(volume);
         return E_NOMEM;
     }
 
-    ft_memset(dir_table, 0, entries * sizeof(disk_file_entry_t));
-    ft_memset(file_allocation_table, 0, clusters * sizeof(uint32_t));
+    ft_memset(volume->entries, 0, entries * sizeof(disk_file_entry_t));
+    ft_memset(volume->fat, 0, clusters * sizeof(uint32_t));
 
     for (uint32_t i = 0; i < entries; i++) {
-        rwlock_init(&inode_locks[i]);
+        rwlock_init(&volume->locks[i]);
     }
 
-    fs_max_entries = (int)entries;
+    volume->entry_count = (int)entries;
 
     klog_int(LOG_LEVEL_INFO, "VFS", "Directory entries this disk holds", (int)entries);
     klog_int(LOG_LEVEL_INFO, "VFS", "Clusters this disk holds", (int)clusters);
@@ -140,13 +107,17 @@ int fs_get_entry_idx(const char *name, fs_id_t parent_id);
  * belongs to the disk rather than to any file system, and is read and written
  * through the cache directly, with a comment saying so at each of the two sites.
  */
-int fs_read_sector(uint32_t rel_sector, uint8_t *buffer) {
-    return bcache_read_sector(blockdev_root(), fs_part_start + rel_sector, buffer);
+int fs_volume_read_sector(fs_volume_t *volume, uint32_t rel_sector, uint8_t *buffer) {
+    if (!volume || !volume->device) return E_NODEV;
+    if (rel_sector >= volume->sectors) return E_NXIO;
+    return bcache_read_sector(volume->device, volume->part_start + rel_sector, buffer);
 }
 
 /** @brief Writes a sector named relative to the partition. See fs_read_sector(). */
-int fs_write_sector(uint32_t rel_sector, uint8_t *buffer) {
-    return bcache_write_sector(blockdev_root(), fs_part_start + rel_sector, buffer);
+int fs_volume_write_sector(fs_volume_t *volume, uint32_t rel_sector, uint8_t *buffer) {
+    if (!volume || !volume->device) return E_NODEV;
+    if (rel_sector >= volume->sectors) return E_NXIO;
+    return bcache_write_sector(volume->device, volume->part_start + rel_sector, buffer);
 }
 
 /**
@@ -179,12 +150,15 @@ static uint32_t fs_now(void) {
  * @return 1 when the id names an existing directory, 0 otherwise.
  */
 int fs_dir_exists(fs_id_t parent_id) {
-    if (parent_id == 0) return 1;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return 0;
 
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used &&
-            dir_table[i].file_type == FT_DIR &&
-            dir_table[i].entry_id == parent_id) {
+    if ((uint16_t)parent_id == 0) return 1;
+
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used &&
+            volume->entries[i].file_type == FT_DIR &&
+            volume->entries[i].entry_id == (uint16_t)parent_id) {
             return 1;
         }
     }
@@ -198,6 +172,17 @@ int fs_dir_exists(fs_id_t parent_id) {
  * @param max_len
  * @return static void
  */
+/* Disk names are untrusted fixed-width fields, not C strings until checked. */
+static int valid_entry_name(const char *name) {
+    if (!name || !name[0]) return 0;
+    if (name[0] == '.' && (!name[1] || (name[1] == '.' && !name[2]))) return 0;
+    for (unsigned i = 0; i < MAX_FILENAME; i++) {
+        if (!name[i]) return 1;
+        if (name[i] == '/') return 0;
+    }
+    return 0;
+}
+
 static void safe_strcpy(char *dest, const char *src, size_t max_len) {
     if (max_len == 0) return;
     size_t i;
@@ -250,14 +235,40 @@ static void vfs_unlock(void) {
  * before. That is what lifted the 2 MB ceiling: the array is the same 16 KB and
  * now describes eight times as much disk.
  */
-static void save_fat_to_disk(void) {
-    uint8_t *fat_ptr = (uint8_t *)file_allocation_table;
-    uint32_t total_bytes = fs_total_clusters * sizeof(uint32_t);
-    uint32_t sectors_needed = (total_bytes + 511) / 512;
-
-    for (uint32_t i = 0; i < sectors_needed; i++) {
-        fs_write_sector(fs_super.fat_start + i, fat_ptr + (i * 512));
+static int write_table(fs_volume_t *volume, uint32_t first, const void *table, uint32_t bytes) {
+    const uint8_t *src = table;
+    uint8_t sector[512];
+    while (bytes) {
+        uint32_t count = bytes < sizeof(sector) ? bytes : sizeof(sector);
+        ft_memset(sector, 0, sizeof(sector));
+        ft_memcpy(sector, src, count);
+        int rc = fs_volume_write_sector(volume, first++, sector);
+        if (rc != E_OK) return rc;
+        src += count;
+        bytes -= count;
     }
+    return E_OK;
+}
+
+static int read_table(fs_volume_t *volume, uint32_t first, void *table, uint32_t bytes) {
+    uint8_t *dst = table;
+    uint8_t sector[512];
+    while (bytes) {
+        uint32_t count = bytes < sizeof(sector) ? bytes : sizeof(sector);
+        int rc = fs_volume_read_sector(volume, first++, sector);
+        if (rc != E_OK) return rc;
+        ft_memcpy(dst, sector, count);
+        dst += count;
+        bytes -= count;
+    }
+    return E_OK;
+}
+
+static int save_fat_to_disk(fs_volume_t *volume) {
+    int rc = write_table(volume, volume->super.fat_start, volume->fat,
+                       volume->clusters * sizeof(*volume->fat));
+    volume->fat_pending = rc != E_OK;
+    return rc;
 }
 
 /**
@@ -271,23 +282,23 @@ static void save_fat_to_disk(void) {
  * @param count Clusters wanted.
  * @return First cluster of the chain, or FAT_FREE when the disk cannot hold it.
  */
-static uint32_t allocate_fat_chain(uint32_t count) {
+static uint32_t allocate_fat_chain(fs_volume_t *volume, uint32_t count) {
     if (count == 0) return FAT_EOF;
 
     uint32_t start_cluster = FAT_EOF;
     uint32_t current_cluster = FAT_EOF;
     uint32_t allocated = 0;
 
-    for (uint32_t i = FS_FIRST_DATA_CLUSTER; i < fs_total_clusters && allocated < count; i++) {
-        if (file_allocation_table[i] == FAT_FREE) {
+    for (uint32_t i = FS_FIRST_DATA_CLUSTER; i < volume->clusters && allocated < count; i++) {
+        if (volume->fat[i] == FAT_FREE) {
             if (start_cluster == FAT_EOF) {
                 start_cluster = i;
             } else {
-                file_allocation_table[current_cluster] = i;
+                volume->fat[current_cluster] = i;
             }
 
             current_cluster = i;
-            file_allocation_table[current_cluster] = FAT_EOF;
+            volume->fat[current_cluster] = FAT_EOF;
             allocated++;
         }
     }
@@ -295,14 +306,13 @@ static uint32_t allocate_fat_chain(uint32_t count) {
     if (allocated < count) {
         uint32_t rollback = start_cluster;
         while (rollback != FAT_EOF) {
-            uint32_t next = file_allocation_table[rollback];
-            file_allocation_table[rollback] = FAT_FREE;
+            uint32_t next = volume->fat[rollback];
+            volume->fat[rollback] = FAT_FREE;
             rollback = next;
         }
         return FAT_FREE;
     }
 
-    save_fat_to_disk();
     return start_cluster;
 }
 
@@ -310,25 +320,11 @@ static uint32_t allocate_fat_chain(uint32_t count) {
  * @brief save_directory_to_disk
  * @return static void
  */
-static void save_directory_to_disk(void) {
-    uint8_t *dir_ptr = (uint8_t *)dir_table;
-    uint32_t total_bytes = sizeof(disk_file_entry_t) * fs_max_entries;
-    uint32_t sectors_needed = (total_bytes + 511) / 512;
-
-    for (uint32_t i = 0; i < sectors_needed; i++) {
-        uint8_t sec_buf[512];
-        ft_memset(sec_buf, 0, 512);
-
-        uint32_t copy_size = 512;
-        if ((i * 512) + 512 > total_bytes) {
-            copy_size = total_bytes % 512;
-        }
-
-        for (uint32_t j = 0; j < copy_size; j++) {
-            sec_buf[j] = dir_ptr[(i * 512) + j];
-        }
-        fs_write_sector(fs_super.dir_start + i, sec_buf);
-    }
+static int save_directory_to_disk(fs_volume_t *volume) {
+    int rc = write_table(volume, volume->super.dir_start, volume->entries,
+                       volume->entry_count * sizeof(*volume->entries));
+    volume->directory_pending = rc != E_OK;
+    return rc;
 }
 
 /* --- FILE SYSTEM INITIALIZATION --- */
@@ -349,13 +345,13 @@ static void save_directory_to_disk(void) {
  * that a field added to the struct later reads as zero on a disk written now and
  * zero can be given a meaning.
  */
-static void save_superblock(void) {
+static int save_superblock(fs_volume_t *volume) {
     uint8_t sec_buf[512];
-    uint8_t *src = (uint8_t *)&fs_super;
+    uint8_t *src = (uint8_t *)&volume->super;
 
     ft_memset(sec_buf, 0, 512);
     for (uint32_t i = 0; i < sizeof(disk_superblock_t); i++) sec_buf[i] = src[i];
-    fs_write_sector(FS_SUPER_SECTOR, sec_buf);
+    return fs_volume_write_sector(volume, FS_SUPER_SECTOR, sec_buf);
 }
 
 /**
@@ -382,27 +378,11 @@ static void save_superblock(void) {
  *         errno when the disk could not be read - which is not blankness and
  *         must never be treated as it.
  */
-/**
- * @brief Where the last blank check stopped, so the refusal can cite it.
- *
- * A verdict without its evidence is what this function used to give, and on the
- * first machine where the answer was surprising that cost a boot to work around
- * and could not be argued with: a disk measured as zeroed on one machine was
- * called "not blank" on another, and there was no way to tell a disk that really
- * had something on it from a read path returning something that was never there.
- *
- * One of those is the user's mistake and the other is this kernel's, and the
- * three numbers below are the whole of the difference.
- */
-static uint32_t blank_stop_sector;
-static uint32_t blank_stop_offset;
-static uint8_t  blank_stop_byte;
-
-static int disk_region_is_blank(uint32_t start, uint32_t count) {
+static int disk_region_is_blank(fs_volume_t *volume, uint32_t start, uint32_t count) {
     uint8_t sec_buf[512];
 
     for (uint32_t s = 0; s < count; s++) {
-        int res = bcache_read_sector(blockdev_root(), start + s, sec_buf);
+        int res = bcache_read_sector(volume->device, start + s, sec_buf);
         if (res != E_OK) {
             klog_int(LOG_LEVEL_ERROR, "VFS",
                      "Could not read this sector while deciding whether the disk is blank",
@@ -411,9 +391,6 @@ static int disk_region_is_blank(uint32_t start, uint32_t count) {
         }
         for (int i = 0; i < 512; i++) {
             if (sec_buf[i] != 0) {
-                blank_stop_sector = start + s;
-                blank_stop_offset = (uint32_t)i;
-                blank_stop_byte   = sec_buf[i];
                 return 0;
             }
         }
@@ -432,7 +409,7 @@ static int disk_region_is_blank(uint32_t start, uint32_t count) {
  * Sector 0 is the disk's, not the file system's, so this is one of the two
  * places that call the block cache without going through fs_write_sector().
  */
-static int write_mbr(uint32_t disk_sectors) {
+static int write_mbr(fs_volume_t *volume, uint32_t disk_sectors) {
     uint8_t sec_buf[512];
     mbr_t mbr;
 
@@ -445,7 +422,7 @@ static int write_mbr(uint32_t disk_sectors) {
 
     ft_memset(sec_buf, 0, 512);
     ft_memcpy(sec_buf, &mbr, sizeof(mbr));
-    return bcache_write_sector(blockdev_root(), 0, sec_buf);
+    return bcache_write_sector(volume->device, 0, sec_buf);
 }
 
 /**
@@ -495,8 +472,7 @@ static uint32_t entries_for_partition(uint32_t partition_sectors) {
     return entries;
 }
 
-static int format_disk(void) {
-    uint8_t zero[512];
+static int format_disk(fs_volume_t *volume, const keyslot_t *slot) {
 
     klog(LOG_LEVEL_INFO, "VFS", "Blank disk; writing a partition table and a new file system.");
 
@@ -508,11 +484,11 @@ static int format_disk(void) {
      * loop below settles that rather than solving it, and settles in two passes
      * because shrinking the cluster count can only shrink the table.
      */
-    uint32_t entries    = entries_for_partition(fs_max_sectors);
+    uint32_t entries    = entries_for_partition(volume->sectors);
     uint32_t dir_start  = FS_DIR_START_SECTOR;
     uint32_t dir_secs   = dir_sectors_for(entries);
     uint32_t fat_start  = dir_start + dir_secs;
-    uint32_t clusters   = fs_total_clusters;
+    uint32_t clusters   = volume->clusters;
     uint32_t fat_secs   = 0;
     uint32_t data_start = 0;
 
@@ -528,54 +504,53 @@ static int format_disk(void) {
         fat_secs   = (clusters * 4 + 511) / 512;
         data_start = fat_start + fat_secs;
 
-        uint32_t usable = (fs_max_sectors > data_start) ? (fs_max_sectors - data_start) : 0;
+        uint32_t usable = (volume->sectors > data_start) ? (volume->sectors - data_start) : 0;
         uint32_t fit    = usable / FS_CLUSTER_SECTORS;
 
         if (fit < clusters) clusters = fit;
     }
 
-    fs_total_clusters = clusters;
+    volume->clusters = clusters;
 
-    if (fs_tables_alloc(entries, clusters) != E_OK) {
+    if (fs_tables_alloc(volume, entries, clusters) != E_OK) {
         klog(LOG_LEVEL_ERROR, "VFS", "Format abandoned: the tables would not fit in memory.");
         return E_NOMEM;
     }
 
-    ft_memset(&fs_super, 0, sizeof(fs_super));
-    fs_super.magic = FS_SUPER_MAGIC;
-    fs_super.format_version = FS_FORMAT_VERSION;
-    fs_super.sector_size = 512;
-    fs_super.total_sectors = fs_max_sectors;
-    fs_super.dir_start = dir_start;
-    fs_super.dir_sectors = dir_secs;
-    fs_super.max_entries = entries;
-    fs_super.entry_size = (uint16_t)sizeof(disk_file_entry_t);
-    fs_super.cluster_sectors = FS_CLUSTER_SECTORS;
-    fs_super.fat_start = fat_start;
-    fs_super.data_start = data_start;
-    fs_super.total_clusters = fs_total_clusters;
-    fs_super.flags = 0;
+    ft_memset(&volume->super, 0, sizeof(volume->super));
+    volume->super.magic = FS_SUPER_MAGIC;
+    volume->super.format_version = FS_FORMAT_VERSION;
+    volume->super.sector_size = 512;
+    volume->super.total_sectors = volume->sectors;
+    volume->super.dir_start = dir_start;
+    volume->super.dir_sectors = dir_secs;
+    volume->super.max_entries = entries;
+    volume->super.entry_size = (uint16_t)sizeof(disk_file_entry_t);
+    volume->super.cluster_sectors = FS_CLUSTER_SECTORS;
+    volume->super.fat_start = fat_start;
+    volume->super.data_start = data_start;
+    volume->super.total_clusters = volume->clusters;
+    volume->super.flags = 0;
+    if (slot) volume->super.keyslot = *slot;
 
-    for (uint32_t i = 0; i < FS_FIRST_DATA_CLUSTER && i < fs_total_clusters; i++) {
-        file_allocation_table[i] = FAT_EOF;
+    for (uint32_t i = 0; i < FS_FIRST_DATA_CLUSTER && i < volume->clusters; i++) {
+        volume->fat[i] = FAT_EOF;
     }
 
-    ft_memset(zero, 0, 512);
-    for (uint32_t i = 0; i < fs_super.dir_sectors; i++) {
-        fs_write_sector(fs_super.dir_start + i, zero);
-    }
-
-    save_superblock();
-    save_fat_to_disk();
-    save_directory_to_disk();
-    bcache_flush();
+    /* Publish a recognizable superblock only after its tables reached the device. */
+    int rc = save_directory_to_disk(volume);
+    if (rc == E_OK) rc = save_fat_to_disk(volume);
+    if (rc == E_OK) rc = bcache_flush_dev(volume->device);
+    if (rc == E_OK) rc = save_superblock(volume);
+    if (rc == E_OK) rc = bcache_flush_dev(volume->device);
+    if (rc != E_OK) return rc;
 
     /*
      * Set last, and only here. The superblock this wrote carries a zeroed key
      * slot, and this flag is what tells the boot path that the zero means "new
      * disk" rather than "slot lost".
      */
-    fs_was_formatted = 1;
+    volume->formatted = 1;
     return E_OK;
 }
 
@@ -589,32 +564,32 @@ static int format_disk(void) {
  *
  * @return 1 when fs_super has been filled with a usable geometry.
  */
-static int load_superblock(void) {
+static int load_superblock(fs_volume_t *volume) {
     uint8_t sec_buf[512];
-    uint8_t *dst = (uint8_t *)&fs_super;
+    uint8_t *dst = (uint8_t *)&volume->super;
 
-    if (fs_read_sector(FS_SUPER_SECTOR, sec_buf) != E_OK) {
+    if (fs_volume_read_sector(volume, FS_SUPER_SECTOR, sec_buf) != E_OK) {
         klog(LOG_LEVEL_ERROR, "VFS", "The superblock sector could not be read.");
         return 0;
     }
     for (uint32_t i = 0; i < sizeof(disk_superblock_t); i++) dst[i] = sec_buf[i];
 
-    if (fs_super.magic != FS_SUPER_MAGIC) return 0;
+    if (volume->super.magic != FS_SUPER_MAGIC) return 0;
 
-    if (fs_super.format_version != FS_FORMAT_VERSION) {
+    if (volume->super.format_version != FS_FORMAT_VERSION) {
         klog_int(LOG_LEVEL_ERROR, "VFS",
-                 "Disk was written by a different format version", fs_super.format_version);
+                 "Disk was written by a different format version", volume->super.format_version);
         return 0;
     }
-    if (fs_super.sector_size != 512 ||
-        fs_super.entry_size != (uint16_t)sizeof(disk_file_entry_t) ||
-        fs_super.max_entries > FS_MAX_ENTRIES_CAP ||
-        fs_super.cluster_sectors != FS_CLUSTER_SECTORS ||
-        fs_super.total_clusters == 0 ||
-        fs_super.total_clusters > FS_MAX_CLUSTERS_CAP ||
-        fs_super.dir_start == 0 ||
-        fs_super.fat_start <= fs_super.dir_start ||
-        fs_super.data_start <= fs_super.fat_start) {
+    if (volume->super.sector_size != 512 ||
+        volume->super.entry_size != (uint16_t)sizeof(disk_file_entry_t) ||
+        volume->super.max_entries == 0 || volume->super.max_entries > FS_MAX_ENTRIES_CAP ||
+        volume->super.cluster_sectors != FS_CLUSTER_SECTORS ||
+        volume->super.total_clusters <= FS_FIRST_DATA_CLUSTER ||
+        volume->super.total_clusters > FS_MAX_CLUSTERS_CAP ||
+        volume->super.dir_start == 0 ||
+        volume->super.fat_start <= volume->super.dir_start ||
+        volume->super.data_start <= volume->super.fat_start) {
         klog(LOG_LEVEL_ERROR, "VFS", "Superblock describes a geometry this kernel cannot read.");
         return 0;
     }
@@ -624,12 +599,19 @@ static int load_superblock(void) {
      * superblock claiming more clusters than the partition holds would send the
      * last chain off the end of it, into whatever follows on the disk.
      */
-    if (fs_cluster_to_sector(fs_super.total_clusters) > fs_max_sectors) {
+    uint32_t dir_sectors = dir_sectors_for(volume->super.max_entries);
+    uint32_t fat_sectors = (volume->super.total_clusters * sizeof(uint32_t) + 511) / 512;
+    if (volume->super.total_sectors != volume->sectors ||
+        volume->super.dir_sectors != dir_sectors ||
+        dir_sectors > volume->super.fat_start - volume->super.dir_start ||
+        fat_sectors > volume->super.data_start - volume->super.fat_start ||
+        volume->super.data_start >= volume->sectors ||
+        volume->super.total_clusters > (volume->sectors - volume->super.data_start) / FS_CLUSTER_SECTORS) {
         klog(LOG_LEVEL_ERROR, "VFS", "Superblock claims more clusters than the partition holds.");
         return 0;
     }
 
-    fs_total_clusters = fs_super.total_clusters;
+    volume->clusters = volume->super.total_clusters;
     return 1;
 }
 
@@ -642,7 +624,7 @@ static int load_superblock(void) {
  * @param disk_sectors Sectors the device reports.
  * @return 1 when fs_part_start and fs_max_sectors describe a usable partition.
  */
-static int load_partition(uint32_t disk_sectors) {
+static int load_partition(fs_volume_t *volume, uint32_t disk_sectors) {
     uint8_t sec_buf[512];
     mbr_t mbr;
 
@@ -651,7 +633,7 @@ static int load_partition(uint32_t disk_sectors) {
      * table. Both used to arrive here as a zeroed buffer and leave as "return 0",
      * which sends the caller down the path that decides whether to format.
      */
-    if (bcache_read_sector(blockdev_root(), 0, sec_buf) != E_OK) return -1;
+    if (bcache_read_sector(volume->device, 0, sec_buf) != E_OK) return -1;
 
     ft_memcpy(&mbr, sec_buf, sizeof(mbr));
 
@@ -675,8 +657,8 @@ static int load_partition(uint32_t disk_sectors) {
         if (count > disk_sectors - start) continue;
         if (count <= FS_DATA_START_SECTOR) continue;
 
-        fs_part_start  = start;
-        fs_max_sectors = count;
+        volume->part_start  = start;
+        volume->sectors = count;
         return 1;
     }
 
@@ -710,29 +692,43 @@ static int load_partition(uint32_t disk_sectors) {
  *
  * @return 1 when every used entry is consistent.
  */
-int fs_validate_directory_table(void) {
+static int volume_validate_directory(fs_volume_t *volume) {
     /*
      * One bound, not two. This read "i < fs_super.max_entries && i < the cap",
      * which was a guard against a superblock claiming more entries than the
      * static array could hold. The table is allocated to exactly what the
-     * superblock asked for now - load_superblock() refuses a count above the cap
+     * superblock asked for now - load_superblock(volume) refuses a count above the cap
      * before anything is allocated - so fs_max_entries is that number and the
      * second test was the same test written twice.
      */
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (!dir_table[i].is_used) continue;
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (!volume->entries[i].is_used) continue;
+        if (i == 0 || volume->entries[i].is_used != 1 ||
+            !valid_entry_name(volume->entries[i].filename)) {
+            klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: invalid name or reserved slot", i);
+            return 0;
+        }
 
-        if (dir_table[i].entry_id != (fs_id_t)i) {
+        if (volume->entries[i].entry_id != (fs_id_t)i) {
             klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: entry id does not match its slot", (int)i);
             return 0;
         }
-        if (dir_table[i].file_type != FT_REGULAR && dir_table[i].file_type != FT_DIR) {
+        if (volume->entries[i].file_type != FT_REGULAR && volume->entries[i].file_type != FT_DIR) {
             klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: entry has no valid type", (int)i);
             return 0;
         }
-        if (dir_table[i].start_cluster != 0 &&
-            (dir_table[i].start_cluster < FS_FIRST_DATA_CLUSTER ||
-             dir_table[i].start_cluster >= fs_total_clusters)) {
+        for (int j = 1; j < i; j++) {
+            if (volume->entries[j].is_used &&
+                volume->entries[j].parent_id == volume->entries[i].parent_id &&
+                ft_strcmp(volume->entries[j].filename, volume->entries[i].filename) == 0) {
+                klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: duplicate sibling name", i);
+                return 0;
+            }
+        }
+        if (volume->entries[i].start_cluster != 0 &&
+            !(volume->entries[i].file_size == 0 && volume->entries[i].start_cluster == FAT_EOF) &&
+            (volume->entries[i].start_cluster < FS_FIRST_DATA_CLUSTER ||
+             volume->entries[i].start_cluster >= volume->clusters)) {
             klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: start cluster is outside the file system", (int)i);
             return 0;
         }
@@ -742,319 +738,307 @@ int fs_validate_directory_table(void) {
          * count is what turns a cycle into a refusal instead of a hang: a chain
          * longer than the table cannot be acyclic.
          */
-        int curr = (int)dir_table[i].parent_id;
+        int curr = (int)volume->entries[i].parent_id;
         int hops = 0;
 
         while (curr != 0) {
-            if (++hops > fs_max_entries) {
+            if (++hops > volume->entry_count) {
                 klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: parent chain does not reach the root", (int)i);
                 return 0;
             }
-            if (curr < 0 || curr >= fs_max_entries || !dir_table[curr].is_used ||
-                dir_table[curr].entry_id != (fs_id_t)curr ||
-                dir_table[curr].file_type != FT_DIR) {
+            if (curr < 0 || curr >= volume->entry_count || !volume->entries[curr].is_used ||
+                volume->entries[curr].entry_id != (fs_id_t)curr ||
+                volume->entries[curr].file_type != FT_DIR) {
                 klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table: parent is not a directory that exists", (int)i);
                 return 0;
             }
-            curr = dir_table[curr].parent_id;
+            curr = volume->entries[curr].parent_id;
         }
     }
     return 1;
 }
 
-/**
- * @brief Mounts the file system, formatting a blank disk and refusing anything else.
- *
- * Sector 0 is now a partition table, and telling the three cases apart falls out
- * of that almost for free:
- *
- *   An MBR signature means a partitioned disk. The partition this kernel owns is
- *   located, the superblock is read from its first sector, and the table is
- *   checked before anything is allowed to believe it.
- *
- *   An entirely blank disk is partitioned and formatted.
- *
- *   Our own magic in sector 0 means a v0.9.x disk, where the superblock sat
- *   where the partition table now sits. It is named as such and refused.
- *
- *   Anything else is refused without being written to.
- *
- * Refusing matters more than mounting. Before v0.9.0 there was no superblock and
- * no check of any kind, so this kernel handed an older image would have read
- * 272-byte entries as 96-byte ones and written its own tables over the user's
- * files. Every format change since has been able to recognise its predecessor,
- * and this one keeps that going: v1 put a magic number in sector 0, so v2 can
- * see it there and say what it is looking at.
- */
+/* Reject cross-linked, cyclic, truncated and orphaned chains without repair.
+ * One bit per cluster bounds both the memory cost and the number of visits. */
+static int volume_validate_allocation(fs_volume_t *v) {
+    uint32_t bytes = (v->clusters + 7u) / 8u;
+    uint8_t *seen = kmalloc(bytes);
+    if (!seen) return E_NOMEM;
+    ft_memset(seen, 0, bytes);
+    int rc = E_INVAL;
+    if (v->fat[0] != FAT_EOF || v->fat[1] != FAT_EOF) goto done;
+    for (int i = 1; i < v->entry_count; i++) {
+        const disk_file_entry_t *entry = &v->entries[i];
+        if (!entry->is_used) continue;
+        uint32_t cluster = entry->start_cluster;
+        if (entry->file_type == FT_DIR) {
+            if (entry->file_size || cluster) goto done;
+            continue;
+        }
+        /* Existing v3 writers allocate one cluster even for an empty raw
+         * file. Also accept the no-allocation representation. */
+        if (!entry->file_size && (cluster == FAT_FREE || cluster == FAT_EOF)) continue;
+        uint32_t count = entry->file_size ?
+            1 + (entry->file_size - 1) / (512u * FS_CLUSTER_SECTORS) : 1;
+        if (count > v->clusters - FS_FIRST_DATA_CLUSTER) goto done;
+        for (uint32_t n = 0; n < count; n++) {
+            if (cluster < FS_FIRST_DATA_CLUSTER || cluster >= v->clusters ||
+                (seen[cluster / 8] & (1u << (cluster % 8)))) goto done;
+            seen[cluster / 8] |= 1u << (cluster % 8);
+            cluster = v->fat[cluster];
+        }
+        if (cluster != FAT_EOF) goto done;
+    }
+    for (uint32_t c = FS_FIRST_DATA_CLUSTER; c < v->clusters; c++) {
+        if (!(seen[c / 8] & (1u << (c % 8))) && v->fat[c] != FAT_FREE) goto done;
+    }
+    rc = E_OK;
+done:
+    kfree(seen);
+    if (rc != E_OK) klog(LOG_LEVEL_ERROR, "VFS", "Allocation table does not match file ownership and lengths.");
+    return rc;
+}
+
+/* Load a v3 filesystem without issuing writes. Its directory, FAT and device
+ * are private to this mount, including while probing an untrusted candidate. */
+static int volume_load(fs_volume_t *volume, blockdev_t *device) {
+    volume->device = device;
+    if (!device || device->sector_size != 512) return E_NODEV;
+    int part = load_partition(volume, device->sector_count);
+    if (part < 0) return E_IO;
+    if (!part || !load_superblock(volume)) return E_INVAL;
+    int rc = fs_tables_alloc(volume, volume->super.max_entries, volume->clusters);
+    if (rc != E_OK) return rc;
+    rc = read_table(volume, volume->super.dir_start, volume->entries,
+                    volume->entry_count * sizeof(*volume->entries));
+    if (rc == E_OK)
+        rc = read_table(volume, volume->super.fat_start, volume->fat,
+                        volume->clusters * sizeof(*volume->fat));
+    if (rc == E_OK && !volume_validate_directory(volume)) rc = E_INVAL;
+    if (rc == E_OK) rc = volume_validate_allocation(volume);
+    if (rc != E_OK) {
+        fs_tables_free(volume);
+        return rc;
+    }
+    volume->mounted = 1;
+    return E_OK;
+}
+
+static int format_blank(blockdev_t *device, uint32_t expected_sectors,
+                        const keyslot_t *slot) {
+    if (!device || !device->write) return E_ROFS;
+    if (device->sector_size != 512 || device->sector_count != expected_sectors ||
+        expected_sectors <= FS_PART_START_LBA + FS_DATA_START_SECTOR) return E_INVAL;
+    if ((fs_root_volume.mounted && device == fs_root_volume.device) ||
+        (secondary_volume.mounted && device == secondary_volume.device)) return E_BUSY;
+    fs_volume_t fresh = { .device = device, .part_start = FS_PART_START_LBA,
+                          .sectors = expected_sectors - FS_PART_START_LBA };
+    fresh.clusters = (fresh.sectors - FS_DATA_START_SECTOR) / FS_CLUSTER_SECTORS;
+    if (fresh.clusters <= FS_FIRST_DATA_CLUSTER) return E_INVAL;
+
+    int blank = disk_region_is_blank(&fresh, 0, expected_sectors);
+    if (blank < 0) return blank;
+    if (!blank) return E_EXIST;
+    int rc = format_disk(&fresh, slot);
+    if (rc == E_OK) rc = write_mbr(&fresh, expected_sectors);
+    if (rc == E_OK) rc = bcache_flush_dev(device);
+    fs_tables_free(&fresh);
+    return rc;
+}
+
+int fs_format_data_device(blockdev_t *device, uint32_t sectors, const char *pass) {
+    if (current_sec_level >= SEC_LEVEL_IMMUTABLE) return E_ROFS;
+    if (!pass || !pass[0]) return E_INVAL;
+    uint8_t key[KEYSLOT_KEY_LEN];
+    keyslot_t slot;
+    int rc = generate_random_bytes(key, sizeof(key)) == ENTROPY_FAIL ? E_IO :
+             keyslot_create(&slot, pass, key);
+    if (rc == E_OK) {
+        vfs_lock();
+        rc = format_blank(device, sectors, &slot);
+        vfs_unlock();
+    }
+    volatile uint8_t *secret = key;
+    for (unsigned i = 0; i < sizeof(key); i++) secret[i] = 0;
+    return rc;
+}
+
 void init_fs(void) {
-    mutex_init(&vfs_mutex);
+    static int initialized;
+    if (!initialized) { mutex_init(&vfs_mutex); initialized = 1; }
+    fs_tables_free(&fs_root_volume);
+    ft_memset(&fs_root_volume, 0, sizeof(fs_root_volume));
+    volume_load(&fs_root_volume, blockdev_root());
+}
 
-    /*
-     * The inode locks are initialised by fs_tables_alloc(), which is the only
-     * place that knows how many there are. A loop here would have run over the
-     * previous mount's count - zero on the first boot - and left the new table's
-     * locks holding whatever kmalloc handed back.
-     */
-    bcache_init();
+/* Called only for the exact device explicitly selected at boot. */
+int fs_prepare_first_boot(blockdev_t *device) {
+    if (!device || device != blockdev_root()) return E_NODEV;
+    int rc = format_blank(device, device->sector_count, 0);
+    if (rc != E_OK) return rc;
+    init_fs();
+    if (!fs_mounted) return E_IO;
+    fs_was_formatted = 1;
+    return E_OK;
+}
 
-    /*
-     * How big the disk is, asked of the block layer rather than of a driver.
-     * ata_identify() used to be called from right here, which is how the file
-     * system came to name an IDE controller; the boot path brings the device up
-     * now and registers it, and this asks whatever was registered.
-     *
-     * No device registered means no disk answered, and zero sectors takes the
-     * "too small to hold a file system" path below rather than any path that
-     * writes.
-     */
-    blockdev_t *disk = blockdev_root();
-    uint32_t disk_sectors = disk ? disk->sector_count : 0;
+static fs_id_t next_prefix = 0x10000u;
 
-    fs_mounted = 0;
-    fs_part_start = 0;
-    fs_total_clusters = 0;
+static void wipe_bytes(uint8_t *buf, uint32_t size) {
+    volatile uint8_t *p = buf;
+    while (size--) *p++ = 0;
+}
 
-    /*
-     * Released rather than cleared. This cleared a static array; the tables are
-     * allocated per mount now and the next disk may want different sizes, so
-     * holding the old ones would both leak and mislead. init_fs() is called more
-     * than once - test_vfs.c does it deliberately - so this path is live.
-     */
-    fs_tables_free();
+void fs_forget_secondary_key(void) {
+    secondary_volume.key_ready = 0;
+    wipe_bytes(secondary_volume.data_key, sizeof(secondary_volume.data_key));
+}
 
-    /*
-     * Before anything subtracts from it. The partition begins at
-     * FS_PART_START_LBA and the metadata runs to FS_DATA_START_SECTOR beyond
-     * that, so a device reporting fewer sectors than the two together - or
-     * reporting none at all, which is what a failed identify looks like - would
-     * turn the subtraction below into an unsigned wrap and hand the rest of this
-     * function a partition of four billion sectors.
-     */
-    if (disk_sectors <= FS_PART_START_LBA + FS_DATA_START_SECTOR) {
-        klog_int(LOG_LEVEL_ERROR, "VFS", "Disk is too small to hold a file system; sectors", (int)disk_sectors);
-        return;
+static const uint8_t *volume_key(fs_volume_t *volume) {
+    if (volume == &fs_root_volume)
+        return crypto_fs_key_is_usable() ? kernel_master_key : 0;
+    return volume->key_ready ? volume->data_key : 0;
+}
+
+blockdev_t *fs_secondary_device(void) {
+    return secondary_volume.mounted ? secondary_volume.device : 0;
+}
+
+static int uses_volume(const process_t *p, fs_id_t prefix) {
+    if (!p) return 0;
+    if ((p->cwd_id & 0xffff0000u) == prefix) return 1;
+    for (uint32_t i = 0; p->fd_table && i < p->fd_table_size; i++) {
+        const file_descriptor_t *fd = &p->fd_table[i];
+        if (fd->type == FD_TYPE_FILE && fd->ptr &&
+            ((vfs_file_t *)fd->ptr)->volume_prefix == prefix) return 1;
     }
+    return 0;
+}
 
-    int part = load_partition(disk_sectors);
+static int attach_locked(blockdev_t *device, const char *passphrase) {
+    if (!fs_mounted || !device) return E_NODEV;
+    if (device == fs_root_volume.device || device == fs_secondary_device()) return E_OK;
+    if (secondary_volume.mounted || !next_prefix || next_prefix > 0x7fff0000u) return E_BUSY;
+    if (current_sec_level >= SEC_LEVEL_LOCKDOWN) return E_ACCES;
+    int idx = fs_get_entry_idx("mnt", 0);
+    if (idx <= 0 || dir_table[idx].file_type != FT_DIR) return E_NOTDIR;
+    for (int i = 0; i < fs_max_entries; i++)
+        if (dir_table[i].is_used && dir_table[i].parent_id == idx) return E_NOTEMPTY;
+    if (current_task && current_task->cwd_id == (fs_id_t)idx) return E_BUSY;
+    for (process_t *p = task_list_head; p; p = p->next)
+        if (p->cwd_id == (fs_id_t)idx) return E_BUSY;
 
-    if (part < 0) {
-        klog(LOG_LEVEL_ERROR, "VFS", "Sector 0 could not be read; refusing to mount or format.");
-        printk("\n[VFS] The first sector of this disk could not be read. That is not the\n");
-        printk("      same as a disk with nothing on it, and this kernel will not format\n");
-        printk("      one on the strength of a failed read. Nothing has been written.\n\n");
-        return;
+    fs_volume_t candidate = {0};
+    int rc = volume_load(&candidate, device);
+    if (rc == E_OK) {
+        if (!keyslot_is_present(&candidate.super.keyslot) || !passphrase || !*passphrase)
+            rc = E_ACCES;
+        else rc = keyslot_unwrap(&candidate.super.keyslot, passphrase, candidate.data_key);
     }
-
-    if (part) {
-        /* Partitioned. The cluster count is what the partition can hold, capped
-         * at what the allocation table can describe. */
-        uint32_t usable = (fs_max_sectors > FS_DATA_START_SECTOR)
-                              ? (fs_max_sectors - FS_DATA_START_SECTOR) : 0;
-        fs_total_clusters = usable / FS_CLUSTER_SECTORS;
-        if (fs_total_clusters > FS_MAX_CLUSTERS_CAP) fs_total_clusters = FS_MAX_CLUSTERS_CAP;
-
-        if (!load_superblock()) {
-            klog(LOG_LEVEL_ERROR, "VFS", "Partition found, but no file system this kernel can read.");
-            printk("\n[VFS] The partition on this disk does not hold a file system this\n");
-            printk("      version can read. Nothing has been written to it.\n\n");
-            return;
-        }
-
-        /*
-         * Sized from what the superblock says this disk holds, not from the caps.
-         * A disk written before v1.3.0 records 512 entries and is mounted with
-         * exactly 512 - which is what keeps the format compatible without a
-         * converter, and what makes fs_max_entries the only correct bound for a
-         * loop over the table.
-         */
-        if (fs_tables_alloc(fs_super.max_entries, fs_super.total_clusters) != E_OK) {
-            printk("\n[VFS] There is not enough kernel memory to mount this disk.\n");
-            printk("      Nothing has been written to it.\n\n");
-            return;
-        }
+    if (rc == E_OK) {
+        candidate.prefix = next_prefix;
+        next_prefix += 0x10000u;
+        candidate.covered = (fs_id_t)idx;
+        candidate.key_ready = 1;
+        secondary_volume = candidate;
     } else {
-        uint8_t sec_buf[512];
-        uint32_t magic;
+        fs_tables_free(&candidate);
+    }
+    wipe_bytes(candidate.data_key, sizeof(candidate.data_key));
+    return rc;
+}
 
-        /*
-         * load_partition() has already read this sector successfully, so this is
-         * a cache hit and cannot realistically fail. It is checked anyway: an
-         * unchecked read on the path that ends in format_disk() is the exact
-         * shape of the defect this release exists to remove, and a guard that
-         * costs a comparison is not worth reasoning about twice.
-         */
-        if (bcache_read_sector(blockdev_root(), 0, sec_buf) != E_OK) {
-            klog(LOG_LEVEL_ERROR, "VFS", "Sector 0 could not be read; refusing to mount or format.");
-            printk("\n[VFS] The first sector of this disk could not be read. That is not\n");
-            printk("      the same as an empty disk, and this kernel will not format it\n");
-            printk("      on the strength of a failed read. Nothing has been written.\n\n");
-            return;
-        }
-        ft_memcpy(&magic, sec_buf, sizeof(magic));
+int fs_attach(blockdev_t *device, const char *passphrase) {
+    vfs_lock();
+    int rc = attach_locked(device, passphrase);
+    vfs_unlock();
+    return rc;
+}
 
-        if (magic == FS_SUPER_MAGIC) {
-            klog(LOG_LEVEL_ERROR, "VFS", "A v0.9.x disk: superblock where the partition table belongs.");
-            printk("\n[VFS] This disk was written by esdumanOS v0.9.x.\n");
-            printk("      v0.10.0 puts a partition table in sector 0, where that release\n");
-            printk("      kept the superblock, so the layout has moved and there is no\n");
-            printk("      converter. Nothing has been written to it. Use the disk.img\n");
-            printk("      from the release, or start from a blank one - `make run` does\n");
-            printk("      that for you.\n\n");
-            return;
-        }
+/* A cache admission failure may leave a changed table in RAM. Sync and
+ * detach retry these tables before considering the device flushed. */
+static int retry_metadata(fs_volume_t *v) {
+    int rc = E_OK;
+    if (v->mounted && v->fat_pending) rc = save_fat_to_disk(v);
+    if (rc == E_OK && v->mounted && v->directory_pending)
+        rc = save_directory_to_disk(v);
+    return rc;
+}
 
-        int blank = disk_region_is_blank(0, FS_PART_START_LBA + FS_LEGACY_DIR_SECTORS);
+int fs_sync_all(void) {
+    vfs_lock();
+    int primary = retry_metadata(&fs_root_volume);
+    int secondary = retry_metadata(&secondary_volume);
+    int cache = bcache_flush();
+    vfs_unlock();
+    return primary != E_OK ? primary : secondary != E_OK ? secondary : cache;
+}
 
-        if (blank < 0) {
-            klog(LOG_LEVEL_ERROR, "VFS", "Disk could not be read; refusing to mount or format.");
-            printk("\n[VFS] This disk could not be read. It is not being treated as empty,\n");
-            printk("      because a disk that cannot be read is not a disk that is blank -\n");
-            printk("      and formatting one on that assumption is how data is lost to a\n");
-            printk("      loose cable. Nothing has been written to it.\n\n");
-            return;
-        }
-
-        if (blank == 0) {
-            klog(LOG_LEVEL_ERROR, "VFS", "Unrecognised disk; refusing to mount it or write to it.");
-            printk("\n[VFS] This disk was not written by this version of esdumanOS, and\n");
-            printk("      carries no partition table this kernel recognises. Nothing has\n");
-            printk("      been written to it.\n");
-            /*
-             * And how to offer it, which the refusal did not say for three
-             * releases. Saying only "no" is right about the disk and useless
-             * about the machine: the rule is that a disk is formatted when its
-             * head is blank, the number is not guessable from outside, and a
-             * reader with a disk they are willing to lose had no way to find it
-             * except in this file.
-             */
-            printk("      To offer this disk to esdumanOS, zero its first %d sectors\n",
-                   FS_PART_START_LBA + FS_LEGACY_DIR_SECTORS);
-            printk("      on another machine. That erases what is on it.\n");
-
-            /*
-             * And what was actually found, which is the half that lets somebody
-             * disagree with this refusal. Which disk it is, how big it says it
-             * is, where the first byte that is not zero lives, and the head of
-             * sector 0 - enough to tell a partition table from an ISO header
-             * from a read path handing back a buffer nobody filled.
-             */
-            {
-                blockdev_t *d = blockdev_root();
-                uint8_t head[512];
-
-                printk("      %s: %d sectors of %d bytes. First non-zero byte at\n",
-                       (d && d->name) ? d->name : "(no device)",
-                       d ? (int)d->sector_count : 0,
-                       d ? (int)d->sector_size : 0);
-                printk("      sector %d offset %d, value %02x. Sector 0 begins",
-                       (int)blank_stop_sector, (int)blank_stop_offset,
-                       blank_stop_byte);
-
-                if (bcache_read_sector(blockdev_root(), 0, head) == E_OK) {
-                    for (int i = 0; i < 16; i++) printk(" %02x", head[i]);
-                    printk("\n\n");
-                } else {
-                    printk(" - unreadable on the second try.\n\n");
-                }
-            }
-            return;
-        }
-
-        fs_part_start  = FS_PART_START_LBA;
-        fs_max_sectors = disk_sectors - FS_PART_START_LBA;
-
-        uint32_t usable = (fs_max_sectors > FS_DATA_START_SECTOR)
-                              ? (fs_max_sectors - FS_DATA_START_SECTOR) : 0;
-        fs_total_clusters = usable / FS_CLUSTER_SECTORS;
-        if (fs_total_clusters > FS_MAX_CLUSTERS_CAP) fs_total_clusters = FS_MAX_CLUSTERS_CAP;
-
-        if (fs_total_clusters < FS_FIRST_DATA_CLUSTER + 1) {
-            klog(LOG_LEVEL_ERROR, "VFS", "Disk is too small to hold a file system.");
-            return;
-        }
-
-        /*
-         * A partition table that did not reach the disk makes everything
-         * format_disk() writes afterwards unreachable: the geometry lives in the
-         * superblock, and the superblock is found through the table. Stopping
-         * here leaves a disk with nothing on it, which is what it already was.
-         */
-        if (write_mbr(disk_sectors) != E_OK) {
-            klog(LOG_LEVEL_ERROR, "VFS", "The partition table could not be written; format abandoned.");
-            printk("\n[VFS] The partition table could not be written to this disk, so it\n");
-            printk("      has not been formatted. Nothing usable was left behind.\n\n");
-            return;
-        }
-        if (format_disk() != E_OK) {
-            printk("\n[VFS] The file system could not be laid down on this disk.\n");
-            printk("      Nothing usable was left behind.\n\n");
-            return;
+int fs_detach(void) {
+    vfs_lock();
+    int rc = E_NODEV;
+    if (secondary_volume.mounted) {
+        int busy = uses_volume(current_task, secondary_volume.prefix);
+        for (process_t *p = task_list_head; !busy && p; p = p->next)
+            busy = uses_volume(p, secondary_volume.prefix);
+        rc = busy ? E_BUSY : retry_metadata(&secondary_volume);
+        if (rc == E_OK) rc = bcache_flush_dev(secondary_volume.device);
+        if (rc == E_OK) {
+            fs_forget_secondary_key();
+            fs_tables_free(&secondary_volume);
+            ft_memset(&secondary_volume, 0, sizeof(secondary_volume));
         }
     }
+    vfs_unlock();
+    return rc;
+}
 
-    uint8_t *dir_ptr = (uint8_t *)dir_table;
-    uint32_t total_bytes = (uint32_t)fs_super.entry_size * fs_super.max_entries;
-    uint32_t sectors_needed = (total_bytes + 511) / 512;
-
-    for (uint32_t i = 0; i < sectors_needed; i++) {
-        uint8_t sec_buf[512];
-
-        /*
-         * A directory table with a hole in it is worse than no mount at all: the
-         * missing sectors would read as zeros, which is a run of unused entries,
-         * and the files they described would be invisible and their clusters
-         * free for something else to allocate over.
-         */
-        if (fs_read_sector(fs_super.dir_start + i, sec_buf) != E_OK) {
-            klog_int(LOG_LEVEL_ERROR, "VFS", "Directory table unreadable at sector", (int)i);
-            printk("\n[VFS] The directory table could not be read from this disk.\n");
-            printk("      Refusing to mount rather than treat the part that failed\n");
-            printk("      as a run of empty entries.\n\n");
-            return;
-        }
-
-        uint32_t copy_size = 512;
-        if ((i * 512) + 512 > total_bytes) {
-            copy_size = total_bytes % 512;
-        }
-        for (uint32_t j = 0; j < copy_size; j++) {
-            dir_ptr[(i * 512) + j] = sec_buf[j];
-        }
+/* The covered directory supplies the secondary root's name and permissions. */
+const disk_file_entry_t *fs_entry(fs_id_t id) {
+    fs_volume_t *v = fs_volume_for(id);
+    if (!v || !v->mounted || !id) return 0;
+    if (id == v->prefix) {
+        id = v->covered;
+        v = &fs_root_volume;
     }
+    unsigned index = (uint16_t)id;
+    if (!index || index >= (unsigned)v->entry_count || !v->entries[index].is_used ||
+        v->entries[index].entry_id != index) return 0;
+    return &v->entries[index];
+}
 
-    uint8_t *fat_ptr = (uint8_t *)file_allocation_table;
-    uint32_t fat_total_bytes = fs_total_clusters * sizeof(uint32_t);
-    uint32_t fat_sectors_needed = (fat_total_bytes + 511) / 512;
+fs_id_t fs_follow_mount(fs_id_t id) {
+    if (secondary_volume.mounted && id == secondary_volume.covered) return secondary_volume.prefix;
+    return id;
+}
 
-    for (uint32_t i = 0; i < fat_sectors_needed; i++) {
-        /*
-         * And an allocation table with a hole reads as free clusters, which is an
-         * invitation to allocate over data that is still referenced.
-         */
-        if (fs_read_sector(fs_super.fat_start + i, fat_ptr + (i * 512)) != E_OK) {
-            klog_int(LOG_LEVEL_ERROR, "VFS", "Allocation table unreadable at sector", (int)i);
-            printk("\n[VFS] The allocation table could not be read from this disk.\n");
-            printk("      Refusing to mount rather than treat the part that failed\n");
-            printk("      as free space.\n\n");
-            return;
-        }
-    }
+int fs_parent_dir(fs_id_t id) {
+    if (id == 0) return 0;
+    const disk_file_entry_t *entry = fs_entry(id);
+    if (!entry || entry->file_type != FT_DIR) return E_NOTDIR;
+    if (id == secondary_volume.prefix) return entry->parent_id;
+    return (int)((id & 0xffff0000u) | entry->parent_id);
+}
 
-    /* Clusters 0 and 1 are reserved whatever the disk says about them. */
-    for (uint32_t i = 0; i < FS_FIRST_DATA_CLUSTER && i < fs_total_clusters; i++) {
-        file_allocation_table[i] = FAT_EOF;
-    }
+int fs_child_dir(fs_id_t parent, const char *name) {
+    int idx = fs_get_entry_idx(name, parent);
+    if (idx < 0) return E_NOENT;
+    fs_id_t id = (parent & 0xffff0000u) | (uint32_t)idx;
+    const disk_file_entry_t *entry = fs_entry(id);
+    if (!entry || entry->file_type != FT_DIR) return E_NOTDIR;
+    return (int)fs_follow_mount(id);
+}
 
-    if (!fs_validate_directory_table()) {
-        printk("\n[VFS] The directory table on this disk is inconsistent with itself.\n");
-        printk("      Refusing to mount rather than guess at what it should say.\n");
-        printk("      See the kernel log for the entry that failed.\n\n");
-        fs_tables_free();
-        return;
-    }
+int fs_validate_directory_table(void) {
+    return volume_validate_directory(&fs_root_volume);
+}
 
-    fs_mounted = 1;
-    save_fat_to_disk();
+int fs_read_sector(uint32_t sector, uint8_t *buf) {
+    return fs_volume_read_sector(&fs_root_volume, sector, buf);
+}
+
+int fs_write_sector(uint32_t sector, uint8_t *buf) {
+    return fs_volume_write_sector(&fs_root_volume, sector, buf);
 }
 
 /* --- DISK KEY SLOT --- *
@@ -1110,16 +1094,15 @@ int fs_keyslot_install(const char *passphrase) {
         return res;
     }
 
-    save_superblock();
-    bcache_flush();
-
-    install_master_key(dek);
+    res = save_superblock(&fs_root_volume);
+    if (res == E_OK) res = bcache_flush_dev(fs_root_volume.device);
+    if (res == E_OK) install_master_key(dek);
 
     {
         volatile uint8_t *p = dek;
         for (uint32_t i = 0; i < KEYSLOT_KEY_LEN; i++) p[i] = 0;
     }
-    return E_OK;
+    return res;
 }
 
 /**
@@ -1200,9 +1183,8 @@ int fs_keyslot_rewrap(const char *old_pass, const char *new_pass) {
 
     if (res == E_OK) {
         ft_memcpy(&fs_super.keyslot, &fresh, sizeof(keyslot_t));
-        save_superblock();
-        bcache_flush();
-        klog(LOG_LEVEL_INFO, "VFS", "Disk passphrase changed; the data key is unchanged.");
+        res = save_superblock(&fs_root_volume);
+        if (res == E_OK) res = bcache_flush_dev(fs_root_volume.device);
     }
 
     {
@@ -1243,7 +1225,11 @@ void fs_list_files(void) {
  * @return int
  */
 int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
-    if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries) {
+    if (!file) return E_INVAL;
+    fs_volume_t *volume = fs_volume_for(file->volume_prefix);
+    if (!volume) return E_NODEV;
+
+    if (file->inode_idx >= 0 && file->inode_idx < volume->entry_count) {
         /*
          * No interrupt frame is passed. This runs several frames below the
          * syscall entry and does not have the live one; handing over
@@ -1253,14 +1239,14 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
          * degrades to spinning, which never happens because the kernel is not
          * preemptible.
          */
-        rwlock_acquire_read(&inode_locks[file->inode_idx], 0);
+        rwlock_acquire_read(&volume->locks[file->inode_idx], 0);
     }
-    if (file->current_offset >= file->file_size) { 
-        if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries) rwlock_release_read(&inode_locks[file->inode_idx]); 
-        return 0; 
+    if (file->current_offset >= file->file_size) {
+        if (file->inode_idx >= 0 && file->inode_idx < volume->entry_count) rwlock_release_read(&volume->locks[file->inode_idx]);
+        return 0;
     }
 
-    if (file->current_offset + size > file->file_size)
+    if (size > file->file_size - file->current_offset)
         size = file->file_size - file->current_offset;
 
     /*
@@ -1271,33 +1257,38 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
      * sectors, and a "cluster read" that was anything other than that loop would
      * be a second I/O path to keep correct.
      */
-    uint32_t cluster_bytes = 512u * fs_super.cluster_sectors;
+    uint32_t cluster_bytes = 512u * volume->super.cluster_sectors;
     uint32_t bytes_read = 0;
     uint32_t current_cluster = file->start_cluster;
     uint32_t clusters_to_skip = file->current_offset / cluster_bytes;
 
     for (uint32_t i = 0; i < clusters_to_skip; i++) {
-        if (current_cluster == FAT_EOF || current_cluster >= fs_total_clusters) {
-            if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries)
-                rwlock_release_read(&inode_locks[file->inode_idx]);
+        if (current_cluster == FAT_EOF || current_cluster >= volume->clusters) {
+            if (file->inode_idx >= 0 && file->inode_idx < volume->entry_count)
+                rwlock_release_read(&volume->locks[file->inode_idx]);
             return 0;
         }
-        current_cluster = file_allocation_table[current_cluster];
+        current_cluster = volume->fat[current_cluster];
     }
 
     uint32_t offset_in_cluster = file->current_offset % cluster_bytes;
 
     while (bytes_read < size && current_cluster != FAT_EOF) {
-        if (current_cluster >= fs_total_clusters) { break; }
+        if (current_cluster >= volume->clusters) { break; }
 
-        uint32_t base = fs_cluster_to_sector(current_cluster);
+        uint32_t base = fs_volume_cluster_sector(volume, current_cluster);
 
         while (offset_in_cluster < cluster_bytes && bytes_read < size) {
             uint8_t sector_buf[512];
             uint32_t sector_in_cluster = offset_in_cluster / 512;
             uint32_t offset_in_sector = offset_in_cluster % 512;
 
-            fs_read_sector(base + sector_in_cluster, sector_buf);
+            int rc = fs_volume_read_sector(volume, base + sector_in_cluster, sector_buf);
+            if (rc != E_OK) {
+                if (file->inode_idx >= 0 && file->inode_idx < volume->entry_count)
+                    rwlock_release_read(&volume->locks[file->inode_idx]);
+                return bytes_read ? (int)bytes_read : rc;
+            }
 
             uint32_t bytes_to_copy = 512 - offset_in_sector;
             if (bytes_to_copy > (size - bytes_read)) {
@@ -1313,11 +1304,11 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
             offset_in_cluster += bytes_to_copy;
         }
 
-        current_cluster = file_allocation_table[current_cluster];
+        current_cluster = volume->fat[current_cluster];
         offset_in_cluster = 0;
     }
-    if (file->inode_idx >= 0 && file->inode_idx < fs_max_entries) {
-        rwlock_release_read(&inode_locks[file->inode_idx]);
+    if (file->inode_idx >= 0 && file->inode_idx < volume->entry_count) {
+        rwlock_release_read(&volume->locks[file->inode_idx]);
     }
     return bytes_read;
 }
@@ -1330,15 +1321,20 @@ int fs_read_raw(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
  * @return int
  */
 int fs_read(vfs_file_t *file, uint8_t *buffer, uint32_t size) {
+    if (!file) return E_INVAL;
+    fs_volume_t *volume = fs_volume_for(file->volume_prefix);
+    if (!volume) return E_NODEV;
+
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
         /* LOCKDOWN destroys the key but outranks CRYPTO_ENFORCED, so this
          * branch is still taken afterwards. Refuse rather than decrypt with
          * zeroes and hand the caller plausible-looking garbage. */
-        if (!crypto_fs_key_is_usable()) {
+        const uint8_t *key = volume_key(volume);
+        if (!key) {
             klog(LOG_LEVEL_ERROR, "VFS", "Encrypted read refused: master key destroyed.");
             return E_ACCES;
         }
-        return fs_read_encrypted(file, buffer, size, kernel_master_key);
+        return fs_read_encrypted(file, buffer, size, key);
     }
     return fs_read_raw(file, buffer, size);
 }
@@ -1406,14 +1402,18 @@ int fs_write_buffered(vfs_file_t *file, const uint8_t *data, uint32_t size) {
  * @return E_OK, or whatever fs_atomic_update() reported.
  */
 int fs_commit_writes(vfs_file_t *file) {
-    if (!file || !file->dirty) return E_OK;
+    if (!file) return E_INVAL;
+    if (!file->dirty) return E_OK;
+    fs_volume_t *volume = fs_volume_for(file->volume_prefix);
 
     int res = E_OK;
 
-    if (file->inode_idx < 0 || file->inode_idx >= fs_max_entries) {
+    if (!volume || !volume->mounted) {
+        res = E_NODEV;
+    } else if (file->inode_idx < 0 || file->inode_idx >= volume->entry_count) {
         res = E_BADF;
     } else {
-        fs_id_t parent_id = dir_table[file->inode_idx].parent_id;
+        fs_id_t parent_id = volume->prefix | volume->entries[file->inode_idx].parent_id;
         /* An empty commit still needs a valid pointer; fs_create_file() is happy
          * with a zero length, which is how /bin/touch already creates files. */
         const uint8_t *content = file->write_buf ? file->write_buf : (const uint8_t *)"";
@@ -1454,14 +1454,19 @@ int fs_commit_writes(vfs_file_t *file) {
  * @return E_OK on success, or a negative error code.
  */
 int fs_size(vfs_file_t *file, uint32_t *out_size) {
-    if (!file || !out_size) return E_INVAL;
+    if (!file) return E_INVAL;
+    fs_volume_t *volume = fs_volume_for(file->volume_prefix);
+    if (!volume) return E_NODEV;
+
+    if (!out_size) return E_INVAL;
 
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
-        if (!crypto_fs_key_is_usable()) {
+        const uint8_t *key = volume_key(volume);
+        if (!key) {
             klog(LOG_LEVEL_ERROR, "VFS", "Encrypted size query refused: master key destroyed.");
             return E_ACCES;
         }
-        return fs_size_encrypted(file, kernel_master_key, out_size);
+        return fs_size_encrypted(file, key, out_size);
     }
 
     *out_size = file->file_size;
@@ -1477,7 +1482,10 @@ int fs_size(vfs_file_t *file, uint32_t *out_size) {
  * @return int
  */
 int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
 
     vfs_lock();
 
@@ -1488,7 +1496,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
      * a file they cannot find again, and two long names that share a prefix
      * become the same file.
      */
-    if (ft_strlen(name) >= MAX_FILENAME) {
+    if (!valid_entry_name(name)) {
         vfs_unlock(); return E_INVAL;
     }
 
@@ -1519,11 +1527,11 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
 
     int existing_idx = -1;
     int free_idx = -1;
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used && volume->entries[i].parent_id == (uint16_t)parent_id && ft_strcmp(volume->entries[i].filename, name) == 0) {
             existing_idx = i;
         }
-        if (i > 0 && dir_table[i].is_used == 0 && free_idx == -1) {
+        if (i > 0 && volume->entries[i].is_used == 0 && free_idx == -1) {
             free_idx = i;
         }
     }
@@ -1534,9 +1542,9 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
         vfs_unlock(); return E_NFILE;
     }
 
-    uint32_t cluster_bytes = 512u * fs_super.cluster_sectors;
-    uint32_t clusters_needed = (size == 0) ? 1 : ((size + cluster_bytes - 1) / cluster_bytes);
-    uint32_t new_cluster = allocate_fat_chain(clusters_needed);
+    uint32_t cluster_bytes = 512u * volume->super.cluster_sectors;
+    uint32_t clusters_needed = (size == 0) ? 1 : (1 + (size - 1) / cluster_bytes);
+    uint32_t new_cluster = allocate_fat_chain(volume, clusters_needed);
 
     if (new_cluster == FAT_FREE) {
         klog(LOG_LEVEL_ERROR, "VFS", "Disk is completely full or not enough space!");
@@ -1547,9 +1555,9 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
     uint32_t current_cluster = new_cluster;
 
     for (uint32_t c = 0; c < clusters_needed; c++) {
-        if (current_cluster == FAT_EOF || current_cluster >= fs_total_clusters) break;
+        if (current_cluster == FAT_EOF || current_cluster >= volume->clusters) break;
 
-        uint32_t base = fs_cluster_to_sector(current_cluster);
+        uint32_t base = fs_volume_cluster_sector(volume, current_cluster);
 
         /*
          * Every sector of the cluster is written, not only the ones the file
@@ -1559,7 +1567,7 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
          * else's bytes - readable through nothing today, and one lseek past the
          * end away from being readable tomorrow.
          */
-        for (uint32_t s = 0; s < fs_super.cluster_sectors; s++) {
+        for (uint32_t s = 0; s < volume->super.cluster_sectors; s++) {
             uint8_t sector_buf[512];
             ft_memset(sector_buf, 0, 512);
 
@@ -1571,32 +1579,45 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
                 }
             }
 
-            fs_write_sector(base + s, sector_buf);
+            int rc = fs_volume_write_sector(volume, base + s, sector_buf);
+            if (rc != E_OK) {
+                /* This chain has not been named in the directory or submitted
+                 * to the on-disk FAT. Release it locally so a retry can reuse it. */
+                uint32_t cluster = new_cluster;
+                while (cluster >= FS_FIRST_DATA_CLUSTER && cluster < volume->clusters) {
+                    uint32_t next = volume->fat[cluster];
+                    volume->fat[cluster] = FAT_FREE;
+                    cluster = next;
+                }
+                vfs_unlock();
+                return rc;
+            }
             bytes_written += chunk_size;
         }
 
-        current_cluster = file_allocation_table[current_cluster];
+        current_cluster = volume->fat[current_cluster];
     }
 
-    ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
-    safe_strcpy(dir_table[free_idx].filename, name, MAX_FILENAME);
-    
-    dir_table[free_idx].start_cluster = new_cluster;
-    dir_table[free_idx].file_size = size;
-    dir_table[free_idx].is_used = 1;
-    dir_table[free_idx].file_type = FT_REGULAR;
-    dir_table[free_idx].entry_id = (fs_id_t)free_idx;
-    dir_table[free_idx].parent_id = parent_id;
-    dir_table[free_idx].owner_uid = c_uid;
-    dir_table[free_idx].owner_gid = c_gid;
-    dir_table[free_idx].mode = FS_MODE_DEFAULT_FILE;
-    dir_table[free_idx].ctime = now;
-    dir_table[free_idx].mtime = now;
+    ft_memset(volume->entries[free_idx].filename, 0, MAX_FILENAME);
+    safe_strcpy(volume->entries[free_idx].filename, name, MAX_FILENAME);
 
-    save_directory_to_disk();
-    klog(LOG_LEVEL_INFO, "VFS", "New file created and written to disk.");
+    volume->entries[free_idx].start_cluster = new_cluster;
+    volume->entries[free_idx].file_size = size;
+    volume->entries[free_idx].is_used = 1;
+    volume->entries[free_idx].file_type = FT_REGULAR;
+    volume->entries[free_idx].entry_id = (fs_id_t)free_idx;
+    volume->entries[free_idx].parent_id = (uint16_t)parent_id;
+    volume->entries[free_idx].owner_uid = c_uid;
+    volume->entries[free_idx].owner_gid = c_gid;
+    volume->entries[free_idx].mode = FS_MODE_DEFAULT_FILE;
+    volume->entries[free_idx].ctime = now;
+    volume->entries[free_idx].mtime = now;
+
+    volume->directory_pending = 1;
+    int rc = save_fat_to_disk(volume);
+    if (rc == E_OK) rc = save_directory_to_disk(volume);
     vfs_unlock();
-    return E_OK;
+    return rc;
 }
 
 /**
@@ -1608,6 +1629,9 @@ int fs_create_file_raw(const char *name, const uint8_t *content, uint32_t size, 
  * @return int
  */
 int fs_create_file(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File creation blocked!");
         return E_ROFS;
@@ -1615,11 +1639,12 @@ int fs_create_file(const char *name, const uint8_t *content, uint32_t size, fs_i
     if (current_sec_level >= SEC_LEVEL_CRYPTO_ENFORCED) {
         /* Writing with a zeroed key would produce a file nobody can ever read
          * back - a silent, permanent loss. Refuse instead. */
-        if (!crypto_fs_key_is_usable()) {
+        const uint8_t *key = volume_key(volume);
+        if (!key) {
             klog(LOG_LEVEL_ERROR, "VFS", "Encrypted write refused: master key destroyed.");
             return E_ACCES;
         }
-        return fs_create_encrypted(name, content, size, kernel_master_key, parent_id);
+        return fs_create_encrypted(name, content, size, key, parent_id);
     }
     return fs_create_file_raw(name, content, size, parent_id);
 }
@@ -1632,19 +1657,24 @@ int fs_create_file(const char *name, const uint8_t *content, uint32_t size, fs_i
  * @return int
  */
 int fs_open(const char *name, fs_id_t parent_id, vfs_file_t *file) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
 
     vfs_lock();
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used == 1 && 
-            dir_table[i].parent_id == parent_id && 
-            ft_strcmp(dir_table[i].filename, name) == 0) {
-            safe_strcpy(file->filename, dir_table[i].filename, MAX_FILENAME);
-            file->start_cluster = dir_table[i].start_cluster;
-            file->file_size = dir_table[i].file_size;
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used == 1 &&
+            volume->entries[i].parent_id == (uint16_t)parent_id &&
+            ft_strcmp(volume->entries[i].filename, name) == 0) {
+            if (volume->entries[i].file_type == FT_DIR) { vfs_unlock(); return E_ISDIR; }
+            safe_strcpy(file->filename, volume->entries[i].filename, MAX_FILENAME);
+            file->start_cluster = volume->entries[i].start_cluster;
+            file->file_size = volume->entries[i].file_size;
             file->current_offset = 0;
             file->ref_count = 1;
             file->inode_idx = i;
+            file->volume_prefix = volume->prefix;
 
             /*
              * The write-buffer fields are initialised here because this is the
@@ -1673,9 +1703,17 @@ int fs_open(const char *name, fs_id_t parent_id, vfs_file_t *file) {
  * @return int
  */
 int fs_delete(const char *name, fs_id_t parent_id) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
 
     vfs_lock();
+    if (parent_id == 0 && secondary_volume.mounted &&
+        ft_strcmp(name, "mnt") == 0) {
+        vfs_unlock();
+        return E_BUSY;
+    }
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File deletion blocked!");
         vfs_unlock(); return E_ROFS;
@@ -1684,10 +1722,10 @@ int fs_delete(const char *name, fs_id_t parent_id) {
      * Deleting from /etc needs write permission on /etc, which is 0755 and
      * root's, and the syscall layer asks that before this is reached. */
 
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used == 1 &&
-            dir_table[i].parent_id == parent_id &&
-            ft_strcmp(dir_table[i].filename, name) == 0) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used == 1 &&
+            volume->entries[i].parent_id == (uint16_t)parent_id &&
+            ft_strcmp(volume->entries[i].filename, name) == 0) {
             /*
              * A directory that still holds something is refused.
              *
@@ -1716,9 +1754,9 @@ int fs_delete(const char *name, fs_id_t parent_id) {
              * with an empty root - deleted a directory that still held files and
              * orphaned exactly what this check exists to protect.
              */
-            if (dir_table[i].file_type == FT_DIR) {
-                for (int c = 0; c < fs_max_entries; c++) {
-                    if (dir_table[c].is_used == 1 && dir_table[c].parent_id == dir_table[i].entry_id) {
+            if (volume->entries[i].file_type == FT_DIR) {
+                for (int c = 0; c < volume->entry_count; c++) {
+                    if (volume->entries[c].is_used == 1 && volume->entries[c].parent_id == volume->entries[i].entry_id) {
                         klog(LOG_LEVEL_WARN, "VFS", "Refusing to delete a directory that is not empty.");
                         vfs_unlock(); return E_NOTEMPTY;
                     }
@@ -1738,23 +1776,23 @@ int fs_delete(const char *name, fs_id_t parent_id) {
              * write at an offset the image chose, and then followed whatever it
              * read there.
              */
-            uint32_t cluster_to_free = dir_table[i].start_cluster;
+            uint32_t cluster_to_free = volume->entries[i].start_cluster;
             while (cluster_to_free != FAT_EOF && cluster_to_free != FAT_FREE) {
-                if (cluster_to_free >= fs_total_clusters) {
+                if (cluster_to_free >= volume->clusters) {
                     klog_int(LOG_LEVEL_ERROR, "VFS",
                              "Refusing to follow an out-of-range FAT entry while deleting", (int)cluster_to_free);
                     break;
                 }
-                uint32_t next_cluster = file_allocation_table[cluster_to_free];
-                file_allocation_table[cluster_to_free] = FAT_FREE;
+                uint32_t next_cluster = volume->fat[cluster_to_free];
+                volume->fat[cluster_to_free] = FAT_FREE;
                 cluster_to_free = next_cluster;
             }
-            save_fat_to_disk();
-            dir_table[i].is_used = 0; 
-            ft_memset(dir_table[i].filename, 0, MAX_FILENAME);
-            save_directory_to_disk();
-            klog(LOG_LEVEL_INFO, "VFS", "File successfully deleted from disk.");
-            vfs_unlock(); return E_OK;
+            volume->fat_pending = 1;
+            volume->entries[i].is_used = 0;
+            ft_memset(volume->entries[i].filename, 0, MAX_FILENAME);
+            int rc = save_directory_to_disk(volume);
+            if (rc == E_OK) rc = save_fat_to_disk(volume);
+            vfs_unlock(); return rc;
         }
     }
     vfs_unlock();
@@ -1769,10 +1807,18 @@ int fs_delete(const char *name, fs_id_t parent_id) {
  * @return int
  */
 int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
-    if (!fs_mounted) return E_NODEV;
-    if (ft_strlen(new_name) >= MAX_FILENAME) return E_INVAL;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
+    if (!valid_entry_name(new_name)) return E_INVAL;
 
     vfs_lock();
+    if (parent_id == 0 && secondary_volume.mounted &&
+        ft_strcmp(old_name, "mnt") == 0) {
+        vfs_unlock();
+        return E_BUSY;
+    }
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_ERROR, "VFS", "System is in Immutable mode. File renaming blocked!");
         vfs_unlock(); return E_ROFS;
@@ -1782,27 +1828,27 @@ int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
      * itself reserved system-wide - a user could not call their own file that in
      * their own home directory. */
 
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used == 1 && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, new_name) == 0) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used == 1 && volume->entries[i].parent_id == (uint16_t)parent_id && ft_strcmp(volume->entries[i].filename, new_name) == 0) {
             klog(LOG_LEVEL_WARN, "VFS", "Rename failed: File with target name already exists!");
             vfs_unlock(); return E_EXIST;
         }
     }
 
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used == 1 && 
-            dir_table[i].parent_id == parent_id && 
-            ft_strcmp(dir_table[i].filename, old_name) == 0) {
-            
-            ft_memset(dir_table[i].filename, 0, MAX_FILENAME);
-            safe_strcpy(dir_table[i].filename, new_name, MAX_FILENAME);
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used == 1 &&
+            volume->entries[i].parent_id == (uint16_t)parent_id &&
+            ft_strcmp(volume->entries[i].filename, old_name) == 0) {
+
+            ft_memset(volume->entries[i].filename, 0, MAX_FILENAME);
+            safe_strcpy(volume->entries[i].filename, new_name, MAX_FILENAME);
 
             /* The entry changed, the contents did not, so this is a ctime and
              * not an mtime - the distinction the two fields exist to make. */
-            dir_table[i].ctime = fs_now();
+            volume->entries[i].ctime = fs_now();
 
-            save_directory_to_disk();
-            vfs_unlock(); return E_OK;
+            int rc = save_directory_to_disk(volume);
+            vfs_unlock(); return rc;
         }
     }
     vfs_unlock();
@@ -1818,7 +1864,10 @@ int fs_rename(const char *old_name, const char *new_name, fs_id_t parent_id) {
  * @return int
  */
 int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs_id_t parent_id) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
 
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) {
         klog(LOG_LEVEL_WARN, "VFS", "fs_atomic_update: Blocked by IMMUTABLE security level");
@@ -1828,10 +1877,10 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
     // This is handled by using fs_create_file() instead of fs_create_file_raw()
     // (see Fix 2 above - already addressed by calling fs_create_file)
     vfs_lock();
-    
+
     int orig_idx = -1;
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used && volume->entries[i].parent_id == (uint16_t)parent_id && ft_strcmp(volume->entries[i].filename, name) == 0) {
             orig_idx = i; break;
         }
     }
@@ -1841,44 +1890,29 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
         return fs_create_file(name, content, size, parent_id);
     }
 
-    char tmp_name[MAX_FILENAME];
-    ft_memset(tmp_name, 0, MAX_FILENAME);
-    safe_strcpy(tmp_name, name, MAX_FILENAME - 4);
-    
-    uint32_t len = ft_strlen(tmp_name);
-    tmp_name[len] = '.'; tmp_name[len+1] = 't'; tmp_name[len+2] = 'm'; tmp_name[len+3] = 'p'; tmp_name[len+4] = '\0';
-
-    vfs_unlock();
-    fs_delete(tmp_name, parent_id);
-    int res = fs_create_file(tmp_name, content, size, parent_id);
-    if (res != E_OK) return res;
-
-    vfs_lock(); // Lock again for the swap operation
-    int tmp_idx = -1;
-    orig_idx = -1;
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].parent_id == parent_id) {
-            if (ft_strcmp(dir_table[i].filename, name) == 0) orig_idx = i;
-            if (ft_strcmp(dir_table[i].filename, tmp_name) == 0) tmp_idx = i;
-        }
-    }
-
-    if (orig_idx == -1 || tmp_idx == -1) {
+    if (volume->entries[orig_idx].file_type != FT_REGULAR) {
         vfs_unlock();
-        // Clean up leaked temporary file
-        fs_delete(tmp_name, parent_id);
-        return E_NOENT;
+        return E_ISDIR;
     }
-
-    uint32_t old_cluster = dir_table[orig_idx].start_cluster;
-    uint32_t old_size = dir_table[orig_idx].file_size;
-
-    if (orig_idx >= 0 && orig_idx < fs_max_entries && tmp_idx >= 0 && tmp_idx < fs_max_entries) {
+    char tmp_name[MAX_FILENAME];
+    int chosen = 0;
+    for (int n = 0; n < volume->entry_count; n++) {
+        kbprintf(tmp_name, sizeof(tmp_name), 0, ".update-%x", n);
+        if (fs_get_entry_idx(tmp_name, parent_id) < 0) { chosen = 1; break; }
+    }
+    if (!chosen) { vfs_unlock(); return E_NOSPC; }
+    int res = fs_create_file(tmp_name, content, size, parent_id);
+    if (res != E_OK) { vfs_unlock(); return res; }
+    int tmp_idx = fs_get_entry_idx(tmp_name, parent_id);
+    if (tmp_idx < 0) { vfs_unlock(); return E_IO; }
+    uint32_t old_cluster = volume->entries[orig_idx].start_cluster;
+    uint32_t old_size = volume->entries[orig_idx].file_size;
+    {
         /* No live interrupt frame here either; see fs_read_raw(). */
-        rwlock_acquire_write(&inode_locks[orig_idx], 0);
-        
-        dir_table[orig_idx].start_cluster = dir_table[tmp_idx].start_cluster;
-        dir_table[orig_idx].file_size = dir_table[tmp_idx].file_size;
+        rwlock_acquire_write(&volume->locks[orig_idx], 0);
+
+        volume->entries[orig_idx].start_cluster = volume->entries[tmp_idx].start_cluster;
+        volume->entries[orig_idx].file_size = volume->entries[tmp_idx].file_size;
 
         /*
          * The contents changed, so the modification time does. Everything else
@@ -1886,19 +1920,18 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
          * taking the owner or the creation time from the temporary would make a
          * write look like a new file to anything that asked.
          */
-        dir_table[orig_idx].mtime = fs_now();
+        volume->entries[orig_idx].mtime = fs_now();
 
-        dir_table[tmp_idx].start_cluster = old_cluster;
-        dir_table[tmp_idx].file_size = old_size;
+        volume->entries[tmp_idx].start_cluster = old_cluster;
+        volume->entries[tmp_idx].file_size = old_size;
 
-        rwlock_release_write(&inode_locks[orig_idx]);
+        rwlock_release_write(&volume->locks[orig_idx]);
     }
-    
-    save_directory_to_disk();
+
+    res = save_directory_to_disk(volume);
+    if (res == E_OK) res = fs_delete(tmp_name, parent_id);
     vfs_unlock();
-    
-    fs_delete(tmp_name, parent_id);
-    return E_OK;
+    return res;
 }
 
 /**
@@ -1908,8 +1941,11 @@ int fs_atomic_update(const char *name, const uint8_t *content, uint32_t size, fs
  * @return Slot index, or -1.
  */
 static int fs_slot_of(fs_id_t entry_id) {
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].entry_id == entry_id) return i;
+    fs_volume_t *volume = fs_volume_for(entry_id);
+    if (!volume) return -1;
+
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used && volume->entries[i].entry_id == (uint16_t)entry_id) return i;
     }
     return -1;
 }
@@ -1922,7 +1958,10 @@ static int fs_slot_of(fs_id_t entry_id) {
  * @return E_OK, or a negative errno.
  */
 int fs_chmod(fs_id_t entry_id, uint16_t mode) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(entry_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) return E_ROFS;
 
     vfs_lock();
@@ -1930,14 +1969,14 @@ int fs_chmod(fs_id_t entry_id, uint16_t mode) {
     int idx = fs_slot_of(entry_id);
     if (idx < 0) { vfs_unlock(); return E_NOENT; }
 
-    dir_table[idx].mode = (uint16_t)(mode & FS_MODE_PERM_MASK);
+    volume->entries[idx].mode = (uint16_t)(mode & FS_MODE_PERM_MASK);
     /* The entry changed and the contents did not, which is the distinction the
      * two timestamps exist to make. */
-    dir_table[idx].ctime = fs_now();
+    volume->entries[idx].ctime = fs_now();
 
-    save_directory_to_disk();
+    int rc = save_directory_to_disk(volume);
     vfs_unlock();
-    return E_OK;
+    return rc;
 }
 
 /**
@@ -1949,7 +1988,10 @@ int fs_chmod(fs_id_t entry_id, uint16_t mode) {
  * @return E_OK, or a negative errno.
  */
 int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(entry_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) return E_ROFS;
 
     vfs_lock();
@@ -1957,13 +1999,13 @@ int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid) {
     int idx = fs_slot_of(entry_id);
     if (idx < 0) { vfs_unlock(); return E_NOENT; }
 
-    dir_table[idx].owner_uid = uid;
-    dir_table[idx].owner_gid = gid;
-    dir_table[idx].ctime = fs_now();
+    volume->entries[idx].owner_uid = uid;
+    volume->entries[idx].owner_gid = gid;
+    volume->entries[idx].ctime = fs_now();
 
-    save_directory_to_disk();
+    int rc = save_directory_to_disk(volume);
     vfs_unlock();
-    return E_OK;
+    return rc;
 }
 
 /**
@@ -1973,11 +2015,14 @@ int fs_chown(fs_id_t entry_id, uint32_t uid, uint32_t gid) {
  * @return int
  */
 int fs_get_entry_idx(const char *name, fs_id_t parent_id) {
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return -1;
+
     vfs_lock();
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && 
-            dir_table[i].parent_id == parent_id && 
-            ft_strcmp(dir_table[i].filename, name) == 0) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used &&
+            volume->entries[i].parent_id == (uint16_t)parent_id &&
+            ft_strcmp(volume->entries[i].filename, name) == 0) {
             vfs_unlock(); return i;
         }
     }
@@ -1992,28 +2037,31 @@ int fs_get_entry_idx(const char *name, fs_id_t parent_id) {
  * @return int
  */
 int fs_mkdir(const char *name, fs_id_t parent_id) {
-    if (!fs_mounted) return E_NODEV;
+    fs_volume_t *volume = fs_volume_for(parent_id);
+    if (!volume) return E_NODEV;
+
+    if (!volume->mounted) return E_NODEV;
 
     vfs_lock();
     if (current_sec_level >= SEC_LEVEL_IMMUTABLE) { vfs_unlock(); return E_ROFS; }
 
     /* Refused rather than truncated, as in fs_create_file_raw(). */
-    if (ft_strlen(name) >= MAX_FILENAME) { vfs_unlock(); return E_INVAL; }
+    if (!valid_entry_name(name)) { vfs_unlock(); return E_INVAL; }
 
     if (!fs_dir_exists(parent_id)) {
         klog_int(LOG_LEVEL_WARN, "VFS", "Rejected mkdir under a non-existent parent", parent_id);
         vfs_unlock(); return E_NOENT;
     }
 
-    for (int i = 0; i < fs_max_entries; i++) {
-        if (dir_table[i].is_used && dir_table[i].parent_id == parent_id && ft_strcmp(dir_table[i].filename, name) == 0) {
+    for (int i = 0; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used && volume->entries[i].parent_id == (uint16_t)parent_id && ft_strcmp(volume->entries[i].filename, name) == 0) {
             vfs_unlock(); return E_EXIST;
         }
     }
 
     int free_idx = -1;
-    for (int i = 1; i < fs_max_entries; i++) { 
-        if (dir_table[i].is_used == 0) {
+    for (int i = 1; i < volume->entry_count; i++) {
+        if (volume->entries[i].is_used == 0) {
             free_idx = i;
             break;
         }
@@ -2023,25 +2071,25 @@ int fs_mkdir(const char *name, fs_id_t parent_id) {
         vfs_unlock(); return E_NFILE;
     }
 
-    ft_memset(dir_table[free_idx].filename, 0, MAX_FILENAME);
-    safe_strcpy(dir_table[free_idx].filename, name, MAX_FILENAME);
-    
+    ft_memset(volume->entries[free_idx].filename, 0, MAX_FILENAME);
+    safe_strcpy(volume->entries[free_idx].filename, name, MAX_FILENAME);
+
     uint32_t current_uid = (current_task != 0) ? current_task->uid : 0;
     uint32_t current_gid = (current_task != 0) ? current_task->gid : 0;
     uint32_t now = fs_now();
 
-    dir_table[free_idx].file_size = 0;
-    dir_table[free_idx].start_cluster = 0;
-    dir_table[free_idx].file_type = FT_DIR;
-    dir_table[free_idx].entry_id = (fs_id_t)free_idx;
-    dir_table[free_idx].parent_id = parent_id;
-    dir_table[free_idx].is_used = 1;
-    dir_table[free_idx].owner_uid = current_uid;
-    dir_table[free_idx].owner_gid = current_gid;
-    dir_table[free_idx].mode = FS_MODE_DEFAULT_DIR;
-    dir_table[free_idx].ctime = now;
-    dir_table[free_idx].mtime = now;
+    volume->entries[free_idx].file_size = 0;
+    volume->entries[free_idx].start_cluster = 0;
+    volume->entries[free_idx].file_type = FT_DIR;
+    volume->entries[free_idx].entry_id = (fs_id_t)free_idx;
+    volume->entries[free_idx].parent_id = (uint16_t)parent_id;
+    volume->entries[free_idx].is_used = 1;
+    volume->entries[free_idx].owner_uid = current_uid;
+    volume->entries[free_idx].owner_gid = current_gid;
+    volume->entries[free_idx].mode = FS_MODE_DEFAULT_DIR;
+    volume->entries[free_idx].ctime = now;
+    volume->entries[free_idx].mtime = now;
 
-    save_directory_to_disk();
-    vfs_unlock(); return E_OK;
+    int rc = save_directory_to_disk(volume);
+    vfs_unlock(); return rc;
 }

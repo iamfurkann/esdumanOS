@@ -56,13 +56,10 @@ static void simple_strcpy(char *dest, const char *src) {
 /**
  * @brief Derives the salt for one shadow entry.
  *
- * A salt has to be unique - that is the whole of its job, since it defeats
- * precomputed tables and stops two users with the same password from producing
- * the same hash. It does not have to be secret. Uniqueness is therefore what is
- * guaranteed here, and it is guaranteed without depending on entropy quality:
- * the pool's monotonic extraction counter makes every draw distinct, and folding
- * the username in means two different accounts cannot collide even if the pool
- * were producing a constant.
+ * Salts separate account hashes and resist precomputed tables; they need not
+ * be secret. Pool output, an extraction counter and the username diversify
+ * derivation inputs. A truncated hash does not guarantee collision-free salts,
+ * and weak entropy, cloned state or rollback can repeat inputs.
  *
  * @param username Account name, mixed in for cross-account separation.
  * @param salt_out 16-byte output.
@@ -73,10 +70,8 @@ static int derive_shadow_salt(const char *username, uint8_t salt_out[16]) {
     int quality = generate_random_bytes(pool_bytes, sizeof(pool_bytes));
 
     /*
-     * ENTROPY_FAIL means the pool was never seeded, so the counter that
-     * guarantees uniqueness has not been initialised either. A shadow entry with
-     * a possibly-repeated salt is worse than no entry at all: it would look valid
-     * forever while quietly sharing a salt with another account.
+     * An uninitialised pool cannot supply output. Refuse the salt instead of
+     * installing a shadow entry derived from an untouched output buffer.
      */
     if (quality == ENTROPY_FAIL) return -1;
 

@@ -1,145 +1,139 @@
 # Contributing to esdumanOS
 
-Thank you for your interest in contributing to esdumanOS! This document provides guidelines for contributing to the project.
+Start from current `main` and keep each change reviewable. Use the Linux
+[build environment](README.md#building) and read [SECURITY.md](SECURITY.md)
+before reporting a vulnerability publicly.
 
 ## Getting Started
 
-1. **Fork** the repository and create a feature branch from `main`.
-2. Set up the build environment using the dependency list in the [README](README.md#building).
-3. Run the full test suite before submitting changes:
-   ```bash
-   make test && make fuzz && make && make test_kernel && make test_kernel_q35 && make test_kernel_uefi && make test_smap
-   ```
-   `test_kernel_q35` runs the same suite on a machine with no IDE controller, where the
-   disk is behind a SATA controller. `test_kernel_uefi` runs it again on the boot path a
-   real machine uses — an ISO, GRUB, UEFI firmware and a framebuffer console — and it is
-   the only target that does not pass `-kernel`, so it is the only one in which a
-   bootloader runs at all.
-
-   All four targets are given the same USB hardware — an xHCI controller with a keyboard
-   and a mouse on it — because neither machine type provides a USB controller by default
-   and `test_xhci` has to find the same thing on each of them.
-
-   All three must report the same assertion total; a different one means an assertion has
-   learned which machine it is running on.
-
-   If your change touches entropy, crypto, or the `/dev` random devices, also run the
-   configuration that exposes RDRAND — it reaches a branch the other targets cannot:
-   ```bash
-   make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
-   ```
-
-## Development Environment
-
-### Requirements
-
-- GCC 9+ (with multilib support)
-- NASM 2.14+
-- GNU Make 4.0+
-- QEMU (`qemu-system-i386`, plus `qemu-system-x86_64` for the UEFI test target)
-- grub-mkrescue, xorriso, mtools
-- `grub-efi-amd64-bin`, without which `grub-mkrescue` still succeeds and produces an ISO
-  that boots on BIOS only
-- `ovmf`, the UEFI firmware `make test_kernel_uefi` boots under
-- OpenSSL development libraries
-- Python 3.6+
-
-### Building
-
-`ESDUMAN_ELF_KEY_HEX` must be set and must be **exactly 64 hexadecimal characters** —
-the 32-byte AES-256 key used to encrypt the embedded ELF binaries. The Makefile checks
-both the presence and the length and aborts otherwise, so a passphrase-style value will
-not work.
+Fork or create a feature branch, install the complete README dependencies,
+and export a build key before establishing a baseline:
 
 ```bash
 export ESDUMAN_ELF_KEY_HEX=$(openssl rand -hex 32)
-make clean
-make
+make -B BUILD=prod all
 ```
 
-The key is compiled into the kernel image, so treat it as a build parameter rather than
-a secret. It decrypts the embedded programs and nothing else: since 1.1.0 the file
-system is encrypted under a key unwrapped from a passphrase at boot, and the embedded
-images are re-encrypted under that key as they are written to disk.
+The key must be exactly 64 hexadecimal characters. Keep it stable during
+incremental builds: make does not track environment changes. It is embedded
+in the kernel to package ELF assets, not a login/disk password or a signing
+trust root. The maintained CI host is Ubuntu 24.04 x86; local validation also
+uses a Debian 13 x86 VM.
+
+For the Mac/VM workflow, edit on the Mac and build/run executable tests on the
+Linux VM. Transfer explicit file lists without deleting remote files. Check
+for remote edits before overwriting and compare independent hashes. Exclude
+credentials, populated images and private instruction/handoff files.
+
+## Validation
+
+These are the eight executable stages in [CI](.github/workflows/ci.yml):
+
+```bash
+make test
+make fuzz
+make BUILD=prod
+make test_kernel
+make test_kernel_q35
+make test_kernel_uefi
+make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"
+make test_smap
+```
+
+No CI stage is allowed to fail. RDRAND is part of the matrix, not an optional
+replacement for SMAP. BIOS, q35, UEFI and RDRAND run 46 kernel-mode modules
+plus Ring 3 with matching totals. SMEP/SMAP runs Ring 3 only and intentionally
+has a smaller total. UEFI boots GRUB from an ISO; other kernel targets use
+QEMU's direct kernel loader.
+
+Every kernel target has an empty xHCI decoy and an active controller with
+keyboard/mouse and two USB disks of different capacities on explicit root
+ports. Tests use disposable images under `TESTRUN_ROOT`, not interactive ones.
+For iteration:
+
+```bash
+make test_kernel MODULE=mount,vfs,bcache,ring3
+make test_matrix QEMU_MATRIX_TIMEOUT=5400
+```
+
+`test_matrix` includes BIOS, q35, UEFI and SMAP; it excludes RDRAND, host tests,
+fuzzing and production CLI acceptance. A filtered run proves only its selected
+modules. Simultaneous invocations need separate `TESTRUN_ROOT` directories.
+Nested emulation may need longer observation deadlines; record timeouts and
+do not reduce KDF costs or remove assertions to make a gate pass.
+
+Storage/boot changes also need [production CLI acceptance](README.md#production-storage-acceptance)
+and, where durability is affected, `make test_powercut`. Both are outside CI.
+Use normal-KDF production fixtures, not test/dev disks. Retain completed
+reports, terminal/serial logs and exact binary hashes. Partial progress and
+timeouts are not passes; distinguish QEMU from physical-machine evidence.
+
+For documentation-only changes, check examples, links, anchors and claims
+against source; do not claim an executable suite was rerun. For code changes,
+add a regression that fails with the original defect and run affected tests,
+broadening coverage where warranted. Before release, follow
+[RELEASING.md](docs/RELEASING.md).
+
+`make clean` preserves interactive images but deletes `build/` and its
+validation evidence. Retain needed logs elsewhere. `make fuzz` may add corpus
+files; review generated inputs before staging them.
 
 ## Code Style
 
-- **Language:** GNU C, freestanding (no libc). The build passes no `-std`, so it takes
-  the compiler default and relies on GNU extensions throughout — inline `asm`,
-  `__attribute__`, statement expressions. It does not compile under strict ISO mode and
-  is not meant to. Assembly in NASM syntax.
-- **Indentation:** Tabs for indentation, spaces for alignment.
-- **Naming:** `snake_case` for functions and variables. `UPPER_SNAKE_CASE` for macros and constants.
-- **Comments:** Comment non-obvious logic. English is preferred for new contributions.
-- **Headers:** Include the minimal set of headers required. Avoid pulling in `kernel.h` when a specific subsystem header suffices.
+- Use freestanding GNU C and NASM x86 assembly. The build uses GNU extensions
+  and the compiler's default GNU dialect, not strict ISO C.
+- Follow the surrounding file's indentation; existing files use tabs and
+  spaces. Avoid unrelated reformatting.
+- Use `snake_case` for functions/variables and `UPPER_SNAKE_CASE` for macros.
+- Explain non-obvious ownership, bounds, failure paths and hardware ordering
+  in English comments. Describe limits without unsupported guarantees.
+- Prefer specific subsystem headers to importing everything via `kernel.h`.
+- Preserve assigned syscall numbers and retired holes. Changed semantics,
+  shared structures or disk layouts require compatibility notes and tests.
 
 ## Commit Messages
 
-Use concise, descriptive commit messages with subsystem prefixes:
+Use a concise English subject. Subsystem prefixes (`fs:`, `drivers:`, `docs:`)
+and conventional forms (`fix(fs):`) are useful guidance, not an enforced list.
 
+```text
+drivers: reject HID usages outside the translation table
+
+Keyboard reports can carry a full byte, while the table ends at 0xe7.
+Reject the remaining values before indexing and exercise press/release
+reports followed by a valid key.
 ```
-mm: fix backward coalescing in kfree()
-fs: add directory traversal to VFS
-proc: implement signal delivery for user processes
-drivers: fix PS/2 keyboard AltGr handling
-crypto: optimize AES-256 key schedule
-tests: add pipe EOF detection test
-build: update CI to use checkout v4
-```
 
-The prefix names whatever the change is about — a subsystem, a driver, a single
-program. `mm:`, `fs:`, `proc:`, `drivers:`, `crypto:`, `tests:`, `build:`, `docs:`,
-`security:`, `arch:`, `lib:` and `apps:` are the usual ones, and the history also
-carries `kernel:`, `vfs:`, `syscall:`, `abi:`, `sh:`, `edit:`, `klog:`, `tty:`, `rtc:`,
-`entropy:` and the names of individual tools. Pick the narrowest thing that is true.
+Separate subject and body with a blank line. Write flowing prose around 76
+columns describing the trigger, behavior and evidence. Split independent
+changes into separate commits while keeping each coherent.
 
-This line used to call those twelve the *valid* prefixes, which described a rule the
-project has never followed: of the last forty commits, three matched the list. A closed
-list nothing enforces and nobody follows is worse than no list, because it makes a
-reader think they have broken a rule when they have not.
+## Pull Requests
 
-The body matters more than the prefix. Subject line, blank line, then flowing prose
-saying what was found, why it went unnoticed, and what was deliberately left alone.
-Prose rather than bullets, wrapped at about 76 columns.
+Use the [template](.github/pull_request_template.md), select applicable types
+and subsystems, and mark `[x]` only for completed work. Name test commands,
+configurations and results; distinguish automated terminal/QMP runs from
+manual interaction. Include compatibility and upgrade steps. Remote CI must
+pass before merge; local test records are not remote CI results.
 
-## Pull Request Process
+## Useful Contributions
 
-1. Ensure all tests pass. The list is the one under [Getting Started](#getting-started)
-   — `make test`, `make fuzz`, `make`, `make test_kernel`, `make test_kernel_q35`,
-   `make test_kernel_uefi`, `make test_smap` — and CI runs every one of them plus
-   `make test_kernel QEMU_TEST_CPU="-cpu qemu32,+rdrand"`. None of them is allowed to
-   fail.
-
-   This said "`make test && make test_kernel && make test_smap`" and "CI runs the same
-   targets", which was three of the six. A contributor who trusted it would pass
-   locally and then watch `make fuzz` or the RDRAND run fail on the pull request,
-   having done nothing wrong.
-2. Add or update tests for any new functionality.
-3. Update documentation if the change affects user-visible behavior.
-4. One feature or fix per pull request.
-5. Provide a clear description of what your PR does and why.
-
-## Areas Where Help Is Needed
-
-We especially welcome contributions in these areas:
-
-- 🧪 **Testing** — Expanding the test suite, especially edge cases
-- 📝 **Documentation** — Improving code comments and README sections
-- 🖥️ **User-space programs** — Writing new programs for `/bin`
-- 🌐 **Network stack** — TCP/IP implementation
-- 🔧 **Hardware testing** — Testing on real hardware and reporting results
-- 🏗️ **Architecture** — Improving memory management, adding fork/wait
+Priorities include power-loss recovery and versioned migration, storage fault
+injection, bounded device/firmware parsing, reproducible hardware validation
+and diagnosis of long unlock observations. COW `fork`/`wait` already exists;
+lifecycle and failure-path coverage can improve it. Small user programs and
+documentation improvements are welcome. Networking, SMP and new architectures
+need separately scoped designs.
 
 ## Reporting Bugs
 
-- Use the [GitHub Issues](https://github.com/iamfurkann/esdumanOS/issues) tracker.
-- Include steps to reproduce, expected vs. actual behavior, and your environment.
-- If applicable, attach serial output or kernel log (`dmesg`).
+Use [GitHub Issues](https://github.com/iamfurkann/esdumanOS/issues) for ordinary
+bugs. Include the source commit/local changes, build flavor, exact QEMU
+command/firmware/CPU, storage topology, reproduction and final verdict or last
+stage. Redact credentials and passwords; do not upload populated disk images.
+Use the private route in [SECURITY.md](SECURITY.md) for vulnerabilities.
 
-## Code of Conduct
+## Conduct and License
 
-This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
-
-## License
-
-By contributing to esdumanOS, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+Participation follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Contributions
+are licensed under the project's [MIT License](LICENSE).

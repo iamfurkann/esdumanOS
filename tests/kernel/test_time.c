@@ -178,7 +178,7 @@ static void run_epoch_tests(void) {
  * - The year before the chip's range, and the hour and month past their ends.
  *
  * This moves the real hardware clock and puts it back. The restore rewinds by
- * however long the test took - a fraction of a second - which is worth knowing
+ * however long the test took, which is worth knowing
  * and is the price of testing a write against the thing it writes to. The
  * refusals are checked first, so a range check that let something through
  * cannot leave the machine somewhere strange before the good case runs.
@@ -210,13 +210,16 @@ static void run_settime_tests(void) {
     KTEST_ASSERT(got.year == saved.year && got.month == saved.month,
                  "[STRICT] [TIME] a refused time leaves the clock where it was");
 
-    /* Thirty seconds into the minute, so reading it back cannot cross into the
-     * next one however slow the round trip is. */
+    /* Leave thirty seconds before the next minute for the immediate read. */
     want = utc_at(2030, 6, 15, 13, 45, 30);
     KTEST_ASSERT(rtc_set_utc(&want) == E_OK,
                  "[TIME] a time the chip can hold is accepted");
 
     rtc_read_utc(&got);
+    if (got.hour != want.hour || got.minute != want.minute) {
+        printk("[TIME] expected %d:%d:%d, observed %d:%d:%d\n",
+               want.hour, want.minute, want.second, got.hour, got.minute, got.second);
+    }
     KTEST_ASSERT(got.year == 2030 && got.month == 6 && got.day == 15,
                  "[STRICT] [TIME] and the date reads back as what was set");
     KTEST_ASSERT(got.hour == 13 && got.minute == 45,
@@ -229,6 +232,30 @@ static void run_settime_tests(void) {
     want = utc_at(2030, 2, 29, 6, 0, 0);
     KTEST_ASSERT(rtc_set_utc(&want) == E_INVAL,
                  "[STRICT] [TIME] and refused in a year that has none");
+
+    /* Exercise the real index/data accesses while IRQ0's status-bar reader
+     * remains active. The host model separately injects the interrupt at the
+     * exact vulnerable port boundary, without relying on timing. */
+    uint32_t flags;
+    asm volatile("pushfl; popl %0" : "=r"(flags));
+    int repeated = 0;
+    if (flags & 0x200u) {
+        for (; repeated < 64; repeated++) {
+            uint32_t tick = timer_get_ticks();
+            while (timer_get_ticks() == tick) asm volatile("hlt");
+            want = utc_at(2030, 6, 15, repeated % 24, repeated % 60, 30);
+            if (rtc_set_utc(&want) != E_OK) break;
+            rtc_read_utc(&got);
+            if (got.year != want.year || got.month != want.month || got.day != want.day ||
+                got.hour != want.hour || got.minute != want.minute) {
+                printk("[TIME] round trip %d: expected %d:%d, observed %d:%d\n",
+                       repeated, want.hour, want.minute, got.hour, got.minute);
+                break;
+            }
+        }
+    }
+    KTEST_ASSERT(repeated == 64,
+                 "[STRICT] [TIME] 64 clock round trips coexist with the timer interrupt");
 
     rtc_set_utc(&saved);
     rtc_read_utc(&got);

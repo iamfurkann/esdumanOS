@@ -161,7 +161,5 @@ void bcache_flush_if_due(void);
 uint32_t bcache_dirty_count(void);
 
 
-// --- Added by Refactor Script 2 ---
-extern uint32_t fs_max_sectors;
 
 #endif // BCACHE_H

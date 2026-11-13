@@ -1,15 +1,15 @@
 /*
  * File: test_entropy.c
- * Purpose: Entropy pool tests - uniqueness, policy binding, and measurement.
+ * Purpose: Entropy pool tests - sampled distinctness, policy and measurement.
  *
  * This file is part of the esdumanOS test suite.
  *
  * Two of these assertions are the point of the whole module.
  *
- * The uniqueness assertions test the property the callers actually rely on: that
- * no two extractions in a boot can collide, whatever the sources were worth. That
- * is what makes a repeated CBC IV impossible, and it is checked directly rather
- * than inferred from the entropy estimate.
+ * The distinctness assertions reject collisions in a finite sample and catch
+ * repeated-output regressions. They do not prove that two outputs can never
+ * collide, that CBC IVs are unpredictable, or that weak input has become strong.
+ * Older diagnostic labels using "uniqueness" must be read in that limited sense.
  *
  * The measurement assertion refuses to guess. Under QEMU TCG the interval between
  * PIT interrupts is close to deterministic, so a design that credited the timer as

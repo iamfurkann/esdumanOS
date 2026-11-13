@@ -6,19 +6,14 @@
 /*
  * The passphrase-protected key slot that guards the file system's data key.
  *
- * Until v1.1.0 the file system was encrypted under a key compiled into the
- * kernel through -DELF_ENCRYPTION_KEY. The comment above that code said what
- * that was worth: tamper resistance, and explicitly "NOT at-rest
- * confidentiality. Anyone who can read the kernel binary can extract this key."
- * That is fine for an ISO you boot in an emulator and useless for a machine you
- * carry around, which is what this release is aimed at.
+ * Since v1.1.0 a disk passphrase derives a key-encryption key (KEK), which
+ * wraps the volume's generated data-encryption key (DEK). Changing the
+ * passphrase re-wraps that DEK instead of re-encrypting file contents.
+ * The superblock update is not a journaled or power-loss-atomic transaction.
  *
- * Two levels, not one. The passphrase derives a key-encryption key (KEK), the
- * KEK wraps a randomly generated data-encryption key (DEK), and the DEK is what
- * every file is encrypted under. A single level would tie the passphrase
- * directly to the file contents, so changing it would mean decrypting and
- * re-encrypting the entire disk - a job that cannot be made atomic and that
- * fails halfway with the disk in neither state. Re-wrapping is one sector.
+ * The compiled ELF key is separate packaging material, extractable from the
+ * kernel; it provides neither disk confidentiality nor trusted-code identity.
+ * Weak DEK-generation entropy is not repaired by wrapping it with a strong KEK.
  *
  * The slot is stored in the superblock, which is why it is packed and why its
  * size is asserted: it is on-disk layout, not a runtime convenience.
@@ -34,7 +29,7 @@
 #define KEYSLOT_TAG_LEN  32
 
 /**
- * @brief Longest passphrase accepted.
+ * @brief Passphrase buffer capacity, including the terminating NUL.
  *
  * The same 64 the account passwords use, and for the same reason: it is what
  * early_read_password() fills, and a limit the two halves disagree about is a
@@ -45,7 +40,7 @@
 /**
  * @brief One passphrase's worth of access to the data key.
  *
- * There is exactly one of these. A second slot - so that two passphrases could
+ * There is exactly one slot per volume. A second slot - so that two passphrases could
  * open the same disk, or so that a recovery key could exist - is a deliberate
  * omission in v1.1.0 and is written down as a limitation rather than left to be
  * discovered: forgetting the passphrase means losing the disk.

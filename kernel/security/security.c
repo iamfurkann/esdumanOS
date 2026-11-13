@@ -1,3 +1,4 @@
+#include "fs.h"
 /*
  * File: security.c
  * Purpose: Security policies, master key generation, and protection levels.
@@ -47,8 +48,8 @@ int crypto_fs_key_is_usable(void) {
  * read every one of its inputs at the moment of the call - RDTSC, three RTC
  * registers, the address of a local - which is why it was worth only twenty or
  * thirty bits. It is now backed by a pool fed from interrupt timing, and it
- * guarantees uniqueness per extraction independently of how good those sources
- * turned out to be. See entropy.h for what that does and does not promise.
+ * mixes a counter into extraction. Distinct inputs do not guarantee collision-
+ * free output; see SECURITY.md for entropy-quality and replay limits.
  */
 
 void bytes_to_hex(const uint8_t *bytes, uint32_t len, char *hex_out) {
@@ -95,8 +96,8 @@ int elf_asset_key_available(void) {
  * that sat here said what that was worth: "tamper resistance... but NOT at-rest
  * confidentiality. Anyone who can read the kernel binary can extract this key."
  *
- * That is a fair description of what it can still do and a fatal one for what it
- * was being used for. The programs in /bin are encrypted by tools/encrypt_tool
+ * The old tamper-resistance claim was too strong: someone holding the image
+ * can also re-encrypt replacement assets. The programs in /bin are encrypted by tools/encrypt_tool
  * at build time and embedded as arrays, so this key has to exist and has to be
  * in the image; the user's files must not share it. They do not any more - see
  * install_master_key() below.
@@ -182,6 +183,7 @@ void set_security_level(security_level_t level) {
                     key_ptr[i] = 0;
                 }
                 master_key_available = 0;
+                fs_forget_secondary_key();
                 klog(LOG_LEVEL_INFO, "SEC", "Master Key safely destroyed from RAM (Zeroized)!");
                 klog(LOG_LEVEL_CRITICAL, "SEC", "Encrypted filesystem access is now refused, not silently downgraded.");
             }

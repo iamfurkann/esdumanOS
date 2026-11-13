@@ -21,6 +21,7 @@
  * but for the one decision the boot path owns: which of the registered disks
  * the file system is put on. */
 #include "blockdev.h"
+#include "bcache.h"
 /* And this is where it is decided what the terminal draws into, which depends
  * entirely on how the machine was booted. */
 #include "console.h"
@@ -597,16 +598,22 @@ static int init_memory_subsystem(void) {
  */
 static void early_read_password(char *buf, int max_len) {
     int idx = 0;
+    int truncated = 0;
     while (1) {
         char c = early_get_kbd_char();
         if (c == '\n' || c == '\r') {
             buf[idx] = '\0';
             printk("\n");
+            if (truncated) {
+                buf[0] = '\0';
+                printk("Input exceeds the supported length. Please try again.\n");
+            }
             break;
         } else if (c == '\b' && idx > 0) {
             idx--;
             terminal_putchar('\b'); terminal_putchar(' '); terminal_putchar('\b');
-        } else if (c >= 32 && c <= 126 && idx < max_len - 1) {
+        } else if (c >= 32 && c <= 126) {
+            if (idx >= max_len - 1) { truncated = 1; continue; }
             buf[idx++] = c;
             terminal_putchar('*');
         }
@@ -1161,9 +1168,8 @@ static int init_filesystem_and_vfs(void) {
      * a second copy of the test here would be a link between two subsystems that
      * nothing watches, which is the v1.2.0 mistake in miniature.
      *
-     * Nothing below reads the result. There is no keyboard on this bus yet and
-     * no disk behind it; what this release delivers is a controller that is
-     * running and a way to look at it. v1.9.0 is the first caller.
+     * Enumeration configures a supported boot keyboard. The storage probe below
+     * uses discovered interfaces and the synchronous transfer API.
      */
     xhci_init();
 
@@ -1174,67 +1180,52 @@ static int init_filesystem_and_vfs(void) {
      * one line, so a second copy of that test here would be a link between two
      * subsystems that nothing watches.
      *
-     * It registers as "usb0" and does **not** become the root. The boot path
-     * tries IDE, then AHCI only if IDE found nothing, and whichever answered is
-     * the disk the system starts on - that order is what made v1.5.0 additive
-     * rather than a gamble, and a third driver quietly taking the root would
-     * undo it. The stick is chosen with mount().
+     * Registration preserves the preferred IDE/AHCI device. An existing USB
+     * filesystem may become root in the fallback scan below, or attach at
+     * /mnt later while the chosen boot root remains live.
      */
     usbmsc_init();
 
-    init_fs();
-
-    /*
-     * If the disk the boot order chose holds nothing, the rest of the table gets
-     * a turn.
-     *
-     * The order above - IDE, then AHCI - answers "which disk did this machine
-     * start with", and on the machine every test here runs on that disk is also
-     * the one with the file system on it. On the machine this release is aimed
-     * at they are two different disks: the internal one has somebody else's
-     * partitions on it, init_fs() refuses it rather than formatting - which is
-     * right, and is v1.2.0's decision - and then there is no file system, so no
-     * /bin, so no shell, so nowhere to type `mount usb1`. The machine that most
-     * needs to be told which disk to use is the one that cannot be told.
-     *
-     * Trying the others is not a new decision about formatting. init_fs()
-     * applies exactly the rules it applied to the first device: a disk it does
-     * not recognise is still refused untouched, and only one that is genuinely
-     * blank is written to.
-     *
-     * It says which disk it fell to, out loud. A fallback that chose silently
-     * would be two defensible decisions with an unwatched link between them -
-     * the shape of the v1.2.0 fault - and the link here is the answer to "whose
-     * disk is this system running on".
-     */
-    if (!fs_mounted && blockdev_count() > 1) {
-        blockdev_t *first = blockdev_root();
-
-        klog(LOG_LEVEL_WARN, "VFS",
-             "The boot disk holds no file system this kernel can read; trying the others.");
-        printk("[VFS] No file system on the boot disk. Trying the other disks.\n");
-
-        for (int i = 0; i < blockdev_count(); i++) {
-            blockdev_t *cand = blockdev_get(i);
-
-            if (cand == 0 || cand == first) continue;
-
-            printk("[VFS] Trying %s.\n", cand->name);
-            blockdev_set_root(cand);
-            init_fs();
-
-            if (fs_mounted) {
-                klog(LOG_LEVEL_INFO, "VFS", "Mounted a disk other than the one booted from.");
-                printk("[VFS] Root file system is on %s.\n", cand->name);
-                break;
+    bcache_init();
+    /* An explicit mkfs=<device> identifies one first-boot target. Normal
+     * discovery probes only existing filesystems, including fallback disks. */
+    char requested[32] = {0};
+    const char *cmd = global_cmdline;
+    while (*cmd) {
+        while (*cmd == ' ') cmd++;
+        const char *end = cmd;
+        while (*end && *end != ' ') end++;
+        if (end - cmd >= 5 && ft_strncmp(cmd, "mkfs=", 5) == 0) {
+            uint32_t len = (uint32_t)(end - cmd - 5);
+            if (requested[0] || !len || len >= sizeof(requested)) {
+                halt_with_reason("Invalid or repeated mkfs device.", "Use one exact device name.");
+                return E_INVAL;
             }
+            ft_memcpy(requested, cmd + 5, len);
         }
+        cmd = end;
+    }
 
-        /*
-         * Put back, so that everything below - and every message about a machine
-         * with no file system - is about the disk this machine actually booted
-         * from rather than the last one that was tried.
-         */
+    if (requested[0]) {
+        blockdev_t *device = blockdev_find(requested);
+        if (device) {
+            blockdev_set_root(device);
+            init_fs();
+            if (!fs_mounted) fs_prepare_first_boot(device);
+        }
+        if (!fs_mounted) {
+            halt_with_reason("Could not initialize the named disk.", "Check its name, capacity and contents.");
+            return E_NODEV;
+        }
+    } else {
+        blockdev_t *first = blockdev_root();
+        init_fs();
+        for (int i = 0; !fs_mounted && i < blockdev_count(); i++) {
+            blockdev_t *device = blockdev_get(i);
+            if (!device || device == first) continue;
+            blockdev_set_root(device);
+            init_fs();
+        }
         if (!fs_mounted) blockdev_set_root(first);
     }
 
@@ -1277,7 +1268,19 @@ static int init_filesystem_and_vfs(void) {
      * security level's default - so the key has to be in hand before the first
      * boot writes a single account.
      */
+    if (!fs_mounted) {
+        for (int i = 0; i < blockdev_count(); i++) {
+            blockdev_t *device = blockdev_get(i);
+            printk("[VFS] %s: %u sectors\n", device->name, device->sector_count);
+        }
+        halt_with_reason("No mountable filesystem found.",
+                         "To initialize a blank disk, boot with mkfs=<device>.");
+        return E_NODEV;
+    }
+    printk("[VFS] Root filesystem: %s (%u sectors)\n",
+           fs_root_volume.device->name, fs_root_volume.device->sector_count);
     unlock_disk_key();
+    if (fs_get_entry_idx("mnt", 0) < 0) fs_mkdir("mnt", 0);
 
     if (get_vfs_id("bin", 0) == -1) {
         klog(LOG_LEVEL_INFO, "VFS", "Setting up the root directory hierarchy.");
@@ -1407,10 +1410,11 @@ static int init_filesystem_and_vfs(void) {
              *
              * Written here rather than at first boot so they arrive with the
              * /bin tools they belong to. That means the same caveat: this block
-             * runs only when init.elf is absent, so a disk image carried over
-             * from an earlier version keeps its old /etc until it is recreated.
+             * runs only when init.elf is absent. Existing files are preserved; README
+             * documents backing up selected paths to refresh missing programs
+             * and version text without recreating the disk.
              *
-             * fs_create_file() rather than the _raw() above: these are text, and
+             * fs_create_file() rather than the asset installer above: these are text, and
              * they have to come back out through the ordinary decrypting read
              * that cat and the shell use.
              */

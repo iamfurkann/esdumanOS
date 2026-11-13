@@ -2,53 +2,43 @@
 
 ## Supported Versions
 
-| Version  | Supported          |
-| -------- | ------------------ |
-| 1.11.x   | :white_check_mark: |
-| 1.10.x   | :x:                |
-| ≤ 1.9.x  | :x:                |
+This tree targets **1.14.0-beta.1**. Fixes are developed against the current
+minor line; older minor lines receive no maintenance commitment. The version
+in this tree is not evidence that a GitHub release has been published.
 
-Only the current minor line is supported. This table said 0.4.x for five minor releases
-and then 0.9.x for two more, and then it said 1.2.x through the whole of 1.3 — the
-sentence warning about the habit was four lines long and did not stop it happening again,
-which is why the release checklist now names this file. The line that matters is the
-current one, and it is 1.11.x.
+| Source line | Maintenance target |
+| --- | --- |
+| 1.14.x | Current development/release candidate |
+| 1.13.x and earlier | Unsupported |
 
-**Use 1.1.0 or later if the disk holds anything you would mind someone reading.** Every
-release before it encrypted the file system under a key compiled into the kernel image,
-which is tamper resistance and not confidentiality: anyone holding the binary held the
-key. Those releases said so in their own boot logs and documentation, so this is a
-documented limitation rather than a vulnerability — but it is the difference between a
-disk that is encrypted and a disk that is protected. 1.1.0 derives the key from a
-passphrase entered at boot.
+esdumanOS is an educational, experimental operating system, not a production
+security boundary and not suitable for protecting sensitive data. Passing
+tests do not establish cryptographic assurance or physical-device safety.
 
-Also avoid anything before **0.9.4**. On every release from 0.9.0 to 0.9.3 inclusive,
-`/etc/shadow` can be read by any account on the system — 0.9.0 because it enforced no
-permission bits at all and created the file `0644`, and 0.9.1 through 0.9.3 because they
-enforced the bits on directories only and never on the file. 0.9.4 asks the file's own
-mode and closes it. The hashes are salted PBKDF2-HMAC-SHA256 throughout, so what was
-exposed is hashes rather than passwords.
+Older versions also have concrete defects: before 0.4.2 there were known
+memory-safety failures; 0.9.0–0.9.3 exposed password hashes to other accounts;
+before 1.1.0 the disk key was compiled into the kernel; before 1.2.0 a failed
+read could be mistaken for a blank disk and trigger formatting. QEMU is not
+inherently immune to I/O failure; driver fault injection now covers refusals.
 
-The on-disk format has changed twice since and there is no converter for either step:
-0.10.0 **will not read a disk written by 0.9.x**, and 1.1.0 **will not read a disk
-written by 0.10.x or 1.0.x**. Each recognises the older layout and says so rather than
-reading it as though nothing had moved.
+There is no converter from pre-v3 layouts. v0.9.x and v0.10.x/1.0.x disks are
+refused rather than interpreted as v3. Existing v3 disks are readable, but
+their older programs need the [v1.14 refresh](README.md#upgrading-an-existing-v3-root).
 
-Releases before 0.4.2 carry known memory-safety defects fixed in that patch and should
-not be used at all. Everything between 0.4.2 and 0.8.4 works but is unsupported.
+## Threat Model
 
-## ⚠️ Important Notice
+Account permissions and uaccess checks separate ordinary programs from other
+users and the kernel. A boot passphrase wraps a volume key; file reads verify
+an HMAC over plaintext. Neither mechanism authenticates the kernel/bootloader,
+physical hardware or the selected boot disk. There is no verified boot or IOMMU.
+An attacker able to replace firmware/kernel code can observe passwords and keys.
 
-esdumanOS is a **Beta** educational/experimental operating system. It is **not designed for production use** and should not be used to protect sensitive data. The security features implemented are for learning and demonstration purposes.
-
-**Use 1.2.0 or later if the disk matters to you at all.** Every release before it could
-format a disk it had merely failed to read. The ATA driver zeroes its buffer on every
-failure path and reported the outcome through a return value nothing looked at, so a drive
-that failed to identify, an out-of-range sector, a timed-out interrupt or a hardware error
-all reached the mount path as a run of zeros - which it read as an empty disk and
-formatted. It cannot happen under QEMU, whose disk does not fail, and it is exactly what
-happens on real hardware with a loose cable. This is data loss rather than disclosure, so
-it is here rather than in the list below, and it is the strongest reason to move.
+Names, hierarchy, ownership, modes, lengths and FAT allocation are plaintext
+metadata. Structural validation rejects malformed metadata but is not a keyed
+authenticity check. File HMACs do not bind a blob to its pathname and do not
+prevent replay of an older valid blob or disk snapshot. `stat`'s reported size
+does not authenticate file contents. Entropy quality and power-loss limits
+below also bound what disk encryption provides.
 
 ## Known Security Limitations
 
@@ -57,55 +47,62 @@ described inaccurately is worse than one described plainly — in either directi
 
 ### Key management
 
-- **The disk encryption key is derived from a passphrase entered at boot**, as of
+- **A boot passphrase protects each volume’s generated data key**, as of
   1.1.0. Two levels: PBKDF2-HMAC-SHA256 over the passphrase produces a key-encryption
   key, which unwraps a random data key held in a key slot in the superblock. The data
   key encrypts the file system; the key slot holds the salt, the iteration count, the
-  IV, the wrapped key and an HMAC-SHA256 tag over all of them. A wrong passphrase
-  produces a wrong key-encryption key and the tag does not verify — three attempts,
-  then the machine stops.
+  IV, the wrapped key and an HMAC-SHA256 tag over `salt || iv || wrapped_key`. The iteration
+  count is range-checked and used in key derivation, not directly included
+  in that HMAC input. A wrong passphrase fails tag verification. Three failed
+  attempts at the boot prompt stop the machine; secondary attach returns an
+  error to its caller instead.
 - **There is no fallback to a compiled-in key and no recovery path.** A disk whose key
   slot was zeroed would otherwise decrypt under a key extractable from the binary,
   which would be a downgrade an attacker could force by editing 116 bytes; a disk in
   the older v2 format is refused by its recorded version instead. The other side of
-  that is real: a forgotten passphrase is a disk nobody can read, and there is one key
-  slot rather than the several LUKS offers.
+  that is real: there is no recovery for a forgotten passphrase. There is one
+  key slot per disk. `setkey` rewraps the root slot only;
+  there is no secondary-volume passphrase-change command.
 - **The passphrase protects the disk at rest and nothing beyond it.** After boot the
   key is in RAM and any root process reads every file through the mounted file system.
-  `LOCKDOWN` zeroes it.
-- **A separate build-time constant remains**, set from `ESDUMAN_ELF_KEY_HEX`, and it
-  decrypts only the `/bin` images embedded in the kernel image. It provides *tamper
-  resistance* — a modified embedded program will not decrypt — and never claimed more.
-  Those images are re-encrypted under the passphrase-derived key as they are written to
-  disk; before 1.1.0 they were stored exactly as the build had encrypted them, so every
-  program in `/bin` was readable on disk to anyone holding the kernel image regardless
-  of the file system key. It is not exposed in the GRUB configuration.
+  `LOCKDOWN` wipes the root and secondary data keys; decrypted buffers
+  already held by running processes are not thereby erased.
+- **A separate build-time key**, `ESDUMAN_ELF_KEY_HEX`, decrypts programs
+  embedded in the kernel. Anyone holding the image can recover that key and
+  replace/re-encrypt programs; it is packaging, not authenticity against an
+  attacker who controls the image. Installed programs are re-encrypted under
+  the disk's key. This parameter is neither a login nor a disk password.
+- **KDF costs are build-specific.** Production defaults/minimums are 600000
+  rounds and the maximum accepted count is 10000000. Out-of-range counts are
+  rejected, not clamped. Test/dev costs are lower; those images must not be
+  distributed as production or reused as production password databases.
 
 ### Entropy
 
-- **Without RDRAND, the entropy pool does not reach cryptographic quality, and reports
-  that honestly** rather than claiming otherwise. It is fed by interrupt timing; the PIT
-  is periodic and is credited nothing, ATA completions are capped at 64 bits for the
-  entire boot, and the keyboard is the only source whose credit scales. On a headless
-  machine the pool therefore stays at `ENTROPY_WEAK`.
-- What *is* guaranteed regardless of entropy quality is **uniqueness**: CryptoFS IVs and
-  `/etc/shadow` salts are derived through a monotonic counter, so no two can collide
-  within a boot even if every source were worthless. Unpredictability is what degrades,
-  not uniqueness.
-- **Across boots, uniqueness rests on a seed carried on disk.** `/var/random-seed` holds
-  32 bytes, mixed into the pool at boot and replaced immediately, so a machine that
-  loses power before its next checkpoint cannot reuse one. Before v0.9.3 this rested on
-  the RTC second and the TSC alone, and two cold boots of one image inside the same
-  second were not provably distinct.
-- **The seed is credited zero entropy, and this is not a technicality.** Bytes written
-  by a pool that never reached cryptographic quality do not acquire any by being stored
-  and read back, so `entropy_quality()` returns exactly what it would have without one.
-  The seed buys distinctness between boots. It does not turn `ENTROPY_WEAK` into
-  `ENTROPY_OK` and is not treated as if it could.
-- The seed file is created `0600` and owned by root, and the boot-time pass puts that
-  mode back if it drifts — the same treatment `/etc/shadow` gets. As of 0.9.4 that bit is
-  worth something: `check_file_access()` asks it before an open succeeds. On 0.9.3 it was
-  not, because nothing consulted a file's own mode — see **File access control** below.
+- The pool uses RDRAND when available and interrupt timing otherwise. PIT
+  samples receive zero credit, ATA completions have a 64-bit lifetime budget,
+  and PS/2 keyboard timing can accumulate credit. USB keyboard input currently
+  adds no separate entropy sample. Without RDRAND and sufficient credited
+  input, the pool remains `ENTROPY_WEAK`. Its credit is an implementation
+  estimate, not an independent proof of entropy.
+- Volume data keys, salts and wrapping IVs can be generated while the pool
+  reports weak quality. A strong password cannot compensate for a predictable
+  underlying data key. This implementation does not block every such operation
+  until independently established cryptographic entropy is available.
+- File IVs and account salts mix counters/pool output through hashes. Counter
+  inputs are distinct before wrap within one boot; truncated hash outputs
+  still have collision probability. Earlier documentation incorrectly promised
+  unconditional IV/salt uniqueness; retained diagnostic/test labels using
+  “unique” do not establish that guarantee either. It also overstated protection gained
+  merely by keying a hash when that key itself may have weak entropy.
+- `/var/random-seed` mixes 32 bytes of prior state after the root has been
+  unlocked, and is credited zero entropy. A replacement is attempted at load
+  and at checkpoints. Failed writes, power loss, image cloning and snapshot
+  rollback can reuse old state. It is not an anti-rollback mechanism and does
+  not strengthen the initial format's earlier key generation retroactively.
+- The seed is root-owned `0600`, reapplied at boot. These permissions restrict
+  online access; they do not make a weak or replayed seed cryptographically
+  strong. The file is encrypted like other ordinary files on the volume.
 
 ### Memory and process protection
 
@@ -116,8 +113,8 @@ described inaccurately is worse than one described plainly — in either directi
   user stack, so a stack that grows past its allocation faults instead of running into
   whatever is beneath it.
 - **No W^X for user pages, and it is not expressible here.** 32-bit paging without PAE
-  has no per-page execute bit at all, so a user page is readable, writable and
-  executable because the hardware offers no way to say otherwise. This is a property of
+  has no per-page execute bit at all, so mapped user pages cannot independently be marked non-executable.
+  Read-only ELF text is supported and enforced; writable pages can also execute. This is a property of
   the paging mode rather than something left unimplemented.
 - Kernel pages are supervisor-only and `CR0.WP` is enabled, so a write through a
   read-only mapping faults in Ring 0 as well as Ring 3.
@@ -125,6 +122,15 @@ described inaccurately is worse than one described plainly — in either directi
 
 ### File access control
 
+- **Each traversed directory requires search permission**, including a component
+  followed by `..`. As of 1.14.0, `private/../file` cannot bypass the permission
+  on `private`. The checks use the target volume's metadata and are covered by
+  unprivileged Ring 3 tests on the second filesystem.
+- **Login accepts the same 63-character password limit as account setup.**
+  Earlier login screens truncated at 31 characters. Login, disk setup and shell
+  password prompts now reject an overlong line instead of using its prefix.
+  AUTH preserves trailing spaces, matching the bytes hashed during account
+  setup, rather than silently changing the supplied password.
 - **Permission bits decide access, and both halves are asked as of 0.9.4.**
   `check_vfs_access()` handles the directories: search permission on every directory
   above the entry, then read or write on the directory the operation happens in.
@@ -153,9 +159,8 @@ described inaccurately is worse than one described plainly — in either directi
 - **The set-user-id and set-group-id bits are stored and enforced by nothing.** They can
   be set and read back, and no program has ever run as anyone but the user who launched
   it. There is no plan to implement them.
-- **There is no group database.** A task's group id follows its user id, so a file's
-  group is always its owner's. The group bits are read and honoured, but nothing can put
-  two users in one group for them to mean anything.
+- **There is no group database.** A task's group id follows its user id, by default. Root can set a file's stored owner and group independently with
+  `chown`; there is no group-membership database or supplementary-group API.
 - **`chown` is root-only.** Giving a file away is how a user gets out from under a quota
   on a system that has one. This system has no quota to escape, and the restriction is
   easier to keep now than to add back later.
@@ -169,11 +174,12 @@ described inaccurately is worse than one described plainly — in either directi
   `check_vfs_access()` and `sys_getcwd()` stay where they are: the table is checked once
   at the door and walked a great many times afterwards, and a guard costing a comparison
   is not worth removing on the strength of a check that ran minutes ago.
-- Root (uid 0) bypasses these checks entirely, as it does on any Unix.
+- Root (uid 0) bypasses discretionary mode checks. It does not bypass
+  immutable-state, invalid-metadata or unavailable-key checks.
 
 ### Other
 
-- LOCKDOWN blocks new programs and destroys the in-RAM master key, after which
+- LOCKDOWN blocks new programs and destroys both mounted in-RAM data keys, after which
   encrypted VFS access is refused rather than attempted with a zeroed key. It does not
   terminate an already-running shell.
 - The block cache is write-back. It attempts write-back at 32 dirty slots, on a
@@ -187,27 +193,30 @@ described inaccurately is worse than one described plainly — in either directi
   through a device's volatile write cache. Abrupt power loss can still lose data
   or leave filesystem metadata inconsistent. See
   [the reliability audit](docs/engineering/RELIABILITY_AUDIT.md).
-- **`mount` opens a new trust boundary, and it is a bigger one than it looks.** Until
-  v1.11.0 the only disk this kernel read was the one it booted from. A mounted device's
-  directory table is attacker-supplied in the ordinary sense - somebody plugged it in -
-  and it is walked by code that was written when the disk was assumed to be the system's
-  own. What stands there is validate_directory_table(), which has checked the table's
-  invariants since v0.10.0 and is now doing a job it was not originally asked to do; the
-  file system also refuses to mount a partition it does not recognise rather than
-  formatting it, which is v1.2.0's decision and matters more with a stranger's disk in
-  the machine. `mount` is root only for that reason rather than for tidiness.
-- **The boot path will now mount a disk nobody asked it to.** If the disk the machine
-  started from holds no file system this kernel can read, the other registered devices
-  are tried in order and the first one that mounts becomes the root - which means
-  `/etc/shadow` and every account in it can come off a stick somebody plugged in. That is
-  a real widening and it is deliberate: without it a machine whose internal disk belongs
-  to another operating system has no `/bin`, so no shell, so no way to be told which disk
-  to use. What bounds it is that `init_fs()` accepts only a partition of this file
-  system's own type and refuses anything else untouched, so the device has to have been
-  formatted by esdumanOS on purpose - and that somebody with physical access to the USB
-  ports of a machine with no readable system disk is not a threat this kernel was ever
-  positioned to stop. The disk it falls to is named on the console and in the log, which
-  is the part that makes it noticeable rather than silent.
+- **The v3 filesystem is not journaled.** Sector-boundary power-cut experiments
+  during create and delete left orphan allocations. The stricter mount validator
+  refuses those images, which can prevent boot even when other files remain
+  intact. The offline checker reports this without modifying the image; there
+  is no automatic repair. A successful `sync` preserves the tested payload in
+  QEMU, but is not a claim about torn sectors or hardware write-cache barriers.
+- **Each mounted disk has its own data key and metadata.** A root-only attach
+  at `/mnt` validates partition geometry and directory entries, opens the
+  secondary key slot with that disk's passphrase, then publishes the candidate.
+  A failed attach leaves the root usable. Detach checks live file descriptors
+  and working directories, flushes the target and wipes its key. Old directory
+  handles expire when that volume is detached.
+- **Formatting requires an explicit device.** The `mkfs` syscall checks the
+  device name, expected sector count, mounted state and every sector's contents.
+  A read failure or any nonzero byte prevents initialization. The first-boot
+  `mkfs=<device>` option also requires an exact device name. Ordinary mount and
+  fallback discovery only read filesystem metadata. Plaintext metadata and
+  device volatile write caches remain outside the encryption guarantee.
+- **Boot fallback can select an attached disk as root.** If the initial device
+  has no structurally valid filesystem, registered alternatives are probed.
+  The selected disk is named on the console/log and must be unlocked, but its
+  partition type/signature does not prove who created it. Its `/etc/shadow`
+  becomes the account database. Physical root-media substitution is outside
+  this kernel's trust guarantees; the format can be produced by another tool.
 - **The firmware's own tables are parsed now, and the firmware is not this kernel's
   code.** ACPI arrived in v1.12.0 and with it a walk over structures nothing here wrote:
   an RSDP, a root table, a FADT, and the DSDT's AML. Every length in every one of them
@@ -222,22 +231,19 @@ described inaccurately is worse than one described plainly — in either directi
   truncated. This is a smaller boundary than a mounted disk - firmware that wanted to
   subvert this kernel does not need a malformed table to do it - but it is a new one, and
   the bound on it is that only S5 is ever entered and only through ports the FADT named.
-- **A HID report is attacker-supplied too, and six of its eight bytes are used as table
-  indices.** The translation table is 232 entries and a usage is a `uint8_t`, so every
-  possible value indexes inside it - which is arithmetic rather than a bounds check, and
-  is why the table is sized to the type instead of to the usages that are defined. An
-  entry nothing fills reads as zero and the key is dropped. A malicious keyboard can
-  therefore make this kernel believe any key was pressed, which is a limitation of
-  trusting a keyboard at all rather than of this driver: a device that can type is a
-  device that can type.
-- **USB descriptors are the first attacker-supplied structure this kernel walks.** Every
+- **HID report bytes are untrusted indices.** The translation table has
+  232 entries, while a byte represents 256 values. The documentation review
+  found an unchecked read for usages 0xE8–0xFF; v1.14 now rejects those values
+  before indexing. Regressions cover all 24 values, their press/release reports
+  and valid input afterwards. This does not authenticate a keyboard: a device
+  can still inject ordinary supported keystrokes.
+- **USB descriptors are another untrusted structure this kernel walks.** Every
   length in a configuration descriptor comes from the device, and a USB device is
   something a person plugs in. The walk refuses a zero length rather than stepping over
   it, stops at the buffer it was given, and clamps `wTotalLength` to one frame instead of
   believing it; the device and product identifiers it records are reported and never
-  used to decide anything. What it does not do is authenticate the device, because
-  nothing on this bus can be authenticated - a malicious device is a limitation of USB
-  rather than of this driver, and the answer to it is not plugging one in.
+  used to decide anything. What it does not do is authenticate the device, and this driver implements no device-authentication protocol. Parser bounds
+  do not make a hostile device trustworthy.
 - Two drivers now enable PCI bus mastering and hand a controller physical addresses to
   read and write: AHCI since 1.5.0, and XHCI since 1.8.0. A bus-mastering device is not
   constrained by the page tables — there is no IOMMU here and no plan for one — so a
@@ -257,7 +263,8 @@ true. For anyone who read them and drew conclusions:
   with the password `test`.
 - "Password hashing does not use per-user salt" — **it does**, a 16-byte per-user salt.
 - "Key derivation uses a custom KDF, not a standard algorithm" — **it is
-  PBKDF2-HMAC-SHA256**, verified against RFC 6070 vectors.
+  PBKDF2-HMAC-SHA256**, with SHA-256 known-answer tests in the repository.
+  The former RFC 6070 attribution was incorrect for those SHA-256 tests.
 - "Boot-time encryption key may be visible in the GRUB configuration" — **it is not**;
   see Key management above for where it actually lives.
 
@@ -266,7 +273,7 @@ true. For anyone who read them and drew conclusions:
 If you discover a security vulnerability in esdumanOS, please report it responsibly:
 
 1. **Do NOT** open a public GitHub issue for security vulnerabilities.
-2. Instead, please email the maintainer or use [GitHub's private vulnerability reporting](https://github.com/iamfurkann/esdumanOS/security/advisories/new).
+2. Use [GitHub's private vulnerability reporting](https://github.com/iamfurkann/esdumanOS/security/advisories/new).
 3. Include a description of the vulnerability, steps to reproduce, and potential impact.
 4. You will receive an acknowledgment within 48 hours.
 
@@ -292,4 +299,5 @@ not its own slot; enforcing the permission bits, which took two releases —
 0.9.1 for the directories and 0.9.4 for the files themselves, the latter also retiring
 three name comparisons still hiding in the VFS below the syscall layer; a sticky bit on
 `/tmp`, which 0.9.4 added along with them; and persisting an entropy seed across boots,
-which 0.9.3 added — for distinctness between boots, not for quality.
+which 0.9.3 added — to mix previous state into later boots, with no extra entropy credit or
+anti-rollback guarantee.

@@ -161,6 +161,8 @@ void run_usbkbd_tests(void);
 /** @brief Bulk-Only Transport, and the disk it presents. */
 void run_usbmsc_tests(void);
 /** @brief Two disks, and the cache that has to tell them apart. */
+int ktest_prepare_mount_disk(void);
+void run_fs_crash_probe(const char *scenario);
 void run_mount_tests(void);
 
 /**

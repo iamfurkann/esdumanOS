@@ -18,10 +18,7 @@
  * nobody indexes. When a second device arrives it will arrive with a caller that
  * needs to choose between them, and that is the release that should grow this."
  *
- * This is that release, and the second device is the USB stick. The caller is
- * mount(), which does not hold two file systems at once - it chooses which disk
- * the one file system is on, which is exactly the word v1.2.0 used. Holding two
- * at once is v1.12.0, and it is a larger thing than this table.
+ * v1.14 keeps the boot root and an additional mounted device live together.
  *
  * What did not change is where the bounds check lives. It is still in this file,
  * still once, and still not the drivers' problem; that was v1.2.0's real gain

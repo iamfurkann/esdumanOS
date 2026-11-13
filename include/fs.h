@@ -2,6 +2,7 @@
 #define FS_H
 
 #include "types.h"
+#include "blockdev.h"
 /* The superblock carries the passphrase key slot, so its layout is part of this
  * header's layout. */
 #include "keyslot.h"
@@ -68,7 +69,9 @@
  * It travels through system calls in a 32-bit register either way, so the ABI's
  * shape did not change when this did; only the range of values that are valid.
  */
-typedef uint16_t fs_id_t;
+/* Runtime IDs carry the mount generation in the upper half. On-disk IDs
+ * remain volume-local 16-bit fields, including on existing v3 disks. */
+typedef uint32_t fs_id_t;
 
 /**
  * @brief Default disk layout, used when formatting a blank disk.
@@ -201,9 +204,9 @@ typedef struct {
     uint32_t owner_gid;              /**< Group ID of the file's owner. */
     uint32_t mtime;                  /**< Seconds since the Unix epoch, last write. */
     uint32_t ctime;                  /**< Seconds since the Unix epoch, creation. */
-    fs_id_t  entry_id;               /**< Unique identifier within the file system. */
-    fs_id_t  parent_id;              /**< Parent directory's entry ID; 0 is the root. */
-    uint16_t mode;                   /**< Permission bits; stored, not yet enforced. */
+    uint16_t entry_id;               /**< Unique identifier within the file system. */
+    uint16_t parent_id;              /**< Parent directory's entry ID; 0 is the root. */
+    uint16_t mode;                   /**< Permission bits, enforced by the syscall layer. */
     uint8_t  file_type;              /**< File type (FT_REGULAR or FT_DIR). */
     uint8_t  is_used;                /**< Flag indicating if the entry is active. */
 } __attribute__((packed)) disk_file_entry_t;
@@ -333,7 +336,45 @@ typedef struct {
  * Filled by init_fs() from the disk, not from the constants above. Every sector
  * address in it is relative to the start of the partition.
  */
-extern disk_superblock_t fs_super;
+typedef struct {
+    blockdev_t *device;
+    disk_superblock_t super;
+    disk_file_entry_t *entries;
+    uint32_t *fat;
+    struct fs_inode_lock *locks;
+    uint32_t part_start;
+    uint32_t sectors;
+    uint32_t clusters;
+    int entry_count;
+    int mounted;
+    int formatted;
+    fs_id_t prefix;
+    fs_id_t covered;
+    uint8_t data_key[KEYSLOT_KEY_LEN];
+    int key_ready;
+    int fat_pending;
+    int directory_pending;
+} fs_volume_t;
+
+extern fs_volume_t fs_root_volume;
+int fs_format_data_device(blockdev_t *device, uint32_t sectors, const char *pass);
+int fs_prepare_first_boot(blockdev_t *device);
+fs_volume_t *fs_volume_for(fs_id_t id);
+const disk_file_entry_t *fs_entry(fs_id_t id);
+int fs_parent_dir(fs_id_t id);
+int fs_child_dir(fs_id_t parent, const char *name);
+fs_id_t fs_follow_mount(fs_id_t id);
+blockdev_t *fs_secondary_device(void);
+int fs_attach(blockdev_t *device, const char *passphrase);
+int fs_detach(void);
+int fs_sync_all(void);
+void fs_forget_secondary_key(void);
+static inline uint32_t fs_volume_cluster_sector(const fs_volume_t *volume, uint32_t cluster) {
+    return volume->super.data_start + cluster * volume->super.cluster_sectors;
+}
+int fs_volume_read_sector(fs_volume_t *volume, uint32_t sector, uint8_t *buffer);
+int fs_volume_write_sector(fs_volume_t *volume, uint32_t sector, uint8_t *buffer);
+#define fs_super (fs_root_volume.super)
 
 /**
  * @brief Whether this boot formatted the disk.
@@ -343,7 +384,7 @@ extern disk_superblock_t fs_super;
  * refused, because installing a slot generates a new data key and every file
  * already on the disk is encrypted under the old one.
  */
-extern int fs_was_formatted;
+#define fs_was_formatted (fs_root_volume.formatted)
 
 /**
  * @brief Whether the mounted disk carries a passphrase key slot.
@@ -405,7 +446,7 @@ int fs_install_image_asset(const char *name, const uint8_t *blob, uint32_t blob_
  * point checks it: refusing to mount and then writing anyway would be worse than
  * not checking at all.
  */
-extern int fs_mounted;
+#define fs_mounted (fs_root_volume.mounted)
 
 /**
  * @brief The partition's first sector, counted from the start of the disk.
@@ -414,17 +455,17 @@ extern int fs_mounted;
  * fs_read_sector() and fs_write_sector() add it; nothing else should, and
  * nothing else in the file system should call the block cache directly.
  */
-extern uint32_t fs_part_start;
+#define fs_part_start (fs_root_volume.part_start)
 
 /**
  * @brief Sectors in the partition, as the device and the MBR agree on them.
  */
-extern uint32_t fs_max_sectors;
+#define fs_max_sectors (fs_root_volume.sectors)
 
 /**
  * @brief Clusters this file system may address, capped at FS_MAX_CLUSTERS_CAP.
  */
-extern uint32_t fs_total_clusters;
+#define fs_total_clusters (fs_root_volume.clusters)
 
 /**
  * @brief The partition-relative sector a cluster begins at.
@@ -494,6 +535,7 @@ typedef struct {
     uint32_t current_offset;         /**< Current read/write offset within the file. */
     uint32_t start_cluster;          /**< First cluster of the file's data; 0 when none. */
     int      ref_count;              /**< Reference count to prevent Use-After-Free vulnerabilities! [SECURITY PATCH ADDED] */
+    fs_id_t  volume_prefix;          /**< Mount identity captured at open. */
     int      inode_idx;              /**< Index in the dir_table for locking */
 
     /*
@@ -840,7 +882,7 @@ extern int fs_get_entry_idx(const char *name, fs_id_t parent_id);
  * unchanged - eighty-nine of them in vfs.c alone. What had to change is the
  * bound of every loop over them, which is fs_max_entries and fs_total_clusters.
  */
-extern disk_file_entry_t *dir_table;
+#define dir_table (fs_root_volume.entries)
 
 /**
  * @brief Entries the mounted file system actually holds.
@@ -857,13 +899,13 @@ extern disk_file_entry_t *dir_table;
  * way the indices are typed rather than to cast at every use. The value is at
  * most FS_MAX_ENTRIES_CAP.
  */
-extern int fs_max_entries;
+#define fs_max_entries (fs_root_volume.entry_count)
 
 /* The allocation table, one uint32_t per cluster. Declared here as of v0.10.0
  * because the tests need to assert that clusters 0 and 1 are reserved - which is
  * what makes a start_cluster of 0 mean "no data" rather than "the first
  * cluster", and is therefore worth checking rather than assuming. */
-extern uint32_t *file_allocation_table;
+#define file_allocation_table (fs_root_volume.fat)
 extern void init_fs(void);
 
 #endif // FS_H

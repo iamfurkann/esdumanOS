@@ -5,32 +5,18 @@
  *
  * This file is part of the esdumanOS test suite.
  *
- * The pool exists because generate_random_bytes() used to read every one of its
- * inputs at the moment it was called: RDTSC, three RTC registers, and the address
- * of a local variable. Nothing was collected over time, so the whole thing had
- * perhaps twenty to thirty bits of real uncertainty - and it fed both the
- * /etc/shadow salts and every CryptoFS AES-CBC IV.
+ * RDRAND is preferred; interrupt samples feed a hashed fallback pool. The
+ * credited-bit counter implements a conservative policy, not a measured proof
+ * of unpredictability. Deterministic emulation can provide little real entropy.
  *
- * Two things are separated here, because they carry different guarantees.
+ * Counters diversify fallback derivation inputs. Hashing/truncation can still
+ * collide, and the RDRAND output path is not counter-mixed. Neither path promises
+ * unconditional uniqueness. CBC IVs additionally require unpredictability.
  *
- * Unpredictability is best-effort. RDRAND gives it outright. Without RDRAND it
- * comes from interrupt jitter, and on an emulated machine that may amount to
- * almost nothing; the return code says which case we are in and the callers act
- * on it.
- *
- * Uniqueness is unconditional. Every extraction bumps `seq` and folds it into the
- * output, so two extractions in the same boot cannot collide even with every
- * source dead. That is the property fs_create_encrypted() and create_shadow_entry()
- * actually need, and it no longer depends on how good the sources were.
- *
- * Uniqueness across boots is what entropy_load_seed() is for. It used to rest on
- * the RTC timestamp and the TSC that entropy_init() mixes in, so two cold boots
- * of the same image inside the same RTC second were not provably distinct - and
- * a disk image copied to two machines started them both from the same state.
- * A seed carried on disk closes that, and closes only that: the bytes are mixed
- * in and credited nothing, because a seed written by a pool that never reached
- * cryptographic quality does not arrive at the next boot with any more than it
- * left with. Unpredictability still comes from RDRAND or from nowhere.
+ * A seed is read only after disk unlock and can diversify later pool state.
+ * It cannot strengthen an already generated disk key. Seed write failures,
+ * power loss, copied disks and rollback can repeat state; no entropy credit is
+ * awarded merely for loading persisted bytes. See SECURITY.md for the limits.
  */
 #include "types.h"
 #include "io.h"
@@ -327,12 +313,9 @@ void entropy_load_seed(void) {
     }
 
     /*
-     * Replaced now, not at the next checkpoint, and that is the whole guarantee.
-     * sync, halt and reboot refresh it too, but a machine that loses power before
-     * reaching one of them would otherwise come back up and mix in the very same
-     * seed it used last time - two boots from one seed, which is the case this
-     * exists to rule out. Writing immediately means the seed on disk has always
-     * already been consumed.
+     * Attempt replacement now as well as at sync/halt/reboot. Durability is
+     * subject to the VFS and device write path; failure or rollback can retain
+     * a previously used seed. This does not promise power-loss-safe renewal.
      */
     entropy_persist_seed();
 }
@@ -523,7 +506,7 @@ int generate_random_bytes(uint8_t *buf, uint32_t len) {
 
     /*
      * Refuse rather than improvise. Before entropy_init() the pool state is all
-     * zeroes and seq is 0, so not even uniqueness holds - and a caller that
+     * zeroes and seq is 0; a caller that
      * silently accepted those bytes would be writing a predictable salt or IV.
      */
     if (!pool.seeded) return ENTROPY_FAIL;
@@ -560,7 +543,7 @@ int generate_random_bytes(uint8_t *buf, uint32_t len) {
             }
         }
         if (has_rdrand && offset >= len) {
-            pool.seq++;   /* keep the uniqueness counter moving on this path too */
+            pool.seq++;   /* keep the extraction statistic moving on this path too */
             return ENTROPY_OK;
         }
     }

@@ -8,25 +8,17 @@
  * @brief Kernel entropy pool, seeded from RDRAND when available and from
  *        interrupt timing jitter otherwise.
  *
- * Two properties are worth telling apart, because the guarantees differ:
+ * RDRAND success is treated as strong by this implementation; fallback
+ * timing samples may be predictable, particularly under emulation. The quality
+ * return value is a policy classification, not a measurement of min-entropy.
+ * Fallback extraction counters distinguish derivation inputs within a boot; hashing or
+ * truncating those inputs cannot guarantee collision-free output. CBC IVs also
+ * need unpredictability, which a counter alone does not provide.
  *
- *   Unpredictability depends on the quality of the sources. With RDRAND it is
- *   cryptographic; without it, it is whatever jitter the interrupt sources
- *   actually carried, which on an emulated machine may be close to nothing.
- *   generate_random_bytes() reports which case it is in.
- *
- *   Uniqueness does not depend on source quality at all. Every extraction
- *   advances a monotonic counter that is folded into the output, so no two
- *   extractions within a boot can produce the same bytes even if every source
- *   is dead. The callers that need unique-but-not-necessarily-secret values -
- *   CBC initialisation vectors and password salts - rest on this rather than on
- *   the entropy estimate.
- *
- *   Across boots that counter starts over, so uniqueness there rests on the pool
- *   starting from somewhere different. entropy_load_seed() is what makes it, by
- *   carrying 32 bytes on disk from one boot to the next. It buys distinctness
- *   and nothing else - the seed is credited no entropy, and a pool that reports
- *   ENTROPY_WEAK reports it just the same with a seed loaded.
+ * A persisted seed can diversify later boots, but is loaded after disk unlock
+ * and does not strengthen keys already generated. Failed writes, power loss,
+ * cloned disks and rollback can repeat old state. No entropy is credited merely
+ * for loading the seed; ENTROPY_WEAK remains weak.
  */
 
 /**
@@ -43,11 +35,11 @@
 #define ENTROPY_SEED_BYTES 32
 #define ENTROPY_SEED_NAME  "random-seed"
 
-/** RDRAND succeeded — cryptographic quality */
+/** Accepted by the RDRAND/credited-pool quality policy */
 #define ENTROPY_OK    0
-/** Fallback used — NOT cryptographic quality, but still unique per extraction */
+/** Fallback used — NOT cryptographic quality; counter-mixed derivation */
 #define ENTROPY_WEAK -1
-/** Pool not initialised: not even uniqueness can be promised. Callers must refuse. */
+/** Pool not initialised; callers must refuse output. */
 #define ENTROPY_FAIL -2
 
 /**
@@ -82,7 +74,7 @@ typedef struct {
     uint32_t distinct_delta_lsb;    /**< Distinct (delta & 31) values seen, 0-32 */
     uint32_t min_delta;             /**< Smallest inter-event TSC delta seen.   */
     uint32_t max_delta;             /**< Largest inter-event TSC delta seen.    */
-    uint32_t extractions;           /**< Extractions so far; the uniqueness counter. */
+    uint32_t extractions;           /**< Extractions so far; derivation input counter. */
 } entropy_stats_t;
 
 /**
@@ -114,9 +106,9 @@ void entropy_init(void);
  * recorded and the boot continues, because the pool is no worse off than it was
  * without one.
  *
- * The seed on disk is replaced immediately rather than at the next checkpoint,
- * so a machine that loses power before reaching sync, halt or reboot cannot come
- * back up and mix in a seed it has already used.
+ * Replacement is attempted during this call. It does not establish durable
+ * atomic replacement: write failure, power loss or rollback can retain a seed
+ * already used. Callers must not infer cross-boot uniqueness from this API.
  */
 void entropy_load_seed(void);
 
@@ -162,9 +154,10 @@ void entropy_get_stats(entropy_stats_t *out);
  * @brief Fetches and consumes the next IV derivation counter.
  *
  * Monotonic across the boot. fs_create_encrypted() folds it into every IV so
- * that IVs stay distinct even when the pool has no entropy to offer.
+ * that their derivation inputs differ even when the pool has no entropy.
+ * This is not a guarantee of distinct or unpredictable IV outputs.
  *
- * @return A value that has not been returned before in this boot.
+ * @return The next counter value (until 64-bit wraparound).
  */
 uint64_t entropy_next_counter(void);
 
@@ -186,13 +179,13 @@ int entropy_selftest_fail_path(int *buffer_untouched);
  * @brief Generate random bytes.
  *
  * Attempts RDRAND first (bounded retry, 10 attempts per 32-bit word). Falls back
- * to the interrupt-jitter pool otherwise. In both cases the output is unique to
- * this extraction; see the file comment for what that does and does not promise.
+ * to the interrupt-jitter pool otherwise. Counter mixing diversifies the
+ * derivation inputs; it does not prove output uniqueness or unpredictability.
  *
  * @param buf    Output buffer
  * @param len    Number of bytes to generate
- * @return ENTROPY_OK when RDRAND supplied the bytes, ENTROPY_WEAK when the pool
- *         did and it holds too little credited entropy to claim more,
+ * @return ENTROPY_OK for RDRAND success or sufficient credited pool bits;
+ *         ENTROPY_WEAK for a fallback pool below that policy threshold;
  *         ENTROPY_FAIL when the pool is not initialised (buf is left untouched).
  */
 int generate_random_bytes(uint8_t *buf, uint32_t len);

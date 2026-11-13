@@ -1,17 +1,4 @@
-/**
- * @file umount.c
- * @brief Unmounts the file system.
- *
- * Takes no argument, because there is one file system to unmount. That is the
- * same limit `mount` states and it is stated in one more place here rather than
- * left to be discovered: a program that accepted a path and ignored it would be
- * the shape of lie `su` carried for eleven releases.
- *
- * Syscall numbers are written out as literals here, as in every other program in
- * /bin - tests/host/c/test_elf_sast.c asserts that each program contains the
- * literal call text for the syscalls it is supposed to make.
- */
-
+/* Detach the data volume at /mnt. */
 /**
  * @brief Invokes a system call.
  */
@@ -40,19 +27,13 @@ void main(void) {
     int rc = syscall(72, 0, 0, 0);   /* SYSCALL_UMOUNT */
 
     if (rc == 0) {
-        /*
-         * Said out loud, unlike most commands here. Unmounting leaves the system
-         * with no file system at all - no /bin, no /etc - and a command that did
-         * that silently would look like it had done nothing until the next thing
-         * failed.
-         */
-        print("Unmounted. Nothing is mounted now; use mount <device>."); nl();
+        print("Unmounted /mnt."); nl();
         syscall(1, 0, 0, 0);
         while (1) { }
     }
 
-    if (rc == -19)      print("umount: nothing is mounted");
-    else if (rc == -16) print("umount: something has a file open");
+    if (rc == -19)      print("umount: no filesystem at /mnt");
+    else if (rc == -16) print("umount: a process has an open file or working directory on /mnt");
     else if (rc == -1)  print("umount: only root may unmount");
     else if (rc == -5)  print("umount: the disk would not take its unwritten data; still mounted");
     else                print("umount: failed");

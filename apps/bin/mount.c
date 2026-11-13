@@ -1,20 +1,4 @@
-/**
- * @file mount.c
- * @brief Chooses which block device the file system is on, or lists them.
- *
- * With no argument it prints the registered devices and marks the one in use.
- * With a device name it moves the file system there.
- *
- * It is not POSIX mount and does not pretend to be: there is no mount point
- * argument because there is one file system at a time, and this changes which
- * disk carries it rather than attaching a second one somewhere. include/fs.h
- * says why, and v1.12.0 is where that changes.
- *
- * Syscall numbers are written out as literals here, as in every other program in
- * /bin - tests/host/c/test_elf_sast.c asserts that each program contains the
- * literal call text for the syscalls it is supposed to make.
- */
-
+/* List disks or attach a data filesystem at /mnt. */
 /**
  * @brief Invokes a system call.
  */
@@ -73,6 +57,28 @@ void main(void) {
 
     int rc = syscall(71, (int)&args[i], 0, 0);   /* SYSCALL_MOUNT */
 
+    if (rc == -13) {
+        char pass[64] = {0};
+        unsigned used = 0;
+        print("Disk passphrase: ");
+        int too_long = 0;
+        while (1) {
+            char c;
+            if (syscall(3, 0, (int)&c, 1) != 1) break;
+            if (c == '\n' || c == '\r') {
+                if (!too_long) rc = syscall(71, (int)&args[i], (int)pass, 0x4d4e5401u);
+                break;
+            }
+            if (c == '\b' || c == 127) { if (used) pass[--used] = 0; }
+            else if (c >= 32 && c <= 126) {
+                if (used < sizeof(pass) - 1) pass[used++] = c;
+                else too_long = 1;
+            }
+        }
+        volatile char *wipe = pass;
+        for (unsigned j = 0; j < sizeof(pass); j++) wipe[j] = 0;
+        nl();
+    }
     if (rc == 0) {
         syscall(1, 0, 0, 0);
         while (1) { }
@@ -84,7 +90,9 @@ void main(void) {
      * have a file open, or that they typed a name nothing answers to.
      */
     if (rc == -19)      print("mount: no device by that name");
-    else if (rc == -16) print("mount: something has a file open");
+    else if (rc == -16) print("mount: /mnt is busy");
+    else if (rc == -13) print("mount: disk passphrase rejected");
+    else if (rc == -39) print("mount: /mnt must be empty");
     else if (rc == -1)  print("mount: only root may change disks");
     else if (rc == -22) print("mount: that device holds no file system this kernel can read");
     else                print("mount: failed");

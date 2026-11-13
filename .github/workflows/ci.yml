@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       # ELF encryption key for CI builds (NOT a login password).
-      # Embedded in kernel binary — provides tamper resistance only.
+      # Embedded for asset packaging, not a signing trust root.
       ESDUMAN_ELF_KEY_HEX: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
 
     steps:

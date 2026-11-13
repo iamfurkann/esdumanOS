@@ -6,12 +6,11 @@
  * THE SYSCALL NUMBERS BELOW ARE FROZEN AS OF v1.0.0.
  * ==========================================================================
  *
- * Frozen means one thing and it is worth being exact about, because the wrong
- * reading of it held this release up for two minor versions: no number already
- * assigned here changes its value, changes its meaning, or is given to a
- * different call. It does not mean the table is closed. New calls may be added,
- * and mount()/umount() finally were, in v1.11.0 - after being named here as "the
- * next ones" through eleven releases.
+ * Assigned numbers keep their values and are never reassigned to other calls.
+ * New calls may be added. This does not mean every historical binary has
+ * identical behavior: v1.14 changes MOUNT/UMOUNT from root switching to a
+ * secondary attachment and adds MOUNT_UNLOCK_V1. Follow the documented
+ * compatibility contract in README.md and refresh old installed callers.
  *
  * Three rules follow from that, and they are the whole of the contract:
  *
@@ -19,7 +18,7 @@
  *      free one. v1.0.0 said "from 68"; SYSCALL_SETKEY took 68 in v1.1.0,
  *      SYSCALL_PCIINFO took 69 in v1.4.0, SYSCALL_USBINFO took 70 in v1.8.0 and
  *      mount()/umount() took 71 and 72 in v1.11.0, which is the rule working
- *      rather than an exception to it, and the next call takes 73.
+ *      rather than an exception to it, and MKFS took 73 in v1.14.0.
  *
  *   2. The holes are never filled. 11 (CAT_FILE) and 28 (LS_DIR) held calls that
  *      were removed; 30, 31 and 32 were reserved for a crypto API that was never
@@ -106,7 +105,7 @@
  * 67 as of v1.0.0. It was 99 from the beginning - far outside the run every
  * other call sits in, for no reason anybody recorded, which is the shape of a
  * placeholder that was never revisited. Moving it is an ABI break and v1.0.0 was
- * the last moment one was permitted; leaving it would have frozen the outlier in
+ * the last reassignment before the freeze; leaving it would have kept the outlier in
  * place for the life of the project, and 99 is now a hole like any other.
  *
  * It had exactly two callers and both are in this tree, which is what made the
@@ -471,9 +470,9 @@
  *
  * It re-wraps the data key rather than re-encrypting the disk. The old
  * passphrase opens the key slot, a fresh salt derives a new key-encryption key,
- * and the same data key goes back under it - so the files on the disk are not
- * touched and cannot be lost by getting this wrong. A wrong old passphrase
- * returns E_ACCES and changes nothing.
+ * and the same root data key goes back under it. Contents are not rewritten;
+ * persistence still depends on the superblock update, without a journal.
+ * A wrong old passphrase returns E_ACCES and changes nothing.
  */
 #define SYSCALL_SETKEY          68
 
@@ -521,40 +520,18 @@
  */
 #define SYSCALL_USBINFO         70
 
-/**
- * @brief Mount a registered block device, or report what is mounted.
- *
- * ebx is the device name - "ata0", "sata0", "usb0" - and the file system is
- * unmounted, the cache flushed, and the named device mounted in its place.
- *
- * With ebx zero it asks instead of setting: ecx is a buffer and edx its
- * capacity, and the registered devices are rendered into it one per line with
- * the mounted one marked. Two behaviours in one call because they are two
- * questions about one thing, and because a diagnostic does not earn a number of
- * its own while mount() and umount() are still spending the two this table has
- * been promising since v1.0.0.
- *
- * Root only, through the same check every other call that reaches storage uses.
- *
- * **One file system at a time.** This mounts a device *instead of* the current
- * one rather than *as well as* it - which is the word blockdev.h used in v1.2.0
- * when it said the next device would arrive with a caller that had to choose
- * between them. Holding two at once means giving every directory id a file
- * system to belong to, and that is v1.12.0.
- */
+/** Root-only. With ebx zero, render devices into ecx (capacity edx).
+ * With a device name, attach at /mnt. EDX selects the optional passphrase
+ * pointer in ECX via MOUNT_UNLOCK_V1. The root remains mounted. */
 #define SYSCALL_MOUNT           71
 
-/**
- * @brief Unmount the current file system.
- *
- * Flushes what the cache is holding for that device, drops those slots, and
- * detaches it. Refused with E_BUSY while any process has a file open: an
- * unmount that left descriptors pointing at a device nobody is reading is a
- * descriptor whose next read is somebody else's disk.
- *
- * Root only. Takes no arguments, because there is one file system to unmount.
- */
+/** Detach /mnt after writeback. A CWD or open file on that volume returns E_BUSY. */
 #define SYSCALL_UMOUNT          72
+
+/* Root-only. ebx: device name, ecx: new passphrase, edx: exact sector count. */
+#define SYSCALL_MKFS            73
+/* For MOUNT with a device name, ECX carries a passphrase only with this EDX. */
+#define MOUNT_UNLOCK_V1         0x4d4e5401u
 
 // ==========================================================
 // Test-build-only syscalls (>= 200)

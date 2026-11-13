@@ -21,6 +21,7 @@ int validate_fd(int fd);
 int vfs_resolve_path(const char *path, int start_dir_id, char *basename);
 /** @brief Checks if the current task has permission to use a directory */
 int check_vfs_access(int entry_id, int needs_write);
+int check_vfs_search(int entry_id);
 /** @brief Checks a named entry's own permission bits; asked as well as, not instead of,
  *  check_vfs_access() */
 int check_file_access(fs_id_t parent_id, const char *name, int want);
@@ -92,6 +93,7 @@ void sys_usbinfo(arch_regs_t *regs);
 /** @brief Syscall handler for choosing which device the file system is on */
 void sys_mount(arch_regs_t *regs);
 /** @brief Syscall handler for unmounting the current file system */
+void sys_mkfs(arch_regs_t *regs);
 void sys_umount(arch_regs_t *regs);
 
 // sys_fs.c

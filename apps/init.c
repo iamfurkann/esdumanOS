@@ -117,14 +117,20 @@ int sys_setuid(int uid, const char *password) {
  * @param buf The buffer to store the read line.
  * @param hide If non-zero, characters are echoed as '*' (useful for passwords).
  */
-void read_line(char *buf, int hide, int max_len) {
+int read_line(char *buf, int hide, int max_len) {
     int idx = 0;
+    int truncated = 0;
     while (1) {
         char c = get_keyboard_char();
         if (c == '\n' || c == '\r') { 
             buf[idx] = '\0'; 
             printk("\n"); 
-            break; 
+            if (truncated) {
+                buf[0] = '\0';
+                printk("Input exceeds the supported length. Please try again.\n");
+                return E_NAMETOOLONG;
+            }
+            return 0;
         } 
         else if (c == '\b') { 
             if (idx > 0) { 
@@ -132,7 +138,8 @@ void read_line(char *buf, int hide, int max_len) {
                 printk("\b \b"); 
             } 
         } 
-        else if (c >= 32 && c <= 126 && idx < max_len - 1) {
+        else if (c >= 32 && c <= 126) {
+            if (idx >= max_len - 1) { truncated = 1; continue; }
             char str[2] = { hide ? '*' : c, '\0' }; 
             printk(str); 
             buf[idx++] = c;
@@ -148,7 +155,8 @@ void read_line(char *buf, int hide, int max_len) {
  */
 void main(void) {
     char user_buf[32];
-    char pass_buf[32];
+    /* First-boot setup and AUTH accept up to 63 password characters. */
+    char pass_buf[64];
     int current_uid = -1;
     char current_username[32];
 
@@ -189,10 +197,10 @@ void main(void) {
     int login_success = 0;
     while (!login_success) {
         printk("login: ");
-        read_line(user_buf, 0, 32); 
+        if (read_line(user_buf, 0, sizeof(user_buf)) < 0) continue;
 
         printk("password: ");
-        read_line(pass_buf, 1, 32);
+        if (read_line(pass_buf, 1, sizeof(pass_buf)) < 0) continue;
 
         int uid = syscall(SYSCALL_AUTH, (int)user_buf, (int)pass_buf, 0);
 
